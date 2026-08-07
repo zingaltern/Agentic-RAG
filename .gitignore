@@ -12,6 +12,9 @@ venv/
 .uv/
 dist/
 build/
+.coverage
+.coverage.*
+htmlcov/
 
 # ---- 运行时数据（Chroma、日志、报告） ----
 data/

@@ -18,7 +18,7 @@ SAMPLE_DIR = ROOT / "tests" / "eval" / "sample_data"
 QA_PAIRS = ROOT / "tests" / "eval" / "qa_pairs.json"
 
 
-def main() -> int:
+def main() -> int:  # pragma: no cover — 手工 CLI（make demo-ingest），依赖真实模型/入库，由 make run + demo-ingest 验证
     config = load_config(DEFAULT_SETTINGS_PATH)
     setup_logging(level=config.logging.level, json=config.logging.json_enabled)
 

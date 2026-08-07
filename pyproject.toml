@@ -36,7 +36,18 @@ dev = [
     "pytest-asyncio",
     "respx",
     "httpx",           # 新增：FastAPI TestClient 需要（第 7 章 /ui 与 API 契约测试）
+    "pytest-cov",      # 新增：覆盖率门禁（W4 验收，行覆盖率 ≥80%）
 ]
+
+[tool.coverage.run]
+source = ["app"]
+omit = ["app/cli/rageval.py"]   # 评测 CLI 走 HTTP/进程内全链路，不以单测覆盖为目标
+
+[tool.coverage.report]
+fail_under = 80
+show_missing = true
+skip_covered = true
+sort = "cover"
 
 [tool.hatch.build.targets.wheel]
 packages = ["app"]

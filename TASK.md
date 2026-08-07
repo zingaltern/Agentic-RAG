@@ -7,7 +7,7 @@
 
 ## 1. 本次任务（由用户/调度方填写）
 
-**里程碑**：`W3`（对应 `DEVELOPMENT.md` 第 9 章）
+**里程碑**：`W4`（对应 `DEVELOPMENT.md` 第 9 章）
 
 **本次要实现的模块（可多选）**：
 
@@ -16,29 +16,25 @@
 - [ ] VectorEngine（BGE-small-zh-v1.5）+ VectorStore（Chroma）（第 5.3、3.2）
 - [ ] Retriever（RRF 混合检索）（第 5.4、3.3）
 - [ ] Ingestion 上传流水线 + Jobs（第 5.10、6.2、6.3）
-- [x] Orchestration 反思循环 + Evaluator/Rewriter（第 5.5、5.6、5.9）
-- [x] 答案生成（DeepSeek）+ 幻觉检测（第 5.7、5.8、3.8、3.7）
-- [x] `/api/query` 全链路 API（第 6.4）
-- [x] `/ui` 测试页五区块（第 7 章）
-- [ ] 测试补齐 + `rage_eval` 评测（第 8 章）
+- [ ] Orchestration 反思循环 + Evaluator/Rewriter（第 5.5、5.6、5.9）
+- [ ] 答案生成（DeepSeek）+ 幻觉检测（第 5.7、5.8、3.8、3.7）
+- [ ] `/api/query` 全链路 API（第 6.4）
+- [ ] `/ui` 测试页五区块（第 7 章）
+- [x] 测试补齐 + `rage_eval` 评测（第 8 章）
 - [ ] 其他：______
 
 **验收判据（DoD，务必可验证）**：
-1. `make test` 全绿（新增 Detector 4 组 / Evaluator 阈值两侧+空上下文 / Orchestration Mock 3 次循环+超时+21001 兜底 / LLM mock / /api/query 路由单测）；
-2. `curl POST /api/query '{"query":"入职满一年可休几天年假？"}'` → code:0、answer 含 [1] 引用、sources 含 员工手册.md、citations.used 非空、iterations≥0；
-3. `curl /api/health` → llm=ok（装配态；llm 未装配时 degraded 不崩溃）；
-4. `/ui` 问答控制台真实返回回答+引用+来源+迭代数+耗时+幻觉徽标，debug 折叠面板显示 debug_trace；
-5. 无密钥泄漏（api_key 只走环境变量）。
+1. pytest 全绿且行覆盖率 ≥80%（`make test` 带 `--cov` 门禁，`fail_under=80`）；
+2. `make eval` 可运行且 `reports/eval-*.md` 非空（§8.3，Hit@5 等指标如实列出低分项）；
+3. `pytest -m integration` 全链路可跑（§8.2：临时 Chroma + 本地 BGE + Stub LLM，不赖外网/真 key）；
+4. `docker compose up` 起 api 后 `/api/health` 全 ok（§10，DoD）；
+5. README 与实现一致（§10.3）；reports/ 产物不入库。
 
 **特殊要求/已知约束**：
-- api_key 只从 `RAG_DEEPSEEK_API_KEY`/`RAG_LLM_API_KEY` 环境变量（.env 已有真实 key），缺失时 wire 优雅降级（llm=None → health not_loaded/degraded），chat 时抛 LLMUnavailableError(30001)。
-- deepseek-reasoner 忽略 reasoning_content 只取 content；超时 30s（llm.timeout_seconds）。
-- 编排同步实现：整体 `request_timeout_seconds=30` 与检索轮次 `search_timeout_seconds=10` 采用时间预算检查（每阶段校验 elapsed），超时抛 21002。
-- `sources[].filename` = 入库时 `Chunk.metadata.source` 原始文件名（6.4 关键契约）；`chunk` 字段文本截断 300 字符（模块内常量，非配置）。
-- filters/collection 透传并贯穿反思循环；collection 非默认值 → ValidationError（MVP 单库）。
-- 反思超限 → code=21001 + 兜底文案「抱歉，暂未找到相关答案…」。
-- synonyms.csv 缺失/损坏 → 内置小词表兜底，启动不失败。
-- 集成手测：DeepSeek 外网可达直接调；嵌入模型走 HF 缓存（HF_ENDPOINT 镜像已有缓存，无需下载）。
+- 不动算法/SPEC；只做：rageval CLI、集成测试、pytest-cov 门禁、Dockerfile+compose、README、Makefile（eval/coverage/docker 目标）。
+- 默认 pytest 过滤 integration（`-m "not integration"`）；集成测试单独验证。
+- 镜像内 `HF_ENDPOINT=https://hf-mirror.com` 兜底（避免模型加载卡外网）；DeepSeek key 走 `RAG_DEEPSEEK_API_KEY` 注入（.env，gitignored）。
+- 覆盖门禁逐模块补测，难覆盖分支 `# pragma: no cover` 少用并说明。
 
 ---
 

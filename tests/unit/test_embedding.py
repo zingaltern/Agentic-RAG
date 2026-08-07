@@ -61,3 +61,27 @@ def test_query_vector_equals_document_vector_of_same_text(stub_factory):
     v1 = emb.embed_query("申请年假")
     v2 = emb.embed_query("申请年假")
     assert v1 == v2
+
+
+def test_model_load_failure_raises_embedding_error():
+    """模型加载失败 → EmbeddingError（30002，1.3 外部 I/O 异常包装）。"""
+    def boom():
+        raise RuntimeError("模型下载失败")
+
+    emb = LocalBGEV15Embedding(model_factory=boom)
+    with pytest.raises(EmbeddingError, match="加载失败"):
+        emb.ready()
+
+
+def test_encode_failure_raises_embedding_error():
+    """向量化失败 → EmbeddingError（30002）。"""
+
+    class _BadModel(StubSentenceModel):
+        def encode(self, sentences, **kwargs):
+            raise RuntimeError("encode boom")
+
+    emb = LocalBGEV15Embedding(model_factory=lambda: _BadModel())
+    with pytest.raises(EmbeddingError, match="文档向量化失败"):
+        emb.embed_documents(["文本"])
+    with pytest.raises(EmbeddingError, match="查询向量化失败"):
+        emb.embed_query("查询")

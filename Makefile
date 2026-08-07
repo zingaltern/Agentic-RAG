@@ -10,7 +10,7 @@ PIP_DEFAULT_TIMEOUT ?= 120
 # HuggingFace 模型下载镜像（首次加载嵌入模型联网下载用；可用环境变量覆盖）
 export HF_ENDPOINT ?= https://hf-mirror.com
 
-.PHONY: bootstrap run test demo-query clean
+.PHONY: bootstrap run test eval coverage integration demo-ingest demo-query docker-up docker-down clean
 
 ## 首次：创建虚拟环境（python3.11 优先）并安装依赖（含 dev 依赖）
 bootstrap:
@@ -27,9 +27,21 @@ bootstrap:
 run:
 	$(PYTHON) -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
-## 跑全部单测
+## 跑全部单测（含覆盖率门禁 ≥80%，默认过滤 integration）
 test:
-	$(PYTHON) -m pytest tests -q
+	$(PYTHON) -m pytest tests -m "not integration" --cov=app --cov-report=term-missing -q
+
+## 仅覆盖率报告（不设失败门禁）
+coverage:
+	$(PYTHON) -m pytest tests -m "not integration" --cov=app --cov-report=term-missing -q --cov-fail-under=0
+
+## 评测（8.3）：进程内模式跑 qa_pairs，输出 reports/eval-*.md
+eval:
+	$(PYTHON) -m app.cli.rageval --in-process
+
+## 集成测试（8.2）：需要本机 BGE 模型缓存（不联网下载）
+integration:
+	$(PYTHON) -m pytest tests/integration -m integration -q
 
 ## 入库 demo 文档并检索验证（W2 验收）
 demo-ingest:
@@ -38,6 +50,14 @@ demo-ingest:
 ## 一轮问答冒烟（W3 交付后可用）
 demo-query:
 	@echo "⚠️  demo-query 依赖 /api/query 全链路（W3 交付），当前周次暂不可用"
+
+## Docker（可选）：构建并启动 api 容器（含 /ui；嵌入模型首次启动在容器内下载，需 HF 镜像兜底）
+docker-up:
+	docker compose up --build -d api
+	@echo "ℹ️  健康检查：curl http://localhost:8000/api/health"
+
+docker-down:
+	docker compose down
 
 ## 清理虚拟环境与运行时数据（谨慎）
 clean:

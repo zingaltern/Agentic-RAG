@@ -121,6 +121,16 @@ def test_corrupt_docx():
         _parse_bytes(b"not a zip", "broken.docx")
 
 
+def test_corrupt_xlsx():
+    with pytest.raises(ParseError):
+        _parse_bytes(b"not a zip", "broken.xlsx")
+
+
+def test_corrupt_pptx():
+    with pytest.raises(ParseError):
+        _parse_bytes(b"not a zip", "broken.pptx")
+
+
 def test_empty_file_ok():
     doc = _parse_bytes(b"", "empty.txt")
     assert doc.text == ""

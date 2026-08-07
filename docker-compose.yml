@@ -1,0 +1,20 @@
+# Agentic RAG 最小部署集（DEVELOPMENT.md 10.1/10.2）
+# MVP 用 embedded Chroma（进程内 SQLite），无需独立 chromadb 服务。
+services:
+  api:
+    build: .
+    container_name: rag-api
+    ports:
+      - "8000:8000"
+    environment:
+      HF_ENDPOINT: https://hf-mirror.com        # 嵌入模型下载兜底
+    env_file:
+      - .env                                     # RAG_DEEPSEEK_API_KEY 等（gitignored，不入镜像）
+    volumes:
+      - ./data:/srv/app/data                     # Chroma 持久化
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s                          # 首次启动可能下载嵌入模型
