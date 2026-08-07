@@ -95,28 +95,52 @@ $("btn-query").addEventListener("click", async () => {
   $("answer-box").classList.remove("hidden");
   $("answer-meta").classList.remove("hidden");
   $("sources-box").classList.remove("hidden");
+  const d = res.data || {};
   if (res.code !== 0) {
-    $("answer-box").textContent = res.message;
-    $("answer-meta").textContent = "";
+    $("answer-box").textContent = d.answer || res.message;
+    $("answer-meta").textContent = `[错误码 ${res.code}] ${res.message}`;
     $("sources-box").textContent = "";
-    $("debug-box").textContent = "";
+    renderDebug(d.debug_trace);
     return;
   }
-  const d = res.data;
   $("answer-box").textContent = d.answer || "";
   const hb = d.hallucination_check === "passed"
-    ? '<span class="badge badge-ok">幻觉检测通过</span>'
-    : '<span class="badge badge-down">幻觉检测未通过</span>';
+    ? '<span class="badge badge-ok">幻觉检测通过 (passed)</span>'
+    : '<span class="badge badge-degraded">幻觉检测未通过 (suspected)</span>';
+  const citations = d.citations || {};
   $("answer-meta").innerHTML =
-    `引用 ${JSON.stringify(d.citations || {})} · 迭代 ${d.iterations} · 耗时 ${d.elapsed_ms}ms ${hb}`;
+    `引用 ${JSON.stringify(citations.used || [])} · 已证率 ${(citations.confirmed ?? 0).toFixed(2)} · ` +
+    `迭代 ${d.iterations} · 耗时 ${d.elapsed_ms}ms ${hb}`;
   $("sources-box").innerHTML = "<strong>来源：</strong><ol>" +
     (d.sources || []).map((s) =>
-      `<li>[${s.document_id}] ${s.filename}（page=${s.page ?? "-"}，score=${s.score.toFixed(3)}）<br>${s.chunk || ""}</li>`
+      `<li><b>${s.filename || s.document_id}</b>（page=${s.page ?? "-"}，score=${(s.score ?? 0).toFixed(3)}）<br>${(s.chunk || "").slice(0, 200)}</li>`
     ).join("") + "</ol>";
-  $("debug-box").textContent = d.debug_trace
-    ? JSON.stringify(d.debug_trace, null, 2)
-    : "（未返回 debug_trace）";
+  renderDebug(d.debug_trace);
 });
+
+/** ④ 反思过程：debug_trace 折叠面板（debug:true 时展示每次迭代得分与改写）。 */
+function renderDebug(trace) {
+  const box = $("debug-box");
+  if (!trace || trace.length === 0) {
+    box.innerHTML = "发送带 debug=true 的提问后，此处展示每次迭代的评估得分与改写。";
+    return;
+  }
+  box.innerHTML = trace.map((step) => {
+    if (step.rewritten !== undefined) {
+      return `<p><b>iter ${step.iter}</b> 改写：${escapeHtml(step.rewritten)}</p>`;
+    }
+    if (step.llm_ms !== undefined) {
+      return `<p><b>iter ${step.iter}</b> LLM 耗时 ${step.llm_ms}ms · 检测 ${JSON.stringify(step.detection)}</p>`;
+    }
+    return `<p><b>iter ${step.iter}</b> query=${escapeHtml(step.query)} · ` +
+           `evaluator_score=${step.evaluator_score} · reason=${step.reason} · 候选 ${step.candidates}条</p>`;
+  }).join("");
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
 
 /* ---------- ⑤ 插件与健康 ---------- */
 async function loadHealth() {

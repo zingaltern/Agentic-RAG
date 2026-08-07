@@ -14,13 +14,14 @@ from typing import Any
 from uuid import uuid4
 
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api import documents, health, jobs, plugins, query
 from app.api.utils import fail
 from app.core.config import DEFAULT_SETTINGS_PATH, SystemConfig, load_config
-from app.core.errors import AppError, InternalError
+from app.core.errors import AppError, InternalError, ValidationError
 from app.core.logging import get_logger, set_trace_id, setup_logging
 from app.core.registry import Dependencies, wire
 
@@ -79,6 +80,14 @@ def create_app(settings_path: str = DEFAULT_SETTINGS_PATH,
     @app.exception_handler(AppError)
     async def app_error_handler(request: Request, exc: AppError) -> JSONResponse:
         return JSONResponse(status_code=200, content=fail(exc.code, exc.message))
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+        # 参数校验失败 → 40001（6.7 错误码表）
+        first = exc.errors()[0] if exc.errors() else {}
+        loc = ".".join(str(p) for p in first.get("loc", []))
+        return JSONResponse(status_code=200, content=fail(
+            ValidationError.code, f"参数校验失败: {loc} {first.get('msg', '')}"))
 
     @app.exception_handler(Exception)
     async def unhandled_error_handler(request: Request, exc: Exception) -> JSONResponse:

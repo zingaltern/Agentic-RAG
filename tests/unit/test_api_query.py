@@ -1,0 +1,88 @@
+"""API /api/query 单测（DEVELOPMENT.md 6.4）：桩嵌入 + 桩 LLM，真实编排链路。"""
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+from fastapi.testclient import TestClient
+
+from app.application import create_app
+from app.core.config import load_config
+from app.core.domain import DetectionResult
+from tests.unit.fakes import StubEmbedding
+
+ANSWER = "根据员工手册，年假需提前 3 个工作日通过 OA 系统申请[1]。"
+
+
+class StubLLM:
+    def chat(self, messages, temperature=0.1, max_tokens=1024):
+        return ANSWER
+
+
+class StubDetector:
+    def detect(self, answer, context):
+        return DetectionResult(verified=True, suspected=[], verified_rate=1.0)
+
+
+@pytest.fixture()
+def q_client(tmp_path):
+    """组件全装配（真实 Chroma 临时目录）+ 桩 embedding/llm/detector。"""
+    config = load_config()
+    config.vector_store.persist_dir = str(tmp_path / "chroma")
+    app = create_app(
+        config=config, components=True,
+        embedding=StubEmbedding(dimension=512),
+        llm=StubLLM(),
+        detector=StubDetector(),
+    )
+    # 入库一份文档供检索
+    sample = Path(__file__).resolve().parent.parent / "eval" / "sample_data" / "员工手册.md"
+    deps = app.state.deps
+    deps.pipeline.ingest(sample.read_bytes(), "员工手册.md")
+    with TestClient(app) as c:
+        yield c
+
+
+def test_query_full_response_shape(q_client):
+    resp = q_client.post("/api/query", json={"query": "年假怎么申请？"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["code"] == 0
+    data = body["data"]
+    assert set(data) >= {"answer", "sources", "citations", "hallucination_check",
+                         "iterations", "elapsed_ms"}
+    assert data["answer"] == ANSWER
+    assert "[1]" in data["answer"]
+    assert data["citations"]["used"] == ["[1]"]
+    assert data["citations"]["confirmed"] == 1.0
+    assert data["hallucination_check"] == "passed"
+    assert data["iterations"] == 0
+    assert isinstance(data["elapsed_ms"], int)
+    assert data["sources"], "必须返回来源"
+    assert data["sources"][0]["filename"] == "员工手册.md", "filename 必须等于入库文件名"
+
+
+def test_query_debug_trace(q_client):
+    body = q_client.post("/api/query", json={"query": "年假怎么申请？", "debug": True}).json()
+    assert body["code"] == 0
+    trace = body["data"].get("debug_trace")
+    assert trace, "debug=true 必须返回 debug_trace"
+    assert trace[0]["iter"] == 0 and "evaluator_score" in trace[0]
+
+
+def test_query_error_mapping(q_client):
+    """LLM 抛 30001 → 对外 code=30001（LLMUnavailableError）。"""
+    from app.core.errors import LLMUnavailableError
+
+    class _FailLLM(StubLLM):
+        def chat(self, messages, temperature=0.1, max_tokens=1024):
+            raise LLMUnavailableError("模拟 LLM 不可用")
+
+    q_client.app.state.deps.orchestration.llm = _FailLLM()
+    body = q_client.post("/api/query", json={"query": "年假怎么申请？"}).json()
+    assert body["code"] == 30001
+
+
+def test_query_validation_missing_query(q_client):
+    body = q_client.post("/api/query", json={}).json()
+    assert body["code"] == 40001
