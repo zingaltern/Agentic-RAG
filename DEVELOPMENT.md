@@ -128,6 +128,8 @@ class Document:
     filename: str
     title: str
     content_hash: str              # sha256(文件原始字节)
+    text: str = ""                 # 解析出的归一化 UTF-8 纯文本（5.1 需要；2.1 原清单遗漏，W1 修订补充）
+    metadata: dict[str, Any] = field(default_factory=dict)  # source/kind/page/author 等（见下）
     chunks: list[Chunk] = field(default_factory=list)
 
 @dataclass
@@ -359,6 +361,11 @@ embedding:
   device: auto                   # auto|cpu|mps（MPS 可选，若不稳定回 cpu）
   batch_size: 64
   dimension: 0                   # 0 表示由模型自动识别（运行时回填实际维度）
+
+chunker:                          # 5.2 引用此配置键（W1 修订补充）
+  parent_target_tokens: 512       # 父块目标 token 数
+  child_target_tokens: 128        # 子块目标 token 数
+  token_char_ratio: 1.8           # 中文 token≈len(text)/1.8 估算
 
 vector_store:
   provider: chroma

@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Agentic RAG · 测试台</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>Agentic RAG 智能知识库 · 测试台</h1>
+    <div id="health-badge" class="badge badge-pending">健康检查加载中…</div>
+  </header>
+
+  <main>
+    <!-- 区块一：上传 -->
+    <section id="block-upload" class="card">
+      <h2>① 文档上传</h2>
+      <div class="row">
+        <input type="file" id="file-input" accept=".pdf,.docx,.xlsx,.pptx,.md,.txt">
+        <button id="btn-upload">上传</button>
+      </div>
+      <p id="upload-status" class="status">选择文件后上传（异步 Job 入库，W2 交付）</p>
+    </section>
+
+    <!-- 区块二：文档管理 -->
+    <section id="block-documents" class="card">
+      <h2>② 文档管理</h2>
+      <button id="btn-refresh-docs">刷新列表</button>
+      <table id="doc-table">
+        <thead><tr><th>document_id</th><th>文件名</th><th>大小</th><th>操作</th></tr></thead>
+        <tbody id="doc-tbody"><tr><td colspan="4" class="muted">暂无文档（W2 接入）</td></tr></tbody>
+      </table>
+    </section>
+
+    <!-- 区块三：问答控制台 -->
+    <section id="block-query" class="card">
+      <h2>③ 问答控制台</h2>
+      <textarea id="query-input" rows="3" placeholder="输入问题，如：如何申请年假？"></textarea>
+      <div class="row">
+        <label><input type="checkbox" id="debug-toggle" checked> debug（反思过程）</label>
+        <button id="btn-query">提问</button>
+      </div>
+      <div id="answer-box" class="answer hidden"></div>
+      <div id="answer-meta" class="meta hidden"></div>
+      <div id="sources-box" class="sources hidden"></div>
+    </section>
+
+    <!-- 区块四：反思过程（debug） -->
+    <section id="block-debug" class="card">
+      <h2>④ 反思过程（debug_trace）</h2>
+      <div id="debug-box" class="debug">发送带 debug=true 的提问后，此处展示每次迭代的评估得分与改写。</div>
+    </section>
+
+    <!-- 区块五：插件与健康 -->
+    <section id="block-plugins" class="card">
+      <h2>⑤ 插件与健康</h2>
+      <div class="row">
+        <button id="btn-health">刷新健康状态</button>
+      </div>
+      <table id="plugin-table">
+        <thead><tr><th>模块</th><th>当前 provider</th></tr></thead>
+        <tbody id="plugin-tbody"></tbody>
+      </table>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

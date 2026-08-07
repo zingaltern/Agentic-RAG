@@ -1,0 +1,57 @@
+/* Agentic RAG 测试页（第 7 章：五个区块与 API 一一对应） */
+:root {
+  --bg: #f5f6f8;
+  --card: #ffffff;
+  --border: #e2e5ea;
+  --primary: #2563eb;
+  --ok: #16a34a;
+  --warn: #d97706;
+  --err: #dc2626;
+  --muted: #6b7280;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  background: var(--bg);
+  color: #1f2937;
+}
+header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 16px 24px; background: var(--card); border-bottom: 1px solid var(--border);
+}
+h1 { font-size: 20px; margin: 0; }
+main { max-width: 960px; margin: 24px auto; padding: 0 16px; }
+.card {
+  background: var(--card); border: 1px solid var(--border); border-radius: 10px;
+  padding: 16px 20px; margin-bottom: 16px;
+}
+.card h2 { font-size: 15px; margin: 0 0 12px; }
+.row { display: flex; gap: 8px; align-items: center; margin: 8px 0; flex-wrap: wrap; }
+button {
+  background: var(--primary); color: #fff; border: none; border-radius: 6px;
+  padding: 8px 14px; cursor: pointer; font-size: 14px;
+}
+button:hover { opacity: 0.9; }
+button.danger { background: var(--err); }
+input[type="file"], textarea { width: 100%; padding: 8px; border: 1px solid var(--border); border-radius: 6px; font-size: 14px; }
+textarea { font-family: inherit; resize: vertical; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); word-break: break-all; }
+.muted { color: var(--muted); }
+.status { color: var(--muted); font-size: 13px; }
+.badge { padding: 4px 10px; border-radius: 20px; font-size: 12px; color: #fff; }
+.badge-pending { background: var(--warn); }
+.badge-ok { background: var(--ok); }
+.badge-degraded { background: var(--warn); }
+.badge-down { background: var(--err); }
+.answer { background: #f0f7ff; border: 1px solid #bfdbfe; border-radius: 8px; padding: 12px; margin: 10px 0; white-space: pre-wrap; }
+.meta { font-size: 13px; color: var(--muted); margin: 6px 0; }
+.sources { font-size: 13px; }
+.sources ol { margin: 6px 0 6px 20px; }
+.debug { background: #fafafa; border: 1px dashed var(--border); border-radius: 8px; padding: 12px; font-size: 13px; white-space: pre-wrap; }
+.error-bar {
+  background: #fef2f2; border: 1px solid #fecaca; color: var(--err);
+  border-radius: 8px; padding: 10px 12px; margin: 10px 0; font-size: 13px;
+}
+.hidden { display: none; }

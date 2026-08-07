@@ -1,0 +1,49 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agentic-rag"
+version = "1.0.0"
+description = "Agentic RAG 智能知识库系统（DeepSeek + BGE + Chroma + FastAPI）"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    # API 框架与配置（DEVELOPMENT.md 1.1 表）
+    "fastapi>=0.110",
+    "uvicorn[standard]",
+    "python-multipart",            # 新增：POST /api/documents/upload 表单解析需要
+    "pydantic>=2.6",
+    "pydantic-settings>=2.6",
+    "PyYAML>=6.0",                     # 新增：configs/settings.yaml 加载（第 4 章配置体系需要，属必要引入）
+    # 向量化与向量库
+    "sentence-transformers>=3.0",
+    "chromadb>=0.5",
+    # 混合检索与中文处理
+    "rank-bm25>=0.2",
+    "jieba>=0.42",
+    # 文档解析
+    "pymupdf",
+    "python-docx",
+    "openpyxl",
+    "python-pptx",
+    # LLM（OpenAI 兼容协议）
+    "openai>=1.30",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "respx",
+    "httpx",           # 新增：FastAPI TestClient 需要（第 7 章 /ui 与 API 契约测试）
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: 需要真实 Chroma/BGE/LLM 资源的集成测试（W2 起）",
+]
+addopts = "-q"

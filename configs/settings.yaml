@@ -1,0 +1,72 @@
+# Agentic RAG 系统配置（DEVELOPMENT.md 第 4 章）
+# 优先级：内置默认 < 本文件 < RAG_ 前缀环境变量
+env: dev
+
+api:
+  host: 0.0.0.0
+  port: 8000
+  auth_enabled: false
+
+embedding:
+  provider: local_bge_v15          # local_bge_v15（MVP）| bge_m3 | remote_api
+  model_name: BAAI/bge-small-zh-v1.5
+  query_instruction: "为这个句子生成表示以用于检索相关文章："
+  device: auto                     # auto|cpu|mps
+  batch_size: 64
+  dimension: 0                     # 0 = 由模型自动识别（运行时回填实际维度）
+
+chunker:                           # 父子分块（DEVELOPMENT.md 5.2）
+  parent_target_tokens: 512
+  child_target_tokens: 128
+  token_char_ratio: 1.8
+
+vector_store:
+  provider: chroma
+  persist_dir: ./data/chroma
+  collection: kb
+
+retriever:
+  provider: hybrid_rrf
+  top_k: 20
+  candidates: 50
+  rr_fused_k: 60
+
+reranker:
+  provider: identity
+  rerank_top_k: 5
+
+evaluator:
+  provider: rule
+  rule_threshold: 0.45
+  top_n: 5
+
+rewriter:
+  provider: rule
+  synonyms_csv: ./configs/synonyms.csv
+
+detector:
+  provider: citation
+  similarity_threshold: 0.8
+
+llm:
+  provider: deepseek
+  model: deepseek-chat
+  base_url: https://api.deepseek.com
+  temperature: 0.1
+  max_tokens: 1024
+  timeout_seconds: 30
+  # api_key 只允许通过环境变量注入（RAG_DEEPSEEK_API_KEY / RAG_LLM_API_KEY），禁止写入本文件
+
+orchestration:
+  max_reflection_iterations: 3
+  search_timeout_seconds: 10
+  request_timeout_seconds: 30
+
+ingestion:
+  max_file_size_mb: 50
+  allowed_extensions: [pdf, docx, xlsx, pptx, md, txt]
+  embed_batch_size: 64
+
+logging:
+  level: info
+  json: true
