@@ -1,0 +1,30 @@
+# ---- 环境与密钥（禁止入库） ----
+.env
+.env.local
+.env.*.local
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.uv/
+dist/
+build/
+
+# ---- 运行时数据（Chroma、日志、报告） ----
+data/
+reports/
+*.log
+
+# ---- 本地模型缓存（在仓库外，保险起见也排除） ----
+.cache/
+
+# ---- macOS ----
+.DS_Store
+
+# ---- IDE / 编辑器 ----
+.idea/
+.vscode/
+*.swp

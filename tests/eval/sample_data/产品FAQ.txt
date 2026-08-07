@@ -1,0 +1,13 @@
+LightCube 3.0 数据中台 产品 FAQ
+
+1. 兼容的数据源
+   支持 19 种数据源：MySQL、PostgreSQL、Kafka、SQL Server、Oracle、Hive、Redis、MongoDB、Elasticsearch 等。
+
+2. 并发与性能
+   默认网关并发：500 请求/秒；可按需水平扩容。
+
+3. 部署方式
+   支持 Docker 单容器部署；支持 Kubernetes 集群部署；提供 2.x → 3.0 数据迁移指令。
+
+4. 安全能力
+   内置角色权限控制、数据脱敏、操作审计日志。
