@@ -119,12 +119,6 @@ def wire(config: "SystemConfig", components: bool = True, *,
         )
     deps.retriever = retriever
 
-    # 纯本地组件：直接装配（可注入 stub 覆盖）
-    deps.reranker = reranker or _instantiate("reranker", config.reranker.provider, config.reranker.model_dump())
-    deps.evaluator = evaluator or _instantiate("evaluator", config.evaluator.provider, config.evaluator.model_dump())
-    deps.rewriter = rewriter or _instantiate("rewriter", config.rewriter.provider, config.rewriter.model_dump())
-    deps.detector = detector or _instantiate("detector", config.detector.provider, config.detector.model_dump())
-
     # LLM：缺 API Key 或 provider 未实现 → llm=None 优雅降级（health 显示 not_loaded/degraded）
     if llm is None and config.llm.api_key:
         try:
@@ -133,6 +127,15 @@ def wire(config: "SystemConfig", components: bool = True, *,
             logger.warning("LLM 装配失败，降级为未装配（health 将显示 not_loaded）：%s", exc)
             llm = None
     deps.llm = llm
+
+    # 纯本地组件：直接装配（可注入 stub 覆盖；embedding/llm 注入给 semantic/llm 系 provider）
+    deps.reranker = reranker or _instantiate("reranker", config.reranker.provider, config.reranker.model_dump())
+    deps.evaluator = evaluator or _instantiate(
+        "evaluator", config.evaluator.provider, {**config.evaluator.model_dump(), "embedding": embedding})
+    deps.rewriter = rewriter or _instantiate(
+        "rewriter", config.rewriter.provider, {**config.rewriter.model_dump(), "llm": llm})
+    deps.detector = detector or _instantiate(
+        "detector", config.detector.provider, {**config.detector.model_dump(), "embedding": embedding})
 
     from app.services.documents_store import DocumentsStore
     from app.services.ingestion import IngestionPipeline

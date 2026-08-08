@@ -783,6 +783,175 @@ class PluginRegistry:
 
 ---
 
+## 第 13 章 第二阶段：效果优化与多端（Phase 2 规格）
+
+> 说明：MVP（第 1~12 章）已交付并通过验收。本章为**第二阶段设计与验收规格**，是后续 W5~W8 开发的唯一依据。
+> 冲突时：本章内节间以"目标值/验收判据"列明的实测流程为准；与旧章冲突处，按第 13.1 的度量协议裁定。
+
+### 13.1 目标与度量协议
+
+- 阶段目标：把"检索-评估-生成"从 MVP 原型提升到可对比衡量的生产基线，并交付 **网页 + 桌面双形态** 前端。
+- **度量协议（硬要求）**：每完成一个里程碑，必须执行 `make eval` 存档报告 `reports/eval-{ts}.md`，并与基线报告对比后再回复"达标/不达标"。没对比结论的里程碑一律不算完成。
+- 基线（MVP 实测，2026-08-08）：通过率 18/21；Hit@5 / ContextPrecision / ContextRecall / AnswerRelevancy 均为 100%；**Faithfulness=0%**（全部 suspected）；no_answer 3 条判定口径与实现不一致（期望 21001，实际 code=0+"未找到相关依据"）。
+- **本阶段目标值**（以实测校准，不留拍脑袋数字）：
+  - 新增并记录 `Hit@1` 基线，W5 后 ≥ 基线并逐步提升；
+  - Faithfulness（direct 类）≥ 60%（起点 0%）；
+  - 口语化/改写类通过率 ≥ 80%；
+  - no_answer 判据按 13.6 修订后 3 条全部判定通过；
+  - 多知识库隔离自动化用例全通过。
+
+### 13.2 检索精排（Reranker）
+
+- 现状：`reranker.provider: identity`（原序直通）——相关块常居第 2，整体效果差的头号原因。
+- 目标实现：新增适配器 `app/adapters/reranker/bge_reranker.py`（provider 名 `bge_reranker`）。
+  - 模型：`BAAI/bge-reranker-v2-m3`（多语言跨编码器）；若模型体积/CPU 延迟不可接受，配置改 `BAAI/bge-reranker-base`（实现无需改动）。
+  - 实现：`sentence-transformers.CrossEncoder`（已有依赖，无需新增包）；对（query, 候选块）打分后降序；`scores` 重定序返回 `ScoredChunk`。
+- 编排接入：检索 RRF 输出（`retriever.top_k=20` 候选）→ **rerank** → 取 `rerank_top_k=5` 进入评估器。`identity` 保留为回退 provider。
+- 配置字段（见 13.8）：`model_name`、`rerank_top_k`（5）、`batch_size`（32）、`device`（auto）。
+- 测试：单测（确定性打分排序 + 空输入 + 维度不影响文本）；并记 `Hit@1` 基准前后对比。
+
+### 13.3 评估·改写·闭环（Evaluator / Rewriter / Orchestration）
+
+#### 13.3.1 Evaluator：`rule` → `semantic_v2`
+- 现状 `rule`=`0.7×coverage+0.3×length` 纯字面，问法一变即崩。
+- 新增 `evaluator.provider: semantic_v2`（`app/adapters/evaluator/semantic_v2.py`）：
+  - 主信号：query 与 top_n 块嵌入余弦，做**相对评分**（如候选集内 z-score/分位），不依赖绝对阈值；
+  - 副信号：保留字面覆盖（去停用词）修正；
+  - 输出 `score` 与 `passed`（阈值参数化 `semantic_v2_threshold`，默认 0.45，用 qa_pairs 校准）。
+- 与 13.2 衔接：评估输入必须是 **rerank 后的 top_n**。
+
+#### 13.3.2 Rewriter：新增 `llm` provider
+- 新增 `app/adapters/rewriter/llm_rewriter.py`（`rewriter.provider: llm`）：
+  - 输入 `(query, reason)`，输出 1~3 个改写/扩句变体（含代词消解，如"我是哪个大学毕业的"→"我的毕业院校"）；
+  - 超时 30s；失败/超时/限流 → **自动回退** `rule` 改写；
+  - 成本控制：仅当 `result.passed=False` 才调用。
+- **多路融合**：循环内对每个变体分别检索，候选用 `rrf_fusion`（5.4 已实现）融合后进入该轮评估。
+
+#### 13.3.3 循环硬约束（修订 §5.9）
+1. **每轮 query 必须与上轮不同**（文本 diff 校验；若不变则自动换路：BM25-only / 向量-only / 去停用词重切）；
+2. `max_reflection_iterations=3`、`search_timeout_seconds=10`、`request_timeout_seconds=30` 保持；
+3. `filters`/`kb_id`（13.5）必须贯穿所有变体检索；
+4. LLM 改写不可用 → 回退规则；规则也无变化时仍计入迭代（防死循环，超限走 21001 兜底）。
+
+### 13.4 幻觉检测 v2（Detector）
+
+- 现状 `detector.provider: citation`（字符 2-gram Jaccard ≥0.8）——对改写/总结句几乎全误报（Faithfulness 0%）。
+- 新增 `detector.provider: semantic`（`app/adapters/detector/semantic_verifier.py`）：
+  1. 规则不变：按 `。！？` 切句、正则 `[(\d+)]` 取引用、无引用整句 → suspected；
+  2. 判定升级：句⊕引用块的**嵌入余弦**替代字符 2-gram，参数 `similarity_threshold`（起步 0.6 用 qa_pairs 校准）；
+  3. 输出 `verified/verified_rate/suspected` 契约不变。
+- 兼容：`citation|semantic` 可配置切换（回退模式）。
+- 验收：Faithfulness（direct）≥60%，且 suspected 不再覆盖全部口语句。
+
+### 13.5 多知识库（通用化，一库一 collection）
+
+- 模型：**kb_id → Chroma collection（`rag_<kb_id>`）一一映射，物理隔离**；完全复用现有 collection 贯穿机制。
+- 服务：`app/services/kb_store.py`（`KbStore`）：内存 + 持久化映射文件 `data/kb.json`（或 sqlite）；字段 `kb_id/name/description/collection/created_at`；内置默认库 `default`（不可删）。
+- API（新增 `/api/kbs`）：
+  | 方法 | 路径 | 行为 |
+  |---|---|---|
+  | GET | `/api/kbs` | 列表（含 `default`） |
+  | POST | `/api/kbs` | `{name, description?}` → `{kb_id}`（新建集合） |
+  | DELETE | `/api/kbs/{kb_id}` | 删除映射 + `drop_collection` 级联；拒绝删 `default` |
+- 上传：`POST /api/documents/upload` 增加可选表单字段 `kb_id`（缺省 `default`）；入库时写 `Chunk.metadata.kb_id`。
+- 问答：`POST /api/query` 增加可选 `kb_id`（与 `collection` 二选一，`kb_id` 优先；缺省 `default`）；`filters` 仅限库内。
+- 隔离保障：检索双路（BM25/向量）都按 kb 的 collection 作用域执行；`KbStore` 校验查询/上传目标库存在，否则一律按参数错误拒绝。
+- 验收用例（自动化）：A/B 两库入库语义相同文档 → A 库提问不得返回 B 库 sources；跨库操作错误提示；`default` 删除被拒。
+
+### 13.6 评测体系 v2
+
+- `tests/eval/` 扩容至 **100+ 条**，按库分目录 `qa_pairs/{default,docs}/*.jsonl`，类型覆盖 direct/rewrite/no_answer/no_invent/口语/表格/多文档。
+- **no_answer 判据修订**：`pass =（返回 code0 且 answer 含"未找到相关依据"类文案）∨（返回 21001）`。
+- 指标新增：`Faithfulness` 分类型统计、`Hit@1`、按库汇总；报告输出与本阶段基线 diff 列。
+- `rag_eval` CLI 参数：`--kb`（按库评测）、`--baseline <path>`（对比模式）。
+
+### 13.7 前端与多端（前后端分离）
+
+- **决策**：前后端彻底分离。前端工程 `frontend/`：**Vue3 + Vite + Vue Router + Pinia + Element Plus**；桌面端复用同一 SPA。
+- 页面（五区块升级）：
+  1. 问答控制台：库选择（默认 default）、提问、引用 `[N]`、来源、迭代/耗时、幻觉徽标、debug 反思面板；
+  2. 文档管理：按库上传（带 `kb_id`）+ 列表 + 删除；
+  3. 知识库管理：`/api/kbs` CRUD；
+  4. 设置总览：`/api/health`、`/api/plugins/status`；
+  5. 错误码提示条（沿用 `api()` 语义）。
+- **Web 模式**：dev 用 vite proxy（`/api → http://127.0.0.1:8000`，CORS 放行 `http://localhost:5173`）；生产 `vite build` 产出 `frontend/dist`，由 FastAPI `StaticFiles` 挂载 `/`（或 nginx），见 13.8。
+- **桌面模式（Electron，目标=内置拉起后端）**：
+  - `frontend/electron/main.js`：启动时：① 探测目标端口（默认 8000，占用自动换）→ ② 以项目 `.venv` 拉起 `uvicorn app.main:app`（参数化）→ ③ 轮询 `/api/health` 就绪后开窗（带加载 splash）→ ④ 退出时级联停止后端；
+  - 设置内预留"连接外部后端"（可填 127.0.0.1:port，不本机拉起）；
+  - 打包 `electron-builder`（dmg/exe）；Python 运行时捆绑列为后续演进（不与 MVP 绑定阻塞）。
+- 旧 `web/` 测试页保留为冒烟/降级入口（README 注明），新 SPA 上线后逐步取代。
+
+### 13.8 配置与迁移（settings.yaml 增补草案）
+
+```yaml
+reranker:
+  provider: identity            # identity(现状) | bge_reranker(W5)
+  model_name: BAAI/bge-reranker-v2-m3
+  rerank_top_k: 5
+evaluator:
+  provider: rule                # rule(现状) | semantic_v2
+  semantic_v2_threshold: 0.45
+rewriter:
+  provider: rule                # rule(现状) | llm(W5)
+detector:
+  provider: citation            # citation(现状) | semantic
+  semantic_similarity_threshold: 0.6
+api:
+  cors_origins: ["http://localhost:5173"]
+kb:
+  default_kb: default
+  persist_file: ./data/kb.json
+frontend:
+  dev_port: 5173
+  dist_dir: ./frontend/dist
+```
+
+- 注：以上为 W5~W8 落地目标。**在对应组件实现合并前，settings.yaml 不写入新键**（未识别键会被静默忽略，禁止留隐患）；各模块按 13.2~13.5 章节切换 provider，`identity/rule/citation` 为可回退默认。
+- 依赖：reranker 用 `sentence-transformers.CrossEncoder`（现有依赖，零新增）；如改 `FlagEmbedding` 须先登记 `pyproject` 并说明理由（§10 附录约束）。
+
+### 13.9 演进路线与 DoD（W5~W8）
+
+| 周 | 范围 | DoD（全部满足才可交付） |
+|---|---|---|
+| W5 | 13.2 + 13.3 + 13.4（P0 后端三件套） | 「单测绿」；provider 可配置切换；`make eval` 报告含 Hit@1 新基线；Faithfulness(direct)>0；与 13.1 基线 diff 报告 |
+| W6 | 13.5 + 13.6（多库 + 评测扩容） | `/api/kbs` CRUD 全绿；隔离用例全过；qa_pairs ≥100 条、`make eval` 全绿（no_answer 修订判据）；pytest 绿 |
+| W7 | 13.7 Web 前端 | `frontend/dist` 由 FastAPI 托管；五区块可用；CORS 生效；前端冒烟（不依赖桌面）；README 更新 |
+| W8 | 13.7 Electron 桌面 + 生产项 | 桌面内置拉起后端：启动/就绪/退出三步走通；双端同页面可用；`make desktop` 可跑；文档齐（含 README 双端指引） |
+
+> 每个里程碑交付时：commit 说明中标注 `PHASE2-Wn`；若验收未过，下个 Agent 会话从本报告的"未达标项"续修，禁止另起炉灶。
+
+### 13.10 可选适配器包（P3 预留规格，暂不实现）
+
+> 业务人员真实文档中常含图片、表格、复杂版式；为不挤压 W5~W8 主线，本节的五类扩展**只立规格、不排期**。何时启动以 13.1 度量协议 + 用户决策为准。全部属于第 12 章「深度 B」：仅新增/扩展 `app/adapters/` 下实现，接口契约与核心编排不动。
+
+1. **OCR 通道（扫描件/图片型 PDF）**
+   - 触发：`_parse_pdf` 抽取文本层为空或字密度极低 → 标记 `needs_ocr`，走 OCR 适配器（如 PaddleOCR 本地 / 可选商用），产物仍为归一化纯文本 + `metadata.ocr=true`。
+   - 约束：OCR 结果评估集要单列（识别错字会直接影响检索与引用）；体积/启动慢 → 懒加载 + 配置开关（`parser.ocr.enabled=false` 默认关）；不强制，拒绝时提示"扫描版请先转文本"。
+   - 验收：10 份含图 PDF 抽出且检索可命中 ≥ 阈值。
+
+2. **表格结构保留（表格感知解析与分块）**
+   - Parser 对 xlsx/pdf(表格区)/docx 表输出"结构化文本标记"（如 `|列名|值|`）或 JSON 行、表头单独成块；Chunker 按表块/表行规则切（`kind==tab`）。
+   - 目标：支持"某产品什么价格/某条件对应规则"这类列-值问答；检索字段覆盖 `table_cells` 元数据。
+   - 验收：表格问答 qa_pairs 子集通过率达标。
+
+3. **多分块策略 + 混合分派**
+   - 按文档 `kind` 自动分派：md/txt→父子；xlsx→按 sheet/表块；pdf→按页/标题块（`heading` 识别）；pptx→按页。
+   - 新增 `chunker.provider: mixed`（自动分派）与可选 `rule_based`；现有 `父/子` 保留为 `hierarchical`。
+   - 约束：每加策略**必须先标定**（qa_pairs 验证召回差异）再上配置，禁止拍脑袋堆策略。
+   - 验收：多格式样例库每个 kind 命中率 ≥ 基准，且 `make eval` 对比报告。
+
+4. **embedding 多模型（本地多档切换）**
+   - 支持 `bge-small-zh`(快) / `bge-base-zh`(衡) / `bge-large-zh`(准) / `bge-m3`(多语言·NF 多向量) 配置切换（`embedding.model_name`）。
+   - 必须配套**向量版本管理**：换模型=维度/分布变化 → 提示"需全量重入库"，提供 `make reindex`（重建集合）与版本字段 `meta.embed_model`，避免旧向量混用。
+   - 验收：两档模型切换后检索指标（Hit@1/Faithfulness）对比有记录；重新入库流程可用。
+
+5. **LLM 多协议多模型（provider 工厂）**
+   - 按 §3.8 已有接口补实现：`OllamaLocalLLM`、`OpenAICompatibleLLM`（任意 OpenAI 兼容网关），并在前端设置面板提供模型选择下拉（官方 API / 本地 Ollama / 自定义网关）。
+   - 注意：各 provider 的抽吐格式、超时、降级策略可配置；DeepSeek 失败时可选 One-pass→Ollama 兜底（第 11 章风险表）。
+   - 验收：至少三 provider 各跑通 1 条问答（本地 Ollama 若未装则文档验证）。
+
+---
+
 ## 附录 A：Agent 开发执行要点（速查）
 
 1. 先在 `core/interfaces.py` + `core/domain.py` 完成契约与模型，再写具体实现。

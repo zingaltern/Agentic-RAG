@@ -26,7 +26,15 @@ class StubDetector:
 
 @pytest.fixture()
 def q_client(tmp_path):
-    """组件全装配（真实 Chroma 临时目录）+ 桩 embedding/llm/detector。"""
+    """组件全装配（真实 Chroma 临时目录）+ 桩 embedding/llm/detector/reranker。
+
+    评估/改写/检测用确定性旧实现（rule/rule/citation），聚焦路由与编排契约；
+    semantic 系 provider 的行为由 test_semantic_* / test_orchestration_v2 覆盖。
+    """
+    from app.adapters.detector.citation_tracing import CitationTracingDetector
+    from app.adapters.evaluator.rule_evaluator import RuleEvaluator
+    from app.adapters.reranker.identity import IdentityReranker
+
     config = load_config()
     config.vector_store.persist_dir = str(tmp_path / "chroma")
     app = create_app(
@@ -34,6 +42,8 @@ def q_client(tmp_path):
         embedding=StubEmbedding(dimension=512),
         llm=StubLLM(),
         detector=StubDetector(),
+        reranker=IdentityReranker(rerank_top_k=5),
+        evaluator=RuleEvaluator(rule_threshold=0.45, top_n=5),
     )
     # 入库一份文档供检索
     sample = Path(__file__).resolve().parent.parent / "eval" / "sample_data" / "员工手册.md"

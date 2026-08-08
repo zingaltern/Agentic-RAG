@@ -34,6 +34,7 @@ class CaseResult:
     iterations: int = -1
     hallucination_check: str = ""
     hit: bool = False
+    hit1: bool = False
     context_recall: float = 0.0
     context_precision: float = 0.0
     answer_relevancy: bool = False
@@ -123,11 +124,12 @@ def eval_pair(pair: dict, response: dict) -> CaseResult:
     r.sources = [s.get("filename", "") for s in data.get("sources", [])]
     r.iterations = data.get("iterations", -1)
     r.hallucination_check = data.get("hallucination_check", "")
-    r.elapsed_ms = response.get("elapsed_ms") or 0
+    r.elapsed_ms = data.get("elapsed_ms") or 0
     r.faithful = r.hallucination_check == "passed"
 
     if kind in ("direct", "rewrite"):
-        # Hit@5：期望来源出现在 top5 来源中
+        # Hit@1 / Hit@5：期望来源出现在 top1 / top5 来源中
+        r.hit1 = bool(expected) and bool(expected & set(r.sources[:1]))
         r.hit = bool(expected) and bool(expected & set(r.sources[:5]))
         # ContextRecall：期望来源的命中比例
         r.context_recall = (len(expected & set(r.sources)) / len(expected)) if expected else 0.0
@@ -162,11 +164,14 @@ def _aggregate(results: list[CaseResult]) -> dict:
     agg = {
         "total": len(results),
         "ok": sum(1 for r in results if r.ok),
+        "hit1": (sum(1 for r in direct if r.hit1) / len(direct)) if direct else 0.0,
         "hit5": (sum(1 for r in direct if r.hit) / len(direct)) if direct else 0.0,
         "context_precision": (sum(r.context_precision for r in direct) / len(direct)) if direct else 0.0,
         "context_recall": (sum(r.context_recall for r in direct) / len(direct)) if direct else 0.0,
         "answer_relevancy": (sum(1 for r in direct if r.answer_relevancy) / len(direct)) if direct else 0.0,
         "faithfulness": (sum(1 for r in direct if r.faithful) / len(direct)) if direct else 0.0,
+        # 13.1：Faithfulness 分类型统计（direct 单独口径）
+        "faithfulness_direct": (sum(1 for r in direct if r.faithful) / len(direct)) if direct else 0.0,
         "fallback_rate": (sum(1 for r in results if r.kind == "no_answer" and r.ok)
                           / max(1, sum(1 for r in results if r.kind == "no_answer"))),
     }
@@ -186,22 +191,23 @@ def render_report(args, results: list[CaseResult], agg: dict) -> str:
         "| 指标 | 值 | 说明 |",
         "|---|---|---|",
         f"| 通过率 | {agg['ok']}/{agg['total']} | 各类型 OK 判据之和 |",
+        f"| Hit@1 | {agg['hit1']:.2%} | 期望来源出现在 top1 检索结果（13.1 新基线） |",
         f"| Hit@5 | {agg['hit5']:.2%} | 期望来源出现在 top5 检索结果 |",
         f"| ContextPrecision | {agg['context_precision']:.2%} | 相关文档位置倒数（文档级 AP 近似） |",
         f"| ContextRecall | {agg['context_recall']:.2%} | 期望来源命中比例 |",
         f"| AnswerRelevancy | {agg['answer_relevancy']:.2%} | 回答非空且非兜底文案 |",
-        f"| Faithfulness | {agg['faithfulness']:.2%} | 幻觉检测 passed 比例（direct/rewrite） |",
+        f"| Faithfulness(direct) | {agg['faithfulness_direct']:.2%} | 幻觉检测 passed（direct/rewrite，13.1 口径） |",
         f"| 兜底率 | {agg['fallback_rate']:.2%} | no_answer 类按预期返回 21001 |",
         "",
         "## 逐条明细",
         "",
-        "| ID | 类型 | OK | Hit@5 | C-Prec | C-Rec | 迭代 | 幻觉 | 耗时(ms) | 说明 |",
-        "|---|---|---|---|---|---|---|---|---|---|",
+        "| ID | 类型 | OK | Hit@1 | Hit@5 | C-Prec | C-Rec | 迭代 | 幻觉 | 耗时(ms) | 说明 |",
+        "|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for r in results:
         mark = "PASS" if r.ok else "FAIL"
         lines.append(
-            f"| {r.id} | {r.kind} | {mark} | {'Y' if r.hit else '-'} | "
+            f"| {r.id} | {r.kind} | {mark} | {'Y' if r.hit1 else '-'} | {'Y' if r.hit else '-'} | "
             f"{r.context_precision:.2f} | {r.context_recall:.2f} | {r.iterations} | "
             f"{r.hallucination_check or '-'} | {r.elapsed_ms} | {r.error or r.answer[:40]} |"
         )

@@ -77,7 +77,13 @@ class HybridRRFRetriever(Retriever):
 
     # -- 契约（3.3） ----------------------------------------------------------
 
-    def retrieve(self, query: str, k: int, filters: dict | None = None) -> list[ScoredChunk]:
+    def retrieve(self, query: str, k: int, filters: dict | None = None,
+                 path: str = "hybrid") -> list[ScoredChunk]:
+        """返回降序排列的 k 条候选。
+
+        path: hybrid（默认，BM25+向量 RRF 融合）| bm25（仅全文）| vector（仅向量），
+        供编排层"query 必变"换路使用（13.3.3-1）。签名对接口契约 3.3 向后兼容。
+        """
         cond = self._metadata_filters(filters)
 
         # 1) BM25 路（全文检索侧按同条件过滤）
@@ -104,8 +110,13 @@ class HybridRRFRetriever(Retriever):
         for hit in vector_hits:
             vector_scores[hit.chunk.chunk_id] = hit.score
 
-        # 3) RRF 融合 → 取 k 条
-        fused = rrf_fusion(bm25_scores, vector_scores, k=self.rr_fused_k, top_n=max(self.candidates, k))
+        # 3) 按路径融合（单路时另一路为空 → rrf_fusion 等效按分排序）
+        if path == "bm25":
+            fused = rrf_fusion(bm25_scores, {}, k=self.rr_fused_k, top_n=max(self.candidates, k))
+        elif path == "vector":
+            fused = rrf_fusion({}, vector_scores, k=self.rr_fused_k, top_n=max(self.candidates, k))
+        else:
+            fused = rrf_fusion(bm25_scores, vector_scores, k=self.rr_fused_k, top_n=max(self.candidates, k))
         by_id = {c.chunk_id: c for c in corpus}
         for hit in vector_hits:
             by_id.setdefault(hit.chunk.chunk_id, hit.chunk)

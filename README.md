@@ -54,6 +54,19 @@ curl http://localhost:8000/api/health    # 期望 checks 全 ok
   - 口语化问法（如"咋整"）可能因改写未覆盖而评估分不足 → 触发 21001 兜底；同义词表见 `configs/synonyms.csv`（缺失时用内置小表）。
   - LLM 生成的规范化总结句对幻觉检测 0.8 阈值达标率低，报告 Faithfulness 可能偏低；阈值可在 `configs/settings.yaml` 的 `detector.similarity_threshold` 调整。
 
+## 第二阶段（Phase 2）规划速览
+
+开发中，规格见 `DEVELOPMENT.md` 第 13 章，分 W5~W8：
+
+| 周 | 内容 | 状态 |
+|---|---|---|
+| W5 | 真重排（bge-reranker）+ 语义评估/LLM 改写/真闭环 + 幻觉检测 v2 | 待开发 |
+| W6 | 多知识库（一库一 collection，`/api/kbs`）+ 评测集 100+ | 待开发 |
+| W7 | Web 前端：前后端分离，`frontend/` Vue3+Vite SPA | 待开发 |
+| W8 | Electron 桌面壳（内置拉起后端）+ 收尾 | 待开发 |
+
+Web 前端开发期用 `cd frontend && npm run dev`（proxy 到 :8000）；桌面端 W8 落地后 `make desktop`。
+
 ## 目录速览
 
 ```

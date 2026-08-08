@@ -18,6 +18,9 @@ dependencies = [
     # 向量化与向量库
     "sentence-transformers>=3.0",
     "chromadb>=0.5",
+    # 注：第二阶段（DEVELOPMENT.md 13.2）精排将用 sentence-transformers 的
+    # CrossEncoder（BAAI/bge-reranker-v2-m3），已由本依赖覆盖，无需新增包。
+    # 若后续切换 FlagEmbedding 或引第三方 SDK，须在此登记并说明理由。
     # 混合检索与中文处理
     "rank-bm25>=0.2",
     "jieba>=0.42",

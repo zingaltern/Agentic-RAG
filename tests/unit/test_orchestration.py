@@ -39,8 +39,8 @@ class _Retriever:
         self.chunks = chunks
         self.calls = []
 
-    def retrieve(self, query, k, filters=None):
-        self.calls.append({"query": query, "k": k, "filters": filters})
+    def retrieve(self, query, k, filters=None, path="hybrid"):
+        self.calls.append({"query": query, "k": k, "filters": filters, "path": path})
         return self.chunks[:k]
 
 
@@ -126,7 +126,9 @@ def test_fallback_21001_after_max_iterations():
     assert answer.code == 21001
     assert answer.text == FALLBACK_TEXT
     assert answer.iterations == n
-    assert len(retriever.calls) == n + 1
+    # 改写无变化后触发换路（13.3.3-1：BM25-only + 向量-only），检索次数随轮次增加
+    assert len(retriever.calls) >= n + 1
+    assert all(c["filters"] == {} for c in retriever.calls)
 
 
 def test_request_timeout_raises_21002():
@@ -135,9 +137,9 @@ def test_request_timeout_raises_21002():
     config.orchestration.request_timeout_seconds = 0.05
 
     class _SlowRetriever(_Retriever):
-        def retrieve(self, query, k, filters=None):
+        def retrieve(self, query, k, filters=None, path="hybrid"):
             time.sleep(0.2)
-            return self.chunks
+            return self.chunks[:k]
 
     retriever = _SlowRetriever([_scored("年假申请")])
     svc = _build(retriever, _Evaluator([EvaluationResult(True, 0.9, "ok")]),
@@ -154,9 +156,9 @@ def test_search_budget_per_iteration():
     config.orchestration.search_timeout_seconds = 0.05
 
     class _SlowRetriever(_Retriever):
-        def retrieve(self, query, k, filters=None):
+        def retrieve(self, query, k, filters=None, path="hybrid"):
             time.sleep(0.15)
-            return self.chunks
+            return self.chunks[:k]
 
     svc = _build(_SlowRetriever([_scored("x")]),
                  _Evaluator([EvaluationResult(True, 0.9, "ok")]),

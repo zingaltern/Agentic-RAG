@@ -1,35 +1,24 @@
-"""Agentic 编排服务（DEVELOPMENT.md 5.9）——反思循环。
+"""Agentic 编排服务（DEVELOPMENT.md 5.9 修订版 + 13.3.3）——反思循环。
 
-```
-iteration = 0
-normalized = QueryNormalize(query)
-while True:
-    chunks = retriever.retrieve(normalized, k=top_k, filters)
-    result = evaluator.evaluate(normalized, chunks)
-    if result.passed:
-        context = backtrack_parent_chunks(chunks[:rerank_top_k])
-        answer = llm.chat(system+user prompt)         # 5.7 prompt 原样
-        detection = detector.detect(answer, context)
-        return Answer(...)
-    elif iteration < max_reflection_iterations:
-        iteration += 1
-        normalized = rewriter.rewrite(normalized, result.reason)   # 改写后继续，filters 保持
-    else:
-        return FallbackAnswer(code=21001)
-```
+Phase2 修订（第 13 章）：
+- 13.2：检索 RRF 输出 → reranker 精排 → rerank_top_k 送评估；
+- 13.3.1：评估器可切 semantic_v2（注入 embedding）；
+- 13.3.2：改写可切 llm（1~3 变体，失败自动回退 rule），仅 passed=False 时调用；
+- 13.3.3：每轮 query 必须与上轮不同（不变 → 换路：去停用词重切 / BM25-only / 向量-only）；
+  多路融合：每个变体分别检索后 rrf 融合并入该轮评估；filters 贯穿所有变体。
 
 - 安全阀：整体 request_timeout_seconds（默认 30s）与检索轮次 search_timeout_seconds（10s）
-  采用时间预算检查（同步实现无法强制中断外部 I/O，每阶段校验 elapsed 预算），超时抛 RequestTimeoutError(21002)。
-- filters/collection 贯穿整个循环；collection 非默认 → ValidationError（MVP 单库）。
+  采用时间预算检查，超时抛 RequestTimeoutError(21002)。
 - sources[].filename = 入库时 Chunk.metadata.source 原始文件名（6.4 关键契约）。
-- 每阶段输出结构化日志（iteration、模块耗时）→ UI debug_trace 面板。
 """
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from app.adapters.rewriter.rule_rewriter import _STOP_PHRASES, normalize_query
 from app.core.config import SystemConfig
 from app.core.domain import DetectionResult, EvaluationResult, ScoredChunk
 from app.core.errors import LLMUnavailableError, RequestTimeoutError, ValidationError
@@ -43,7 +32,6 @@ from app.core.interfaces import (
     VectorStore,
 )
 from app.core.logging import get_logger, get_trace_id
-from app.adapters.rewriter.rule_rewriter import normalize_query
 
 logger = get_logger("orchestration")
 
@@ -56,6 +44,15 @@ SYSTEM_PROMPT = (
     "回答末尾必须为引用对应上下文编号，使用 [N]（N 为正整数）标注来源。"
 )
 USER_PROMPT = "上下文：\n{context}\n\n问题：{query}"
+
+
+def _strip_stopwords(query: str) -> str:
+    """去停用词重切（13.3.3-1 换路用，与 rule_rewriter 停用词表一致）。"""
+    text = query
+    for sw in sorted(_STOP_PHRASES, key=len, reverse=True):
+        if sw:
+            text = text.replace(sw, "")
+    return re.sub(r"\s+", " ", text).strip()
 
 
 @dataclass
@@ -93,6 +90,40 @@ class OrchestrationService:
     def _check_budget(start: float, timeout_seconds: int | float) -> None:
         if time.perf_counter() - start > timeout_seconds:
             raise RequestTimeoutError(f"请求超过 {timeout_seconds}s 预算，强制终止")
+
+    @staticmethod
+    def _fuse_variants(results: list[list[ScoredChunk]], rr_k: int) -> list[ScoredChunk]:
+        """13.3.2 多路融合：各变体检索结果按 RRF 公式累积（5.4 同款）。"""
+        fused: dict[str, float] = {}
+        for res in results:
+            for rank, item in enumerate(res):
+                fused[item.chunk.chunk_id] = fused.get(item.chunk.chunk_id, 0.0) + 1.0 / (rr_k + rank + 1.0)
+        ordered = sorted(fused.items(), key=lambda kv: kv[1], reverse=True)
+        by_id: dict[str, ScoredChunk] = {}
+        for res in results:
+            for item in res:
+                by_id.setdefault(item.chunk.chunk_id, item)
+        return [ScoredChunk(chunk=by_id[cid].chunk, score=score, notion="rrf") for cid, score in ordered]
+
+    def _rewrite_variants(self, query: str, feedback: EvaluationResult) -> list[tuple[str, str]]:
+        """改写产出 1~3 变体（rule 返回 str → 单变体；llm 返回 list → 多变体）。"""
+        raw = self.rewriter.rewrite(query, feedback)
+        if isinstance(raw, str):
+            raw = [raw]
+        variants = [v for v in raw if v and v.strip()]
+        if not variants:
+            variants = [query]
+        return [(v, "hybrid") for v in variants]
+
+    def _switch_path(self, query: str) -> list[tuple[str, str]]:
+        """13.3.3-1 换路：query 与上轮相同 → 去停用词重切 / BM25-only / 向量-only。"""
+        stripped = _strip_stopwords(query)
+        out: list[tuple[str, str]] = []
+        if stripped and stripped != query:
+            out.append((stripped, "hybrid"))
+        out.append((query, "bm25"))
+        out.append((query, "vector"))
+        return out or [(query, "hybrid")]
 
     def _parent_map(self) -> dict[str, ScoredChunk]:
         """父块索引（子块回溯父块全文用；W2 只存父块，命中即父块，此步兼容预留）。"""
@@ -139,6 +170,12 @@ class OrchestrationService:
             collection: str | None = None,
             top_k: int | None = None, debug: bool = False) -> Answer:
         start = time.perf_counter()
+        # 预热（幂等，已加载时零成本）：模型加载属装配开销，不计入请求/检索预算，
+        # 避免冷启动首次请求误触发 21002
+        for holder in (getattr(self.reranker, "ready", None),
+                       getattr(getattr(self.retriever, "embedding", None), "ready", None)):
+            if callable(holder):
+                holder()
         if collection and collection != self.config.vector_store.collection:
             raise ValidationError(
                 f"暂不支持知识库集合 {collection!r}（MVP 仅 {self.config.vector_store.collection!r}）"
@@ -151,51 +188,56 @@ class OrchestrationService:
         requested_k = top_k or retriever_cfg.top_k
         k = max(1, min(requested_k, retriever_cfg.top_k))     # 6.4：top_k 受 retriever.top_k 上限约束
         filters = filters or {}
+        rr_k = retriever_cfg.rr_fused_k
+        rerank_top_k = self.config.reranker.rerank_top_k
 
         normalized = normalize_query(query)
+        variants: list[tuple[str, str]] = [(normalized, "hybrid")]
         iteration = 0
         trace: list[dict] = []
 
         while True:
             self._check_budget(start, cfg.request_timeout_seconds)
 
-            # 1) 检索（每轮独立预算）
+            # 1) 多路检索（13.3.2：每个变体分别检索；filters 贯穿所有变体）
             search_start = time.perf_counter()
-            chunks = self.retriever.retrieve(normalized, k=k, filters=filters)
-            self._check_budget(start, cfg.request_timeout_seconds)
+            variant_results: list[list[ScoredChunk]] = []
+            for vq, path in variants:
+                variant_results.append(self.retriever.retrieve(vq, k=k, filters=filters, path=path))
+                self._check_budget(start, cfg.request_timeout_seconds)
             if time.perf_counter() - search_start > cfg.search_timeout_seconds:
                 raise RequestTimeoutError(f"检索超过 {cfg.search_timeout_seconds}s 预算")
+            candidates = self._fuse_variants(variant_results, rr_k)
 
-            # 2) 评估
-            eval_start = time.perf_counter()
-            result = self.evaluator.evaluate(normalized, chunks)
-            eval_ms = round((time.perf_counter() - eval_start) * 1000)
+            # 2) 精排（13.2）：RRF 输出 → rerank → rerank_top_k
+            reranked = self.reranker.rerank(normalized, candidates)
+            top = reranked[:rerank_top_k]
 
+            # 3) 评估（输入必须是 rerank 后的 top_n，13.3.1）
+            result = self.evaluator.evaluate(normalized, top)
             logger.info(
                 "反思迭代",
                 extra={"extra_fields": {
                     "iteration": iteration, "query": normalized,
+                    "variants": [v[0] for v in variants],
                     "evaluator_score": result.score, "reason": result.reason,
-                    "candidates": len(chunks), "eval_ms": eval_ms, "trace_id": get_trace_id(),
+                    "candidates": len(candidates), "trace_id": get_trace_id(),
                 }},
             )
             trace.append({
                 "iter": iteration,
                 "query": normalized,
+                "variants": [v[0] for v in variants],
                 "evaluator_score": result.score,
                 "reason": result.reason,
-                "candidates": len(chunks),
+                "candidates": len(candidates),
             })
 
             if result.passed:
-                # 3) 上下文：rerank_top_k 内子块回溯父块（5.9）
-                context = self._backtrack_parent_chunks(
-                    self.reranker.rerank(normalized, chunks[:self.config.reranker.rerank_top_k])
-                )
+                # 4) 上下文回溯 → LLM 生成 → 幻觉检测
+                context = self._backtrack_parent_chunks(top)
                 numbered = "\n".join(f"{i}. {c.chunk.text}" for i, c in enumerate(context, 1))
                 user_prompt = USER_PROMPT.format(context=numbered, query=query)
-
-                # 4) 生成
                 llm_start = time.perf_counter()
                 answer_text = self.llm.chat(
                     [{"role": "system", "content": SYSTEM_PROMPT},
@@ -204,8 +246,6 @@ class OrchestrationService:
                     max_tokens=self.config.llm.max_tokens,
                 )
                 llm_ms = round((time.perf_counter() - llm_start) * 1000)
-
-                # 5) 幻觉检测
                 detection = self.detector.detect(answer_text, context)
                 elapsed_ms = round((time.perf_counter() - start) * 1000)
                 trace.append({"iter": iteration, "llm_ms": llm_ms,
@@ -220,21 +260,32 @@ class OrchestrationService:
                     elapsed_ms=elapsed_ms,
                 )
 
-            # 6) 改写后继续（filters 保持贯穿）
-            if iteration < cfg.max_reflection_iterations:
-                iteration += 1
-                rewritten = self.rewriter.rewrite(normalized, result)
-                logger.info(
-                    "查询改写",
-                    extra={"extra_fields": {"iteration": iteration, "before": normalized,
-                                            "after": rewritten, "trace_id": get_trace_id()}},
-                )
-                trace.append({"iter": iteration, "rewritten": rewritten})
-                normalized = rewritten
-            else:
-                # 兜底：反思达上限（5.9 → 21001）
+            # 5) 反思上限 → 21001 兜底
+            if iteration >= cfg.max_reflection_iterations:
                 elapsed_ms = round((time.perf_counter() - start) * 1000)
                 return Answer(text=FALLBACK_TEXT, iterations=iteration,
                               debug_trace=trace if debug else [],
                               code=21001, message="反思达到上限仍未找到可靠答案",
                               elapsed_ms=elapsed_ms)
+
+            # 6) 改写（仅 passed=False；13.3.3：query 必须与上轮不同）
+            iteration += 1
+            new_variants = self._rewrite_variants(normalized, result)
+            if all(v[0] == normalized for v in new_variants):
+                # 无变化 → 自动换路：去停用词重切 / BM25-only / 向量-only
+                switched = self._switch_path(normalized)
+                trace.append({"iter": iteration, "rewritten": [v[0] for v in switched],
+                              "paths": [p for _, p in switched], "switched": True})
+                variants = switched
+            else:
+                trace.append({"iter": iteration, "rewritten": [v[0] for v in new_variants],
+                              "switched": False})
+                variants = new_variants
+            logger.info(
+                "查询改写",
+                extra={"extra_fields": {"iteration": iteration, "before": normalized,
+                                        "after": [v[0] for v in variants],
+                                        "switched": trace[-1]["switched"],
+                                        "trace_id": get_trace_id()}},
+            )
+            normalized = variants[0][0]

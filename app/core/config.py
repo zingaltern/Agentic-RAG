@@ -26,10 +26,10 @@ ALLOWED_PROVIDERS: dict[str, set[str]] = {
     "embedding": {"local_bge_v15", "bge_m3", "remote_api"},
     "vector_store": {"chroma", "milvus"},
     "retriever": {"hybrid_rrf", "hybrid_rerank"},
-    "reranker": {"identity", "bge"},
-    "evaluator": {"rule", "model"},
-    "rewriter": {"rule", "llm"},
-    "detector": {"citation", "llm_crosscheck"},
+    "reranker": {"identity", "bge_reranker"},        # 13.2：identity(回退) | bge_reranker(W5)
+    "evaluator": {"rule", "semantic_v2"},             # 13.3.1：rule(回退) | semantic_v2(W5)
+    "rewriter": {"rule", "llm"},                      # 13.3.2：rule(回退) | llm(W5)
+    "detector": {"citation", "semantic"},             # 13.4：citation(回退) | semantic(W5)
     "llm": {"deepseek", "ollama", "openai_compat"},
 }
 
@@ -80,24 +80,30 @@ class RetrieverConfig(BaseModel):
 
 
 class RerankerConfig(BaseModel):
-    provider: str = "identity"
+    provider: str = "bge_reranker"               # identity(回退) | bge_reranker(W5, 13.2)
+    model_name: str = "BAAI/bge-reranker-v2-m3"  # CPU 慢可切 BAAI/bge-reranker-base
     rerank_top_k: int = 5
+    batch_size: int = 32
+    device: str = "auto"
 
 
 class EvaluatorConfig(BaseModel):
-    provider: str = "rule"
+    provider: str = "semantic_v2"                # rule(回退) | semantic_v2(W5, 13.3.1)
     rule_threshold: float = 0.45
+    semantic_v2_threshold: float = 0.45          # 13.3.1：语义评估阈值（qa_pairs 校准）
     top_n: int = 5
 
 
 class RewriterConfig(BaseModel):
-    provider: str = "rule"
+    provider: str = "llm"                        # rule(回退) | llm(W5, 13.3.2)
     synonyms_csv: str = "./configs/synonyms.csv"
+    llm_timeout_seconds: int = 30                # LLM 改写超时
 
 
 class DetectorConfig(BaseModel):
-    provider: str = "citation"
-    similarity_threshold: float = 0.8
+    provider: str = "semantic"                   # citation(回退) | semantic(W5, 13.4)
+    similarity_threshold: float = 0.8            # citation：字符 2-gram Jaccard 阈值
+    semantic_similarity_threshold: float = 0.6   # semantic：句⊕块嵌入余弦阈值（13.4）
 
 
 class LlmConfig(BaseModel):
@@ -181,8 +187,12 @@ class SystemConfig(BaseSettings):
             raise SystemConfigError("embedding.dimension 必须 >= 0（0 表示由模型自动识别）")
         if not 0 <= self.evaluator.rule_threshold <= 1:
             raise SystemConfigError("evaluator.rule_threshold 必须在 [0,1]")
+        if not 0 <= self.evaluator.semantic_v2_threshold <= 1:
+            raise SystemConfigError("evaluator.semantic_v2_threshold 必须在 [0,1]")
         if not 0 <= self.detector.similarity_threshold <= 1:
             raise SystemConfigError("detector.similarity_threshold 必须在 [0,1]")
+        if not 0 <= self.detector.semantic_similarity_threshold <= 1:
+            raise SystemConfigError("detector.semantic_similarity_threshold 必须在 [0,1]")
         return self
 
 

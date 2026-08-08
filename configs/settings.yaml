@@ -32,21 +32,27 @@ retriever:
   rr_fused_k: 60
 
 reranker:
-  provider: identity
+  provider: bge_reranker           # identity(回退) | bge_reranker(W5)
+  model_name: BAAI/bge-reranker-base   # v2-m3 在 CPU 上单轮重排 ~3-8s 易触发 30s 预算；base 快一个量级（13.2 允许按硬件切换）
   rerank_top_k: 5
+  batch_size: 32
+  device: auto
 
 evaluator:
-  provider: rule
+  provider: semantic_v2            # rule(回退) | semantic_v2(W5)
   rule_threshold: 0.45
+  semantic_v2_threshold: 0.45
   top_n: 5
 
 rewriter:
-  provider: rule
+  provider: llm                    # rule(回退) | llm(W5)
   synonyms_csv: ./configs/synonyms.csv
+  llm_timeout_seconds: 30
 
 detector:
-  provider: citation
+  provider: semantic               # citation(回退) | semantic(W5)
   similarity_threshold: 0.8
+  semantic_similarity_threshold: 0.6
 
 llm:
   provider: deepseek
@@ -70,3 +76,27 @@ ingestion:
 logging:
   level: info
   json: true
+
+# ============================================================================
+# 第二阶段（DEVELOPMENT.md 第 13 章）目标 schema —— 仅供规划参考，暂不启用！
+# 在 W5~W8 对应实现落地前【不要激活】这些键：未识别键会被静默忽略，留隐患。
+# ============================================================================
+# reranker:
+#   model_name: BAAI/bge-reranker-v2-m3        # W5：provider 切 bge_reranker
+#   rerank_top_k: 5
+# evaluator:
+#   provider: rule                # rule | semantic_v2（W5）
+#   semantic_v2_threshold: 0.45
+# rewriter:
+#   provider: rule                # rule | llm（W5）
+# detector:
+#   provider: citation            # citation | semantic（W5）
+#   semantic_similarity_threshold: 0.6
+# api:
+#   cors_origins: ["http://localhost:5173"]
+# kb:
+#   default_kb: default
+#   persist_file: ./data/kb.json
+# frontend:
+#   dev_port: 5173
+#   dist_dir: ./frontend/dist

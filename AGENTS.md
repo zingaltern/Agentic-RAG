@@ -20,9 +20,15 @@
 make bootstrap      # 虚拟环境 + 安装依赖（首次）
 make run            # 启动 API（含 /ui 测试页）→ http://localhost:8000/ui
 make test           # 跑全部单测
-make demo-query     # 一轮问答冒烟
+make eval           # 评测（reports/eval-*.md）
 python -m app.cli.rageval --pairs tests/eval/qa_pairs.json   # 评测
+# —— 第二阶段（第 13 章）——
+cd frontend && npm install && npm run dev     # Web 前端（vite，proxy → :8000）
+cd frontend && npm run build                  # 产物 dist，由 FastAPI 挂载
+make desktop        # Electron 桌面（内置拉起后端）【W8 落地】
 ```
+
+- 第二阶段规格见 DEVELOPMENT.md **第 13 章**（W5~W8 里程碑 + DoD）。改动都必须跑 `make eval` 留下**前/后对比报告**才算完成（13.1 度量协议）。
 
 ## 环境与密钥
 
@@ -44,6 +50,10 @@ python -m app.cli.rageval --pairs tests/eval/qa_pairs.json   # 评测
 - **`filters`/`collection` 必须贯穿** Retriever→VectorStore（BM25 与向量双路过滤）与整个反思循环。
 - 上传走异步 Job；`/api/query` 全同步并设有全局超时；单点号注意 `max_reflection_iterations`。
 - 默认嵌入模型 `BAAI/bge-small-zh-v1.5`（512 维），更换只改配置不改代码。
+- 第二阶段（第 13 章）增量坑位：
+  - **多知识库**：`kb_id → collection（rag_<id>）` 一一映射，上传/查询缺省 `default`；删除 `default` 必须拒绝；BM25/向量双路都要按 kb 作用域过滤。
+  - **反思循环**：每轮 query 必须与上轮不同（13.3.3）；LLM 改写失败必须回退 `rule`，不得阻塞。
+  - **前端**：不要手写 CORS 白名单之外的源；桌面端不得硬编码端口，探测/参数化；`frontend/dist` 之外的构建产物不提交。
 
 ## 测试要求
 

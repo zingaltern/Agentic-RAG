@@ -30,10 +30,13 @@ class StubLLM:
 
 @pytest.fixture(scope="module")
 def integration_client(tmp_path_factory):
-    """真实 BGE（本机缓存）+ 临时 Chroma + Stub LLM 的全装配应用。"""
+    """真实 BGE（本机缓存）+ 临时 Chroma + Stub LLM + identity 重排（不下载 reranker 模型）。"""
+    from app.adapters.reranker.identity import IdentityReranker
+
     config = load_config()
     config.vector_store.persist_dir = str(tmp_path_factory.mktemp("chroma"))
-    app = create_app(config=config, components=True, llm=StubLLM())
+    app = create_app(config=config, components=True, llm=StubLLM(),
+                     reranker=IdentityReranker(rerank_top_k=5))
     with TestClient(app) as client:
         yield client
 

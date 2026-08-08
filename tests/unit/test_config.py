@@ -43,10 +43,14 @@ def test_load_real_settings_defaults():
     assert cfg.vector_store.provider == "chroma"
     assert cfg.vector_store.collection == "kb"
     assert cfg.retriever.provider == "hybrid_rrf"
-    assert cfg.reranker.provider == "identity"
-    assert cfg.evaluator.provider == "rule"
-    assert cfg.rewriter.provider == "rule"
-    assert cfg.detector.provider == "citation"
+    # W5（第 13 章）默认切新 provider；旧实现保留可回退
+    assert cfg.reranker.provider == "bge_reranker"
+    assert cfg.reranker.model_name == "BAAI/bge-reranker-v2-m3"
+    assert cfg.evaluator.provider == "semantic_v2"
+    assert cfg.evaluator.semantic_v2_threshold == 0.45
+    assert cfg.rewriter.provider == "llm"
+    assert cfg.detector.provider == "semantic"
+    assert cfg.detector.semantic_similarity_threshold == 0.6
     assert cfg.llm.provider == "deepseek"
     assert cfg.llm.model == "deepseek-chat"
     assert cfg.orchestration.max_reflection_iterations == 3
