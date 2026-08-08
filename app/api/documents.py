@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, Form, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 
 from app.api.utils import get_deps, ok
 from app.core.errors import NotFoundError, ValidationError
@@ -16,6 +16,7 @@ router = APIRouter(prefix="/api/documents", tags=["documents"])
 @router.post("/upload")
 async def upload(file: UploadFile = File(...),
                  kb_id: str = Form(default="default"),          # 13.5：目标知识库（缺省 default）
+                 request: Request = None,
                  deps: Dependencies = Depends(get_deps)) -> dict:
     """上传 → 校验 → content_hash 幂等（按库）→ 创建 Job → 异步入库（5.10）。"""
     if deps.pipeline is None:
@@ -42,6 +43,21 @@ async def upload(file: UploadFile = File(...),
 
     job = deps.jobs.create(filename, kb_id=kb_id)
     deps.pipeline.submit(raw, filename, job, kb_id=kb_id, collection=collection)
+    # S6 审计（13.11.1）：含 user_id/kb_id/文件名摘要，不含完整敏感文本与 key
+    from app.api.auth import current_user
+    from app.core.logging import get_logger, get_trace_id
+
+    get_logger("audit").info(
+        "upload_audit",
+        extra={"extra_fields": {
+            "user_id": current_user(request) if request else "anonymous",
+            "kb_id": kb_id,
+            "filename_summary": filename[:80],
+            "size_bytes": len(raw),
+            "job_id": job.job_id,
+            "trace_id": get_trace_id(),
+        }},
+    )
     return ok({"job_id": job.job_id, "status": job.status, "kb_id": kb_id})
 
 

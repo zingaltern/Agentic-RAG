@@ -7,7 +7,7 @@
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 
 from app.api.utils import fail, get_deps, ok
@@ -44,7 +44,8 @@ def _detection_payload(answer) -> dict:
 
 
 @router.post("")
-def query(payload: QueryRequest, deps: Dependencies = Depends(get_deps)) -> dict:
+def query(payload: QueryRequest, request: Request,
+          deps: Dependencies = Depends(get_deps)) -> dict:
     if deps.orchestration is None:
         raise InternalError("问答链路尚未装配（W3 交付）")
     if deps.kbs is None:
@@ -68,12 +69,14 @@ def query(payload: QueryRequest, deps: Dependencies = Depends(get_deps)) -> dict
         top_k=payload.top_k,
         debug=payload.debug,
     )
-    # S6 审计（13.11.1）：含 kb_id 与回答摘要，不含完整敏感文本与 key
+    # S6 审计（13.11.1）：含 user_id/kb_id 与回答摘要，不含完整敏感文本与 key
+    from app.api.auth import current_user
     from app.core.logging import get_logger, get_trace_id
 
     get_logger("audit").info(
         "query_audit",
         extra={"extra_fields": {
+            "user_id": current_user(request),
             "kb_id": payload.kb_id or "default",
             "collection": collection,
             "query_summary": payload.query[:80],

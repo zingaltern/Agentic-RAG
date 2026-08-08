@@ -37,6 +37,7 @@ ALLOWED_PROVIDERS: dict[str, set[str]] = {
 _ENV_ALIASES: dict[str, tuple[str, ...]] = {
     "DEEPSEEK_API_KEY": ("llm", "api_key"),   # 3.8：key 只走环境变量
     "LOG_LEVEL": ("logging", "level"),        # 4.1 示例 RAG_LOG_LEVEL
+    "API_KEY": ("api", "api_key"),            # S1（13.11.1）：RAG_API_KEY 注入，禁止写盘
 }
 
 DEFAULT_SETTINGS_PATH = "configs/settings.yaml"
@@ -46,8 +47,10 @@ DOTENV_PATH = ".env"
 class ApiConfig(BaseModel):
     host: str = "127.0.0.1"          # S2（13.11.1）：默认仅本机监听，0.0.0.0 需显式配置
     port: int = 8000
-    auth_enabled: bool = False
+    auth_enabled: bool = False       # S1（13.11.1）：true 时启用 X-API-Key 认证
     cors_origins: list[str] = []     # 13.8：dev 跨域白名单（如 ["http://localhost:5173"]）
+    # api_key 只允许环境变量注入（RAG_API_KEY），禁止写入文件/配置（S1）
+    api_key: str | None = None
 
 
 class FrontendConfig(BaseModel):

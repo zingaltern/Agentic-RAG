@@ -72,6 +72,11 @@ frontend-dev:
 frontend-build:
 	cd frontend && npm run build
 
+## 桌面端（W8，Electron）：内置拉起后端三步走（启动/就绪/退出）
+## 依赖：.venv（make bootstrap）与 frontend 依赖（make frontend-install）；首次需 make frontend-build
+desktop:
+	cd frontend && npm run desktop
+
 ## 清理虚拟环境与运行时数据（谨慎）
 clean:
 	rm -rf .venv data reports

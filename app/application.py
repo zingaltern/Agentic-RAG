@@ -13,13 +13,14 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api import documents, health, jobs, kbs, plugins, query
+from app.api.auth import require_auth
 from app.api.utils import fail
 from app.core.config import DEFAULT_SETTINGS_PATH, SystemConfig, load_config
 from app.core.errors import AppError, InternalError, ValidationError
@@ -106,16 +107,17 @@ def create_app(settings_path: str = DEFAULT_SETTINGS_PATH,
         return JSONResponse(status_code=200, content=fail(InternalError.code, InternalError.message))
 
     app.include_router(health.router)
-    app.include_router(documents.router)
-    app.include_router(jobs.router)
-    app.include_router(query.router)
+    app.include_router(documents.router, dependencies=[Depends(require_auth)])
+    app.include_router(jobs.router, dependencies=[Depends(require_auth)])
+    app.include_router(query.router, dependencies=[Depends(require_auth)])
     app.include_router(plugins.router)
-    app.include_router(kbs.router)
+    app.include_router(kbs.router, dependencies=[Depends(require_auth)])
 
     app.mount("/ui", StaticFiles(directory=str(WEB_DIR), html=True), name="ui")
 
     # 13.7 生产托管：vite build 产物经 FastAPI 挂载（路由已注册在前，/api/* 不被吞）；
-    # SPA history 路由回退到 index.html（非静态文件路径）
+    # SPA history 路由回退到 index.html（非静态文件路径）；
+    # /ui（旧测试页）目录路径由 catch-all 兜底（新版 Starlette Mount 对无尾斜杠目录不匹配）
     _dist = Path(config.frontend.dist_dir)
     if _dist.is_dir():
         _assets = _dist / "assets"
@@ -124,6 +126,12 @@ def create_app(settings_path: str = DEFAULT_SETTINGS_PATH,
 
         @app.get("/{full_path:path}", include_in_schema=False)
         async def spa_fallback(full_path: str) -> FileResponse:
+            if full_path == "ui" or full_path.startswith("ui/"):
+                rel = full_path[len("ui/"):] if full_path.startswith("ui/") else "index.html"
+                web_file = (WEB_DIR / rel).resolve()
+                if web_file.is_file() and web_file.is_relative_to(WEB_DIR.resolve()):
+                    return FileResponse(web_file)
+                return FileResponse(WEB_DIR / "index.html")
             candidate = (_dist / full_path).resolve()
             if full_path and candidate.is_file() and candidate.is_relative_to(_dist.resolve()):
                 return FileResponse(candidate)

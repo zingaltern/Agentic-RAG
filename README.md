@@ -70,6 +70,36 @@ curl http://localhost:8000/api/health    # 期望 checks 全 ok
 - 镜像内已内置 `HF_ENDPOINT=https://hf-mirror.com` 兜底；DeepSeek key 通过 compose 的 `env_file: .env` 注入（不入镜像）。
 - MVP 用 embedded Chroma（进程内 SQLite），`./data` 挂载为持久卷。
 
+## 桌面端（W8，Electron）
+
+内置拉起后端三步走（启动/就绪/退出），`make desktop` 一条命令即起：
+
+```bash
+make desktop   # 依赖：.venv（make bootstrap）、frontend 依赖（make frontend-install）、构建产物（make frontend-build）
+```
+
+- **启动**：探测端口（默认 8000，占用自动后移，最多试 5 个）→ 以项目 `.venv/bin/python` 拉起
+  `uvicorn app.main:app`（仅 `127.0.0.1` 监听）；子进程失败弹错误框而非白屏。
+- **就绪**：轮询 `/api/health`（≤30s，窗口就绪后才显示）→ 加载与 Web 端同一 SPA。
+- **退出**：关窗/退出 → 级联终止后端子进程（Windows taskkill /T，其他 SIGTERM→SIGKILL 兜底），
+  可用 `lsof -i :8000` 自验无残留。
+- **外部后端模式**：设置页「外部后端」填写 `127.0.0.1:port` → 保存后重启应用，不再自动拉起本地服务。
+- **打包**：`cd frontend && npx electron-builder --mac dmg`（配置在 frontend/package.json 的 build 段）。
+  Python 运行时捆绑为后续演进（本次仅打包前端壳；部署机需 Python 3.11 + `.venv` 与模型缓存）。
+- **安全基线（S8）**：`contextIsolation: true`、`nodeIntegration: false`、`sandbox: true`、
+  仅加载 loopback/自托管地址；真实密钥只经环境变量运行时注入（RAG_DEEPSEEK_API_KEY 等）。
+
+## 认证（S1，13.11.1）
+
+- `configs/settings.yaml` 的 `api.auth_enabled: true` + 环境变量 `RAG_API_KEY`（禁止写盘/入库）启用 API Key 认证。
+- 启用后：`/api/query`、文档、kbs 等业务请求须带 `X-API-Key` 头，未带/错误 → `40101`；
+  `/api/health`、`/api/plugins/*`、`/ui` 白名单放行；响应保持 `{code,message,data}` 契约。
+- 前端：设置总览页填写并本地持久化 API Key；401 时全局提示条引导。
+- **RBAC 预留**（13.11.3）：`app/services/rbac.py` 提供 `resolve_user_kb(user_id, kb_id)` 接口
+  （默认全放，可注入 `user_kb_map` 收窄）；对接 §12.3 深度 C 时替换策略即可，路由层不改。
+- 审计（S6）：query/upload 事件含 `user_id`（`X-User-Id` 透传，缺省 anonymous）、kb_id 与回答摘要，
+  不含 key 与完整敏感文本；`trace_id` 全链路贯穿（前端设置页/问答区可查）。
+
 ## API 速览
 
 统一响应包 `{code, message, data}`；错误码见 DEVELOPMENT.md 6.7 表。
@@ -136,7 +166,9 @@ tests/unit/            # 单测；tests/integration/ 集成测试（-m integrati
 | W3 | Orchestration 反思循环 + Detector + `/api/query` + DeepSeek |
 | W4 | 测试全覆盖≥80% + 集成 + 评测 + 可选 Docker |
 | W5 | 精排 bge_reranker + 语义评估/LLM 改写/语义检测（Phase2） |
-| W6 | 多知识库隔离 + 评测体系 v2（当前） |
+| W6 | 多知识库隔离 + 评测体系 v2 |
+| W7 | Vue3 SPA 五区块 + CORS/静态托管（Phase2） |
+| W8 | Electron 桌面壳 + API Key 认证 + RBAC 预留（当前） |
 
 ## 测试
 
