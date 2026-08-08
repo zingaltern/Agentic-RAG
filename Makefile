@@ -23,9 +23,9 @@ bootstrap:
 		 $(PIP) install --index-url https://pypi.org/simple -e ".[dev]")
 	@echo "✅ 完成：source .venv/bin/activate 或直接用 make run"
 
-## 启动 API（含 /ui 测试页）
+## 启动 API（S2：默认 127.0.0.1 本机监听；暴露需显式 --host 0.0.0.0）
 run:
-	$(PYTHON) -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+	$(PYTHON) -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
 
 ## 跑全部单测（含覆盖率门禁 ≥80%，默认过滤 integration）
 test:
@@ -58,6 +58,19 @@ docker-up:
 
 docker-down:
 	docker compose down
+
+## ---- 前端（W7，Vue3+Vite）----
+## 安装前端依赖（首次）
+frontend-install:
+	cd frontend && npm install
+
+## 启动 vite dev server（proxy /api → 127.0.0.1:8000，需先 make run）
+frontend-dev:
+	cd frontend && npm run dev
+
+## 构建 SPA 产物 → frontend/dist（由 FastAPI 同源托管，生产无需 CORS）
+frontend-build:
+	cd frontend && npm run build
 
 ## 清理虚拟环境与运行时数据（谨慎）
 clean:

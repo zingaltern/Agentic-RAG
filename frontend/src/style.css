@@ -1,0 +1,22 @@
+* { box-sizing: border-box; }
+html, body, #app { height: 100%; margin: 0; }
+body {
+  font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  background: #f5f6f8; color: #1f2937;
+}
+.layout { height: 100%; }
+.aside { background: #fff; border-right: 1px solid #e5e7eb; display: flex; flex-direction: column; }
+.logo { font-size: 18px; font-weight: 600; padding: 18px 16px; color: #2563eb; }
+.menu { border-right: none; flex: 1; }
+.footer-note { padding: 12px 16px; font-size: 12px; color: #9ca3af; }
+.main { overflow: auto; }
+.card { background: #fff; border: 1px solid #e5e7eb; border-radius: 10px; padding: 16px 20px; margin-bottom: 16px; }
+.card h2 { font-size: 15px; margin: 0 0 12px; }
+.row { display: flex; gap: 8px; align-items: center; margin: 8px 0; flex-wrap: wrap; }
+.muted { color: #9ca3af; font-size: 12px; }
+.answer-text { white-space: pre-wrap; line-height: 1.7; }
+.answer-box { background: #f0f7ff; border: 1px solid #bfdbfe; border-radius: 8px; padding: 12px 14px; margin: 10px 0; }
+.cite { color: #2563eb; font-weight: 600; }
+.error-bar { position: fixed; top: 12px; right: 12px; width: 360px; z-index: 3000; }
+.error-bar-item { margin-bottom: 8px; }
+.trace-line { font-size: 12px; color: #9ca3af; word-break: break-all; }

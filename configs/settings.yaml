@@ -1,11 +1,16 @@
-# Agentic RAG 系统配置（DEVELOPMENT.md 第 4 章）
+# 系统配置（DEVELOPMENT.md 第 4 章 + 13.8）
 # 优先级：内置默认 < 本文件 < RAG_ 前缀环境变量
 env: dev
 
 api:
-  host: 0.0.0.0
+  host: 127.0.0.1                 # S2（13.11.1）：默认仅本机；0.0.0.0 需显式配置暴露
   port: 8000
   auth_enabled: false
+  cors_origins: ["http://localhost:5173"]   # 13.8：dev 模式 vite proxy 之外的跨域白名单
+
+frontend:                          # 13.8：SPA 前端工程
+  dev_port: 5173
+  dist_dir: ./frontend/dist
 
 embedding:
   provider: local_bge_v15          # local_bge_v15（MVP）| bge_m3 | remote_api

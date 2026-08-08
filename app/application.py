@@ -15,7 +15,8 @@ from uuid import uuid4
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api import documents, health, jobs, kbs, plugins, query
@@ -55,6 +56,16 @@ def create_app(settings_path: str = DEFAULT_SETTINGS_PATH,
     )
     app.state.deps = deps
     app.state.config = config
+
+    # 13.8 CORS：dev 模式 5173 跨域白名单（生产同源不受影响）
+    if config.api.cors_origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=config.api.cors_origins,
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
 
     @app.middleware("http")
     async def trace_middleware(request: Request, call_next):
@@ -102,4 +113,19 @@ def create_app(settings_path: str = DEFAULT_SETTINGS_PATH,
     app.include_router(kbs.router)
 
     app.mount("/ui", StaticFiles(directory=str(WEB_DIR), html=True), name="ui")
+
+    # 13.7 生产托管：vite build 产物经 FastAPI 挂载（路由已注册在前，/api/* 不被吞）；
+    # SPA history 路由回退到 index.html（非静态文件路径）
+    _dist = Path(config.frontend.dist_dir)
+    if _dist.is_dir():
+        _assets = _dist / "assets"
+        if _assets.is_dir():
+            app.mount("/assets", StaticFiles(directory=str(_assets)), name="spa-assets")
+
+        @app.get("/{full_path:path}", include_in_schema=False)
+        async def spa_fallback(full_path: str) -> FileResponse:
+            candidate = (_dist / full_path).resolve()
+            if full_path and candidate.is_file() and candidate.is_relative_to(_dist.resolve()):
+                return FileResponse(candidate)
+            return FileResponse(_dist / "index.html")
     return app

@@ -68,6 +68,22 @@ def query(payload: QueryRequest, deps: Dependencies = Depends(get_deps)) -> dict
         top_k=payload.top_k,
         debug=payload.debug,
     )
+    # S6 审计（13.11.1）：含 kb_id 与回答摘要，不含完整敏感文本与 key
+    from app.core.logging import get_logger, get_trace_id
+
+    get_logger("audit").info(
+        "query_audit",
+        extra={"extra_fields": {
+            "kb_id": payload.kb_id or "default",
+            "collection": collection,
+            "query_summary": payload.query[:80],
+            "answer_summary": (result.text or "")[:120],
+            "iterations": result.iterations,
+            "code": result.code,
+            "elapsed_ms": result.elapsed_ms,
+            "trace_id": get_trace_id(),
+        }},
+    )
     det = _detection_payload(result)
     data = {
         "answer": result.text,

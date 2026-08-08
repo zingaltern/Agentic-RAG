@@ -6,11 +6,35 @@
 
 ```bash
 make bootstrap      # 创建 .venv 并安装依赖（首次，含 torch/嵌入模型依赖，较慢）
-make run            # 启动服务 → http://localhost:8000/ui
+make run            # 启动服务 → http://127.0.0.1:8000（SPA 与 /ui 均由本服务托管）
 make test           # 跑全部单测（含覆盖率门禁 ≥80%）
 make eval           # 评测（进程内模式，输出 reports/eval-*.md）
 make demo-ingest    # 入库 demo 文档并检索验证
 ```
+
+> **监听地址（S2）**：默认仅绑定 `127.0.0.1`（本机/桌面场景）；对外暴露需显式
+> `uvicorn app.main:app --host 0.0.0.0` 或改 `configs/settings.yaml` 的 `api.host`。
+
+## 前端 SPA（W7，Vue3 + Vite + Element Plus）
+
+前后端分离：`frontend/` 独立工程（Vue3 + Vue Router + Pinia + Element Plus），五区块
+（问答控制台 / 文档管理 / 知识库管理 / 设置总览 / 错误码提示条）全部对接真实 API；
+`src/api/base.js` 是 `BASE_URL` 单一常量（13.11.2，Web 与桌面共享的后端地址策略唯一入口）。
+
+```bash
+make frontend-install   # 首次安装前端依赖（cd frontend && npm install）
+make frontend-dev       # dev 模式 → http://localhost:5173（vite proxy /api → 127.0.0.1:8000）
+make frontend-build     # 构建产物 → frontend/dist
+make run                # 生产托管：SPA 由 FastAPI 同源托管在 http://127.0.0.1:8000/
+```
+
+- **dev 模式 CORS**：`configs/settings.yaml` 的 `api.cors_origins: ["http://localhost:5173"]`
+  已启用（后端 CORSMiddleware）；生产同源托管无 CORS 限制。
+- **托管**：`frontend/dist` 由 FastAPI 挂载（API 路由在前、静态在后），SPA history 路由
+  （如 `/documents`）自动回退 index.html；`/api/*` 不受影响。
+- **旧测试页降级入口**：`http://127.0.0.1:8000/ui`（`web/` 静态页，保留为冒烟/降级入口，
+  新 SPA 上线后逐步取代）。
+- 构建产物 `frontend/dist` 随仓库提交（AGENTS.md 约定）；`frontend/node_modules/` 不入库。
 
 ## 准备 DeepSeek Key
 

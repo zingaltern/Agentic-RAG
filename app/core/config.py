@@ -44,9 +44,17 @@ DOTENV_PATH = ".env"
 
 
 class ApiConfig(BaseModel):
-    host: str = "0.0.0.0"
+    host: str = "127.0.0.1"          # S2（13.11.1）：默认仅本机监听，0.0.0.0 需显式配置
     port: int = 8000
     auth_enabled: bool = False
+    cors_origins: list[str] = []     # 13.8：dev 跨域白名单（如 ["http://localhost:5173"]）
+
+
+class FrontendConfig(BaseModel):
+    """13.8：SPA 前端工程（Vue3+Vite）。"""
+
+    dev_port: int = 5173
+    dist_dir: str = "./frontend/dist"
 
 
 class EmbeddingConfig(BaseModel):
@@ -152,6 +160,7 @@ class SystemConfig(BaseSettings):
 
     env: str = "dev"
     api: ApiConfig = ApiConfig()
+    frontend: FrontendConfig = FrontendConfig()
     embedding: EmbeddingConfig = EmbeddingConfig()
     chunker: ChunkerConfig = ChunkerConfig()
     vector_store: VectorStoreConfig = VectorStoreConfig()
