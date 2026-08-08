@@ -60,16 +60,17 @@ class HybridRRFRetriever(Retriever):
     def _bm25_index(self, collection: str, filters: dict | None) -> tuple[BM25Okapi, list[ScoredChunk]]:
         """从向量库拉取全量块并构建 BM25 索引（按 collection+count 缓存）。
 
-        注：MVP 阶段语料规模小，filters 参与缓存键；生产可换独立全文索引。
+        13.5：BM25 路必须与向量路同作用域（用传入的 collection，而非构造默认），
+        否则跨库检索会泄露其他库的块。
         """
         cond = self._metadata_filters(filters)
-        cache_key = json.dumps([self.collection, sorted(cond.items())], ensure_ascii=False, sort_keys=True)
+        cache_key = json.dumps([collection, sorted(cond.items())], ensure_ascii=False, sort_keys=True)
         cached = self._bm25_cache.get(cache_key)
-        count = self.vector_store.count(self.collection)
+        count = self.vector_store.count(collection)
         if cached is not None and cached[0] == count:
             return cached[1], cached[2]
 
-        chunks = [c for c in self.vector_store.get_all_chunks(self.collection) if self._matches(c.metadata, cond)]
+        chunks = [c for c in self.vector_store.get_all_chunks(collection) if self._matches(c.metadata, cond)]
         tokenized = [list(jieba.cut(c.text)) for c in chunks]
         bm25 = BM25Okapi(tokenized) if chunks else None
         self._bm25_cache[cache_key] = (count, bm25, chunks)
@@ -78,17 +79,20 @@ class HybridRRFRetriever(Retriever):
     # -- 契约（3.3） ----------------------------------------------------------
 
     def retrieve(self, query: str, k: int, filters: dict | None = None,
-                 path: str = "hybrid") -> list[ScoredChunk]:
+                 path: str = "hybrid", collection: str | None = None) -> list[ScoredChunk]:
         """返回降序排列的 k 条候选。
 
         path: hybrid（默认，BM25+向量 RRF 融合）| bm25（仅全文）| vector（仅向量），
-        供编排层"query 必变"换路使用（13.3.3-1）。签名对接口契约 3.3 向后兼容。
+        供编排层"query 必变"换路使用（13.3.3-1）。
+        collection: 13.5 多知识库作用域（覆盖构造时的默认 collection），BM25/向量双路生效。
+        签名对接口契约 3.3 向后兼容。
         """
+        collection = collection or self.collection
         cond = self._metadata_filters(filters)
 
         # 1) BM25 路（全文检索侧按同条件过滤）
         bm25_scores: dict[str, float] = {}
-        bm25, corpus = self._bm25_index(self.collection, filters)
+        bm25, corpus = self._bm25_index(collection, filters)
         if bm25 is not None:
             query_tokens = list(jieba.cut(query))
             if query_tokens:
@@ -101,7 +105,7 @@ class HybridRRFRetriever(Retriever):
         try:
             query_vector = self.embedding.embed_query(query)
             vector_hits = self.vector_store.search(
-                query_vector, k=max(self.candidates, k), filters=cond or None, collection=self.collection
+                query_vector, k=max(self.candidates, k), filters=cond or None, collection=collection
             )
         except EmbeddingError:
             raise

@@ -1,9 +1,9 @@
-"""文档管理（6.2、6.5）：上传流水线（5.10）+ 列表/详情/删除。"""
+"""文档管理（6.2、6.5、13.5）：上传流水线（5.10）+ 列表/详情/删除；支持多知识库 kb_id。"""
 from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, UploadFile
+from fastapi import APIRouter, Depends, File, Form, UploadFile
 
 from app.api.utils import get_deps, ok
 from app.core.errors import NotFoundError, ValidationError
@@ -14,12 +14,16 @@ router = APIRouter(prefix="/api/documents", tags=["documents"])
 
 
 @router.post("/upload")
-async def upload(file: UploadFile = File(...), deps: Dependencies = Depends(get_deps)) -> dict:
-    """上传 → 校验 → content_hash 幂等 → 创建 Job → 异步入库（5.10）。"""
+async def upload(file: UploadFile = File(...),
+                 kb_id: str = Form(default="default"),          # 13.5：目标知识库（缺省 default）
+                 deps: Dependencies = Depends(get_deps)) -> dict:
+    """上传 → 校验 → content_hash 幂等（按库）→ 创建 Job → 异步入库（5.10）。"""
     if deps.pipeline is None:
         from app.core.errors import InternalError
 
         raise InternalError("上传流水线尚未装配")
+    if deps.kbs is None or not deps.kbs.exists(kb_id):
+        raise ValidationError(f"知识库不存在: {kb_id!r}")
     cfg = deps.config.ingestion
     filename = file.filename or "unnamed"
     ext = Path(filename).suffix.lower().lstrip(".")
@@ -30,14 +34,15 @@ async def upload(file: UploadFile = File(...), deps: Dependencies = Depends(get_
         raise ValidationError(f"文件超过 {cfg.max_file_size_mb}MB 限制: {filename}")
 
     content_hash = compute_content_hash(raw)
-    existing = deps.pipeline.find_document_id_by_hash(content_hash)
+    collection = deps.kbs.collection_of(kb_id)
+    existing = deps.pipeline.find_document_id_by_hash(content_hash, collection=collection, kb_id=kb_id)
     if existing:
-        # 幂等：重复上传返回既有 document_id，不重复入库（2.2）
-        return ok({"duplicate": True, "document_id": existing})
+        # 幂等：重复上传返回既有 document_id，不重复入库（2.2；按库作用域）
+        return ok({"duplicate": True, "document_id": existing, "kb_id": kb_id})
 
-    job = deps.jobs.create(filename)
-    deps.pipeline.submit(raw, filename, job)
-    return ok({"job_id": job.job_id, "status": job.status})
+    job = deps.jobs.create(filename, kb_id=kb_id)
+    deps.pipeline.submit(raw, filename, job, kb_id=kb_id, collection=collection)
+    return ok({"job_id": job.job_id, "status": job.status, "kb_id": kb_id})
 
 
 @router.get("")

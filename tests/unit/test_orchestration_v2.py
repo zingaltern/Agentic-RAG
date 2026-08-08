@@ -19,8 +19,9 @@ class _Retriever:
         self.chunks = chunks
         self.calls = []
 
-    def retrieve(self, query, k, filters=None, path="hybrid"):
-        self.calls.append({"query": query, "filters": filters, "path": path})
+    def retrieve(self, query, k, filters=None, path="hybrid", collection=None):
+        self.calls.append({"query": query, "filters": filters, "path": path,
+                           "collection": collection})
         return self.chunks[:k]
 
 

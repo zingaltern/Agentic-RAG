@@ -46,13 +46,34 @@ curl http://localhost:8000/api/health    # 期望 checks 全 ok
 - 镜像内已内置 `HF_ENDPOINT=https://hf-mirror.com` 兜底；DeepSeek key 通过 compose 的 `env_file: .env` 注入（不入镜像）。
 - MVP 用 embedded Chroma（进程内 SQLite），`./data` 挂载为持久卷。
 
+## API 速览
+
+统一响应包 `{code, message, data}`；错误码见 DEVELOPMENT.md 6.7 表。
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/health` | 组件健康（embedding/vector_store/llm） |
+| POST | `/api/documents/upload` | 上传入库（可选表单字段 `kb_id`，缺省 default） |
+| GET/DELETE | `/api/documents/{id}` | 文档元数据 / 删除（级联清向量块） |
+| GET | `/api/jobs/{job_id}` | 上传任务状态轮询 |
+| POST | `/api/query` | 问答（可选 `kb_id`，与 `collection` 二选一，kb_id 优先） |
+| GET/POST/DELETE | `/api/kbs` | 知识库 CRUD（13.5：内置 default 不可删） |
+| GET/POST | `/api/plugins/status` `/api/plugins/switch` | 插件 provider 状态 / 热切换（switch 待 W 后续） |
+
+**多知识库（13.5）**：`kb_id → Chroma collection` 物理隔离；上传/问答按 `kb_id` 作用域，
+A/B 库内容互不可见；`/api/kbs` 建库（name 自动 slug 化生成 kb_id）、删库级联清空向量集合。
+默认库 `default` 沿用存量 collection `kb`，不可删除。
+
 ## 评测报告与已知限制
 
 - `make eval` 报告输出到 `reports/eval-*.md`（`reports/` 已 gitignore，产物不入库）。
-- 指标：Hit@5 / ContextPrecision / ContextRecall / AnswerRelevancy / Faithfulness / 兜底率。
+- 全库评测（default+docs，107 条）：`make eval`（进程内模式）；HTTP 真链路：`python -m app.cli.rageval --all-kbs --base-url http://localhost:8000 --baseline <报告>`。
+- 指标：Hit@1 / Hit@5 / ContextPrecision / ContextRecall / AnswerRelevancy / Faithfulness（分类型）/ 兜底率；按库汇总 + 基线 diff 列。
+- no_answer 判据（13.6 修订）：`code=0 且回答含"未找到相关依据"类文案 ∨ code=21001`。
 - **已知限制**（如实列出，供检索/改写调优）：
   - 口语化问法（如"咋整"）可能因改写未覆盖而评估分不足 → 触发 21001 兜底；同义词表见 `configs/synonyms.csv`（缺失时用内置小表）。
-  - LLM 生成的规范化总结句对幻觉检测 0.8 阈值达标率低，报告 Faithfulness 可能偏低；阈值可在 `configs/settings.yaml` 的 `detector.similarity_threshold` 调整。
+  - 进程内评测（Stub LLM）的 Faithfulness 恒 0%（Stub 答案与上下文不匹配属预期），真 DeepSeek 模式约 69%。
+  - LLM 生成的规范化总结句对幻觉检测阈值达标率有限，阈值可在 `configs/settings.yaml` 调整。
 
 ## 第二阶段（Phase 2）规划速览
 
@@ -89,7 +110,9 @@ tests/unit/            # 单测；tests/integration/ 集成测试（-m integrati
 | W1 | 工程骨架、接口契约、Config、Parser + Chunker、UI 骨架 |
 | W2 | VectorEngine + VectorStore + Retriever(RRF) + 上传 Job 流水线 |
 | W3 | Orchestration 反思循环 + Detector + `/api/query` + DeepSeek |
-| W4 | 测试全覆盖≥80% + 集成 + 评测 + 可选 Docker（当前） |
+| W4 | 测试全覆盖≥80% + 集成 + 评测 + 可选 Docker |
+| W5 | 精排 bge_reranker + 语义评估/LLM 改写/语义检测（Phase2） |
+| W6 | 多知识库隔离 + 评测体系 v2（当前） |
 
 ## 测试
 

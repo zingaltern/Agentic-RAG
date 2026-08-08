@@ -125,17 +125,18 @@ class OrchestrationService:
         out.append((query, "vector"))
         return out or [(query, "hybrid")]
 
-    def _parent_map(self) -> dict[str, ScoredChunk]:
+    def _parent_map(self, collection: str | None = None) -> dict[str, ScoredChunk]:
         """父块索引（子块回溯父块全文用；W2 只存父块，命中即父块，此步兼容预留）。"""
         getter = getattr(self.vector_store, "get_all_chunks", None)
         if getter is None:
             return {}
-        collection = self.config.vector_store.collection
+        collection = collection or self.config.vector_store.collection
         return {c.chunk_id: ScoredChunk(chunk=c, score=0.0, notion="parent") for c in getter(collection)}
 
-    def _backtrack_parent_chunks(self, chunks: list[ScoredChunk]) -> list[ScoredChunk]:
+    def _backtrack_parent_chunks(self, chunks: list[ScoredChunk],
+                                 collection: str | None = None) -> list[ScoredChunk]:
         """5.9：检索命中子块时回溯其父块全文进入 LLM 上下文。"""
-        parents = self._parent_map()
+        parents = self._parent_map(collection)
         if not parents:
             return chunks
         seen: set[str] = set()
@@ -176,10 +177,9 @@ class OrchestrationService:
                        getattr(getattr(self.retriever, "embedding", None), "ready", None)):
             if callable(holder):
                 holder()
-        if collection and collection != self.config.vector_store.collection:
-            raise ValidationError(
-                f"暂不支持知识库集合 {collection!r}（MVP 仅 {self.config.vector_store.collection!r}）"
-            )
+        # 13.5：collection 由路由按 kb_id 解析后传入（缺省默认库），贯穿检索与反思循环；
+        # 库存在性校验在路由层（KbStore），编排层不做二次约束
+        active_collection = collection or self.config.vector_store.collection
         if self.llm is None:
             raise LLMUnavailableError("LLM 未装配：请设置 RAG_DEEPSEEK_API_KEY 后重启服务")
 
@@ -203,7 +203,8 @@ class OrchestrationService:
             search_start = time.perf_counter()
             variant_results: list[list[ScoredChunk]] = []
             for vq, path in variants:
-                variant_results.append(self.retriever.retrieve(vq, k=k, filters=filters, path=path))
+                variant_results.append(self.retriever.retrieve(
+                    vq, k=k, filters=filters, path=path, collection=active_collection))
                 self._check_budget(start, cfg.request_timeout_seconds)
             if time.perf_counter() - search_start > cfg.search_timeout_seconds:
                 raise RequestTimeoutError(f"检索超过 {cfg.search_timeout_seconds}s 预算")
@@ -235,7 +236,7 @@ class OrchestrationService:
 
             if result.passed:
                 # 4) 上下文回溯 → LLM 生成 → 幻觉检测
-                context = self._backtrack_parent_chunks(top)
+                context = self._backtrack_parent_chunks(top, collection=active_collection)
                 numbered = "\n".join(f"{i}. {c.chunk.text}" for i, c in enumerate(context, 1))
                 user_prompt = USER_PROMPT.format(context=numbered, query=query)
                 llm_start = time.perf_counter()

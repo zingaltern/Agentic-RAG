@@ -18,7 +18,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.api import documents, health, jobs, plugins, query
+from app.api import documents, health, jobs, kbs, plugins, query
 from app.api.utils import fail
 from app.core.config import DEFAULT_SETTINGS_PATH, SystemConfig, load_config
 from app.core.errors import AppError, InternalError, ValidationError
@@ -99,6 +99,7 @@ def create_app(settings_path: str = DEFAULT_SETTINGS_PATH,
     app.include_router(jobs.router)
     app.include_router(query.router)
     app.include_router(plugins.router)
+    app.include_router(kbs.router)
 
     app.mount("/ui", StaticFiles(directory=str(WEB_DIR), html=True), name="ui")
     return app

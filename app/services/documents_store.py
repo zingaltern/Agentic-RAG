@@ -23,7 +23,7 @@ class DocEntry:
 class DocumentsStore:
     def __init__(self):
         self._docs: dict[str, DocEntry] = {}
-        self._by_hash: dict[str, str] = {}
+        self._by_hash: dict[tuple[str, str], str] = {}   # (kb_id, content_hash) → document_id
         self._lock = threading.Lock()
 
     def register(self, doc: Document, chunk_count: int) -> DocEntry:
@@ -34,18 +34,20 @@ class DocumentsStore:
             chunk_count=chunk_count,
             created_at=time.time(),
         )
+        kb_id = doc.metadata.get("kb_id", "default")
         with self._lock:
             self._docs[entry.document_id] = entry
-            self._by_hash[doc.content_hash] = doc.document_id
+            self._by_hash[(kb_id, doc.content_hash)] = doc.document_id
         return entry
 
     def get(self, document_id: str) -> DocEntry | None:
         with self._lock:
             return self._docs.get(document_id)
 
-    def by_hash(self, content_hash: str) -> str | None:
+    def by_hash(self, content_hash: str, kb_id: str = "default") -> str | None:
+        """按库作用域的幂等查询（13.5：同内容不同库互不影响）。"""
         with self._lock:
-            return self._by_hash.get(content_hash)
+            return self._by_hash.get((kb_id, content_hash))
 
     def list(self, page: int = 1, size: int = 20) -> list[dict]:
         with self._lock:
@@ -62,9 +64,9 @@ class DocumentsStore:
             entry = self._docs.pop(document_id, None)
             if entry is None:
                 return False
-            for hash_, doc_id in list(self._by_hash.items()):
+            for key, doc_id in list(self._by_hash.items()):
                 if doc_id == document_id:
-                    del self._by_hash[hash_]
+                    del self._by_hash[key]
             return True
 
     @staticmethod

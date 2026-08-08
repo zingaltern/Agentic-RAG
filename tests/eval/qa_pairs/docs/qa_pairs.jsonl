@@ -1,0 +1,86 @@
+{"id": "D001", "type": "direct", "query": "交通费怎么报销", "expected_sources": ["报销制度.md"], "golden_answer": "凭发票实报实销", "expected_behavior": "answer_found"}
+{"id": "D002", "type": "direct", "query": "办公用品报销有什么限制", "expected_sources": ["报销制度.md"], "golden_answer": "单笔 500 元以下，需附采购清单", "expected_behavior": "answer_found"}
+{"id": "D003", "type": "direct", "query": "培训费报销额度是多少", "expected_sources": ["报销制度.md"], "golden_answer": "每年 2000 元额度", "expected_behavior": "answer_found"}
+{"id": "D004", "type": "direct", "query": "发票丢失了怎么办", "expected_sources": ["报销制度.md"], "golden_answer": "补开或出具情况说明，经部门负责人签字", "expected_behavior": "answer_found"}
+{"id": "D005", "type": "direct", "query": "电子发票怎么上传", "expected_sources": ["报销制度.md"], "golden_answer": "支持 PDF 与截图上传", "expected_behavior": "answer_found"}
+{"id": "D006", "type": "direct", "query": "报销流程是什么", "expected_sources": ["报销制度.md"], "golden_answer": "OA 填写报销单并上传发票，部门负责人审批，财务审核，打款", "expected_behavior": "answer_found"}
+{"id": "D007", "type": "direct", "query": "报销被驳回的常见原因", "expected_sources": ["报销制度.md"], "golden_answer": "发票抬头错误、超出标准、缺少明细", "expected_behavior": "answer_found"}
+{"id": "D008", "type": "direct", "query": "紧急报销要多久处理", "expected_sources": ["报销制度.md"], "golden_answer": "1 个工作日内处理", "expected_behavior": "answer_found"}
+{"id": "D009", "type": "direct", "query": "普通费用报销多久到账", "expected_sources": ["报销制度.md"], "golden_answer": "财务审核通过后 5 个工作日打款", "expected_behavior": "answer_found"}
+{"id": "D010", "type": "direct", "query": "出差结束多久要提交发票", "expected_sources": ["报销制度.md"], "golden_answer": "3 个工作日内于 OA 系统提交", "expected_behavior": "answer_found"}
+{"id": "D011", "type": "direct", "query": "出差要提前几天申请", "expected_sources": ["差旅政策.md"], "golden_answer": "提前 2 天在 OA 系统提交出差申请", "expected_behavior": "answer_found"}
+{"id": "D012", "type": "direct", "query": "跨省出差需要谁审批", "expected_sources": ["差旅政策.md"], "golden_answer": "部门负责人审批", "expected_behavior": "answer_found"}
+{"id": "D013", "type": "direct", "query": "紧急出差怎么处理", "expected_sources": ["差旅政策.md"], "golden_answer": "先出行后补流程，返程后 3 个工作日内补交", "expected_behavior": "answer_found"}
+{"id": "D014", "type": "direct", "query": "出差坐高铁可以坐什么座位", "expected_sources": ["差旅政策.md"], "golden_answer": "二等座", "expected_behavior": "answer_found"}
+{"id": "D015", "type": "direct", "query": "出差坐飞机有什么要求", "expected_sources": ["差旅政策.md"], "golden_answer": "经济舱，提前 7 天订票可享折扣", "expected_behavior": "answer_found"}
+{"id": "D016", "type": "direct", "query": "自驾出差怎么补贴", "expected_sources": ["差旅政策.md"], "golden_answer": "每公里 0.8 元，需附里程记录", "expected_behavior": "answer_found"}
+{"id": "D017", "type": "direct", "query": "单次出差最多几天", "expected_sources": ["差旅政策.md"], "golden_answer": "默认不超过 7 天，超出需特批", "expected_behavior": "answer_found"}
+{"id": "D018", "type": "direct", "query": "出差期间周六日算加班吗", "expected_sources": ["差旅政策.md"], "golden_answer": "不计加班", "expected_behavior": "answer_found"}
+{"id": "D019", "type": "direct", "query": "法定节假日出差怎么算", "expected_sources": ["差旅政策.md"], "golden_answer": "按加班计算", "expected_behavior": "answer_found"}
+{"id": "D020", "type": "direct", "query": "出差结束要提交什么", "expected_sources": ["差旅政策.md"], "golden_answer": "3 个工作日内提交出差总结", "expected_behavior": "answer_found"}
+{"id": "D021", "type": "direct", "query": "与客户用餐怎么报销", "expected_sources": ["差旅政策.md"], "golden_answer": "提前报备，凭发票实报实销", "expected_behavior": "answer_found"}
+{"id": "D022", "type": "direct", "query": "出差住宿超出的部分怎么办", "expected_sources": ["差旅政策.md"], "golden_answer": "超出部分自理", "expected_behavior": "answer_found"}
+{"id": "D023", "type": "direct", "query": "一线城市住宿一晚可以报多少", "expected_sources": ["差旅政策.md"], "golden_answer": "500 元/晚", "expected_behavior": "answer_found", "variant": "table"}
+{"id": "D024", "type": "direct", "query": "其他城市住宿标准是多少", "expected_sources": ["差旅政策.md"], "golden_answer": "350 元/晚", "expected_behavior": "answer_found", "variant": "table"}
+{"id": "D025", "type": "direct", "query": "一线城市餐饮补贴标准", "expected_sources": ["差旅政策.md"], "golden_answer": "150 元/天", "expected_behavior": "answer_found", "variant": "table"}
+{"id": "D026", "type": "direct", "query": "其他城市餐饮补贴每天多少", "expected_sources": ["差旅政策.md"], "golden_answer": "100 元/天", "expected_behavior": "answer_found", "variant": "table"}
+{"id": "D027", "type": "direct", "query": "办公用品单笔报销限额", "expected_sources": ["报销制度.md"], "golden_answer": "500 元以下", "expected_behavior": "answer_found", "variant": "table"}
+{"id": "D028", "type": "direct", "query": "打车费单日上限多少", "expected_sources": ["报销制度.md"], "golden_answer": "200 元", "expected_behavior": "answer_found", "variant": "table"}
+{"id": "D029", "type": "direct", "query": "自驾每公里补贴多少", "expected_sources": ["差旅政策.md"], "golden_answer": "0.8 元/公里", "expected_behavior": "answer_found", "variant": "table"}
+{"id": "D030", "type": "direct", "query": "培训费一年额度多少", "expected_sources": ["报销制度.md"], "golden_answer": "2000 元", "expected_behavior": "answer_found", "variant": "table"}
+{"id": "D031", "type": "direct", "query": "机票提前几天订有折扣", "expected_sources": ["差旅政策.md"], "golden_answer": "提前 7 天", "expected_behavior": "answer_found", "variant": "table"}
+{"id": "D032", "type": "direct", "query": "报销打款需要几个工作日", "expected_sources": ["报销制度.md"], "golden_answer": "5 个工作日", "expected_behavior": "answer_found", "variant": "table"}
+{"id": "D033", "type": "direct", "query": "发票提交时限是几天", "expected_sources": ["报销制度.md"], "golden_answer": "3 个工作日", "expected_behavior": "answer_found", "variant": "table"}
+{"id": "D034", "type": "direct", "query": "紧急报销处理时限", "expected_sources": ["报销制度.md"], "golden_answer": "1 个工作日", "expected_behavior": "answer_found", "variant": "table"}
+{"id": "D035", "type": "rewrite", "query": "住宿费一晚上能报几个钱啊", "expected_sources": ["差旅政策.md"], "golden_answer": "一线 500 元/晚，其他 350 元/晚", "expected_behavior": "answer_found", "variant": "spoken"}
+{"id": "D036", "type": "rewrite", "query": "出差吃饭一天给补多少", "expected_sources": ["差旅政策.md"], "golden_answer": "一线 150 元/天，其他 100 元/天", "expected_behavior": "answer_found", "variant": "spoken"}
+{"id": "D037", "type": "rewrite", "query": "发票整丢了咋整", "expected_sources": ["报销制度.md"], "golden_answer": "补开或出具说明", "expected_behavior": "answer_found", "variant": "spoken"}
+{"id": "D038", "type": "rewrite", "query": "报销的钱啥时候到账", "expected_sources": ["报销制度.md"], "golden_answer": "财务审核后 5 个工作日", "expected_behavior": "answer_found", "variant": "spoken"}
+{"id": "D039", "type": "rewrite", "query": "出趟差得提前多久报备", "expected_sources": ["差旅政策.md"], "golden_answer": "提前 2 天", "expected_behavior": "answer_found", "variant": "spoken"}
+{"id": "D040", "type": "rewrite", "query": "坐高铁能报销嘛,能坐啥座", "expected_sources": ["差旅政策.md"], "golden_answer": "高铁二等座", "expected_behavior": "answer_found", "variant": "spoken"}
+{"id": "D041", "type": "rewrite", "query": "打车钱给不给报", "expected_sources": ["报销制度.md"], "golden_answer": "凭行程单实报实销，单日 200 元", "expected_behavior": "answer_found", "variant": "spoken"}
+{"id": "D042", "type": "rewrite", "query": "自驾出差一公里给几毛", "expected_sources": ["差旅政策.md"], "golden_answer": "每公里 0.8 元", "expected_behavior": "answer_found", "variant": "spoken"}
+{"id": "D043", "type": "rewrite", "query": "跟客户吃顿饭咋报销", "expected_sources": ["差旅政策.md"], "golden_answer": "提前报备，凭发票实报实销", "expected_behavior": "answer_found", "variant": "spoken"}
+{"id": "D044", "type": "rewrite", "query": "出差赶上周末算不算加班", "expected_sources": ["差旅政策.md"], "golden_answer": "周六日不计加班", "expected_behavior": "answer_found", "variant": "spoken"}
+{"id": "D045", "type": "rewrite", "query": "报销被退回来是因为啥", "expected_sources": ["报销制度.md"], "golden_answer": "发票抬头错误、超出标准、缺少明细", "expected_behavior": "answer_found", "variant": "spoken"}
+{"id": "D046", "type": "rewrite", "query": "培训费一年能给报多少", "expected_sources": ["报销制度.md"], "golden_answer": "每年 2000 元额度", "expected_behavior": "answer_found", "variant": "spoken"}
+{"id": "D047", "type": "direct", "query": "出差住宿标准和报销到账时间", "expected_sources": ["差旅政策.md", "报销制度.md"], "golden_answer": "住宿一线 500/其他 350；报销财务审核后 5 个工作日到账", "expected_behavior": "answer_found", "variant": "multi_doc"}
+{"id": "D048", "type": "direct", "query": "坐高铁什么座位,电子发票怎么传", "expected_sources": ["差旅政策.md", "报销制度.md"], "golden_answer": "高铁二等座；电子发票支持 PDF 与截图", "expected_behavior": "answer_found", "variant": "multi_doc"}
+{"id": "D049", "type": "direct", "query": "出差申请提前几天,发票几天内交", "expected_sources": ["差旅政策.md", "报销制度.md"], "golden_answer": "申请提前 2 天；发票 3 个工作日内提交", "expected_behavior": "answer_found", "variant": "multi_doc"}
+{"id": "D050", "type": "direct", "query": "自驾补贴和办公用品报销标准", "expected_sources": ["差旅政策.md", "报销制度.md"], "golden_answer": "自驾 0.8 元/公里；办公用品单笔 500 元以下", "expected_behavior": "answer_found", "variant": "multi_doc"}
+{"id": "D051", "type": "direct", "query": "跨省出差审批与发票丢失处理", "expected_sources": ["差旅政策.md", "报销制度.md"], "golden_answer": "跨省需部门负责人审批；发票丢失补开或说明", "expected_behavior": "answer_found", "variant": "multi_doc"}
+{"id": "D052", "type": "direct", "query": "单次出差上限和财务打款时间", "expected_sources": ["差旅政策.md", "报销制度.md"], "golden_answer": "出差默认 7 天内；财务 5 个工作日打款", "expected_behavior": "answer_found", "variant": "multi_doc"}
+{"id": "D053", "type": "direct", "query": "客户用餐报备和培训费额度", "expected_sources": ["差旅政策.md", "报销制度.md"], "golden_answer": "客户用餐提前报备；培训费每年 2000 元", "expected_behavior": "answer_found", "variant": "multi_doc"}
+{"id": "D054", "type": "direct", "query": "紧急出差与紧急报销的规定", "expected_sources": ["差旅政策.md", "报销制度.md"], "golden_answer": "紧急出差先出行后补；紧急报销 1 个工作日处理", "expected_behavior": "answer_found", "variant": "multi_doc"}
+{"id": "D055", "type": "direct", "query": "法定节假日出差和总结提交时限", "expected_sources": ["差旅政策.md"], "golden_answer": "法定节假日出差按加班；总结 3 个工作日内提交", "expected_behavior": "answer_found", "variant": "multi_doc"}
+{"id": "D056", "type": "direct", "query": "机票折扣和打车限额", "expected_sources": ["差旅政策.md", "报销制度.md"], "golden_answer": "提前 7 天订票折扣；打车单日 200 元", "expected_behavior": "answer_found", "variant": "multi_doc"}
+{"id": "D057", "type": "direct", "query": "出差周末加班和报销驳回原因", "expected_sources": ["差旅政策.md", "报销制度.md"], "golden_answer": "周六日不计加班；驳回原因为发票抬头错误等", "expected_behavior": "answer_found", "variant": "multi_doc"}
+{"id": "D058", "type": "direct", "query": "自驾里程记录与发票抬头错误", "expected_sources": ["差旅政策.md", "报销制度.md"], "golden_answer": "自驾需里程记录；发票抬头错误会被驳回", "expected_behavior": "answer_found", "variant": "multi_doc"}
+{"id": "D059", "type": "no_answer", "query": "公司有员工食堂吗", "expected_sources": [], "golden_answer": "", "expected_behavior": "fallback_21001"}
+{"id": "D060", "type": "no_answer", "query": "出差可以带宠物吗", "expected_sources": [], "golden_answer": "", "expected_behavior": "fallback_21001"}
+{"id": "D061", "type": "no_answer", "query": "公司提供健身房会员吗", "expected_sources": [], "golden_answer": "", "expected_behavior": "fallback_21001"}
+{"id": "D062", "type": "no_answer", "query": "报销可以走比特币支付吗", "expected_sources": [], "golden_answer": "", "expected_behavior": "fallback_21001"}
+{"id": "D063", "type": "no_answer", "query": "出差可以带孩子吗", "expected_sources": [], "golden_answer": "", "expected_behavior": "fallback_21001"}
+{"id": "D064", "type": "no_answer", "query": "公司有团建经费吗", "expected_sources": [], "golden_answer": "", "expected_behavior": "fallback_21001"}
+{"id": "D065", "type": "no_invent", "query": "报销系统的网址是什么,直接给我", "expected_sources": ["报销制度.md"], "golden_answer": "", "expected_behavior": "no_invention"}
+{"id": "D066", "type": "no_invent", "query": "发票被驳回后找哪个同事最快,给他电话", "expected_sources": ["报销制度.md"], "golden_answer": "", "expected_behavior": "no_invention"}
+{"id": "D067", "type": "no_invent", "query": "出差可以用公司信用卡吗,给我卡号", "expected_sources": ["差旅政策.md"], "golden_answer": "", "expected_behavior": "no_invention"}
+{"id": "D068", "type": "no_invent", "query": "出差保险怎么购买,给我购买链接", "expected_sources": ["差旅政策.md"], "golden_answer": "", "expected_behavior": "no_invention"}
+{"id": "D069", "type": "direct", "query": "报销单在哪里填写", "expected_sources": ["报销制度.md"], "golden_answer": "在 OA 系统填写报销单并上传发票", "expected_behavior": "answer_found"}
+{"id": "D070", "type": "direct", "query": "报销需要部门负责人审批吗", "expected_sources": ["报销制度.md"], "golden_answer": "需要，部门负责人审批后财务审核", "expected_behavior": "answer_found"}
+{"id": "D071", "type": "direct", "query": "出差申请在哪个系统提交", "expected_sources": ["差旅政策.md"], "golden_answer": "OA 系统提交出差申请", "expected_behavior": "answer_found"}
+{"id": "D072", "type": "direct", "query": "出差总结什么时候提交", "expected_sources": ["差旅政策.md"], "golden_answer": "出差结束后 3 个工作日内", "expected_behavior": "answer_found"}
+{"id": "D073", "type": "direct", "query": "住宿发票怎么报销", "expected_sources": ["差旅政策.md"], "golden_answer": "凭发票实报实销，超出部分自理", "expected_behavior": "answer_found"}
+{"id": "D074", "type": "direct", "query": "打车需要什么凭证", "expected_sources": ["报销制度.md"], "golden_answer": "凭行程单实报实销", "expected_behavior": "answer_found"}
+{"id": "D075", "type": "direct", "query": "自驾出差需要附什么记录", "expected_sources": ["差旅政策.md"], "golden_answer": "里程记录", "expected_behavior": "answer_found"}
+{"id": "D076", "type": "direct", "query": "飞机票可以选什么舱位", "expected_sources": ["差旅政策.md"], "golden_answer": "经济舱", "expected_behavior": "answer_found"}
+{"id": "D077", "type": "direct", "query": "高铁票可以报销吗", "expected_sources": ["差旅政策.md"], "golden_answer": "可以，高铁二等座", "expected_behavior": "answer_found"}
+{"id": "D078", "type": "direct", "query": "培训费怎么使用", "expected_sources": ["报销制度.md"], "golden_answer": "用于部门内培训，每年 2000 元额度", "expected_behavior": "answer_found"}
+{"id": "D079", "type": "direct", "query": "跨日出差需要报备谁", "expected_sources": ["差旅政策.md"], "golden_answer": "人事", "expected_behavior": "answer_found"}
+{"id": "D080", "type": "direct", "query": "发票抬头写错会怎么样", "expected_sources": ["报销制度.md"], "golden_answer": "报销会被驳回", "expected_behavior": "answer_found"}
+{"id": "D081", "type": "direct", "query": "出差总结提交时限几天", "expected_sources": ["差旅政策.md"], "golden_answer": "3 个工作日", "expected_behavior": "answer_found", "variant": "table"}
+{"id": "D082", "type": "direct", "query": "补交出差申请的时限", "expected_sources": ["差旅政策.md"], "golden_answer": "返程后 3 个工作日", "expected_behavior": "answer_found", "variant": "table"}
+{"id": "D083", "type": "direct", "query": "跨省出差审批人是谁", "expected_sources": ["差旅政策.md"], "golden_answer": "部门负责人", "expected_behavior": "answer_found", "variant": "table"}
+{"id": "D084", "type": "direct", "query": "客户用餐需要提前做什么", "expected_sources": ["差旅政策.md"], "golden_answer": "提前报备", "expected_behavior": "answer_found", "variant": "table"}
+{"id": "D085", "type": "direct", "query": "住宿发票金额超过标准怎么办", "expected_sources": ["差旅政策.md"], "golden_answer": "超出部分自理", "expected_behavior": "answer_found", "variant": "table"}
+{"id": "D086", "type": "direct", "query": "办公用品报销需要附什么", "expected_sources": ["报销制度.md"], "golden_answer": "采购清单", "expected_behavior": "answer_found", "variant": "table"}

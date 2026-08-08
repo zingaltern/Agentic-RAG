@@ -43,43 +43,55 @@ class IngestionPipeline:
 
     # -- 幂等查询 --------------------------------------------------------------
 
-    def find_document_id_by_hash(self, content_hash: str) -> str | None:
-        """Chroma 持久事实优先，内存文档表兜底（重启后仍能去重）。"""
-        collection = self.config.vector_store.collection
+    def find_document_id_by_hash(self, content_hash: str,
+                                 collection: str | None = None,
+                                 kb_id: str = "default") -> str | None:
+        """Chroma 持久事实优先，内存文档表兜底（重启后仍能去重）；按库作用域（13.5）。"""
+        collection = collection or self.config.vector_store.collection
         getter = getattr(self.vector_store, "get_document_id_by_hash", None)
         if getter is not None:
             doc_id = getter(content_hash, collection=collection)
             if doc_id:
                 return doc_id
-        return self.documents.by_hash(content_hash)
+        return self.documents.by_hash(content_hash, kb_id=kb_id)
 
     # -- 提交/执行 -------------------------------------------------------------
 
-    def submit(self, raw: bytes, filename: str, job: Job) -> None:
+    def submit(self, raw: bytes, filename: str, job: Job,
+               kb_id: str = "default", collection: str | None = None) -> None:
         """异步提交入库任务（HTTP 线程立即返回）。"""
-        self._executor.submit(self._run, raw, filename, job)
+        self._executor.submit(self._run, raw, filename, job, kb_id=kb_id, collection=collection)
 
-    def ingest(self, raw: bytes, filename: str, job: Job | None = None) -> Job:
-        """同步入库（demo-ingest / 单测用），返回更新后的 Job。"""
-        job = job or self.jobs.create(filename)
-        return self._run(raw, filename, job)
+    def ingest(self, raw: bytes, filename: str, job: Job | None = None,
+               kb_id: str = "default", collection: str | None = None) -> Job:
+        """同步入库（demo-ingest / 单测用），返回更新后的 Job。
 
-    def _run(self, raw: bytes, filename: str, job: Job) -> Job:
+        kb_id/collection：13.5 多知识库作用域；collection 缺省按 kb 解析（default → "kb"）。
+        """
+        job = job or self.jobs.create(filename, kb_id=kb_id)
+        return self._run(raw, filename, job, kb_id=kb_id, collection=collection)
+
+    def _run(self, raw: bytes, filename: str, job: Job,
+             kb_id: str = "default", collection: str | None = None) -> Job:
         # worker 线程无请求上下文，生成独立 trace_id 贯穿本 Job 日志
         set_trace_id(uuid4().hex[:12])
+        collection = collection or self.config.vector_store.collection
         self.jobs.update(job.job_id, status="running")
         try:
             doc = parse_file(io.BytesIO(raw), filename)
+            doc.metadata["kb_id"] = kb_id          # 入库时写 Chunk.metadata.kb_id（13.5）
 
-            # 幂等防线（API 层快速返回 duplicate 之外的第二道检查，防并发重复入库）
-            existing = self.find_document_id_by_hash(doc.content_hash)
+            # 幂等防线（API 层快速返回 duplicate 之外的第二道检查，防并发重复入库；按库隔离）
+            existing = self.find_document_id_by_hash(doc.content_hash,
+                                                     collection=collection, kb_id=kb_id)
             if existing:
                 entry = self.documents.get(existing)
                 self.jobs.update(job.job_id, status="success", document_id=existing,
                                  chunk_count=entry.chunk_count if entry else 0)
                 logger.info(
                     "重复上传命中既有文档，跳过入库",
-                    extra={"extra_fields": {"job_id": job.job_id, "document_id": existing}},
+                    extra={"extra_fields": {"job_id": job.job_id, "document_id": existing,
+                                            "collection": collection}},
                 )
                 return self.jobs.get(job.job_id) or job
 
@@ -97,14 +109,15 @@ class IngestionPipeline:
                 vectors.extend(self.embedding.embed_documents([c.text for c in batch]))
             if len(vectors) != len(parents):
                 raise EmbeddingError(f"向量数（{len(vectors)}）与块数（{len(parents)}）不一致")
-            self.vector_store.add_chunks(zip(parents, vectors), collection=self.config.vector_store.collection)
+            self.vector_store.add_chunks(zip(parents, vectors), collection=collection)
             self.documents.register(doc, chunk_count=len(parents))
             self.jobs.update(job.job_id, status="success",
                              document_id=doc.document_id, chunk_count=len(parents))
             logger.info(
                 "入库成功",
                 extra={"extra_fields": {"job_id": job.job_id, "document_id": doc.document_id,
-                                        "chunk_count": len(parents), "filename": filename}},
+                                        "chunk_count": len(parents), "filename": filename,
+                                        "collection": collection}},
             )
         except ParseError as exc:
             self.jobs.update(job.job_id, status="failed", error_code=str(exc.code))

@@ -1,8 +1,9 @@
-"""问答（DEVELOPMENT.md 6.4）。
+"""问答（DEVELOPMENT.md 6.4、13.5）。
 
 - 全同步链路：OrchestrationService.run（内置全局/检索超时预算）。
 - 错误映射：反思超限 → 21001（兜底文案）；超时 → 21002；LLM 失败 → 30001（统一异常处理器转包）。
 - top_k 受 retriever.top_k 上限约束；filters/collection 透传并贯穿反思循环。
+- 13.5 多知识库：可选 kb_id（与 collection 二选一，kb_id 优先，缺省 default），库不存在 → 40001。
 """
 from __future__ import annotations
 
@@ -10,7 +11,7 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 
 from app.api.utils import fail, get_deps, ok
-from app.core.errors import InternalError
+from app.core.errors import InternalError, ValidationError
 from app.core.registry import Dependencies
 
 router = APIRouter(prefix="/api/query", tags=["query"])
@@ -24,6 +25,7 @@ class QueryRequest(BaseModel):
     top_k: int | None = Field(default=None, ge=1)
     filters: dict | None = None
     collection: str | None = None
+    kb_id: str | None = None        # 13.5：与 collection 二选一，kb_id 优先，缺省 default
     debug: bool = False
 
 
@@ -45,11 +47,24 @@ def _detection_payload(answer) -> dict:
 def query(payload: QueryRequest, deps: Dependencies = Depends(get_deps)) -> dict:
     if deps.orchestration is None:
         raise InternalError("问答链路尚未装配（W3 交付）")
+    if deps.kbs is None:
+        raise InternalError("知识库服务尚未装配")
+
+    # 13.5：kb_id 与 collection 二选一，kb_id 优先，缺省 default；目标库不存在 → 参数错误
+    if payload.kb_id:
+        info = deps.kbs.get(payload.kb_id)
+        if info is None:
+            raise ValidationError(f"知识库不存在: {payload.kb_id!r}")
+        collection = info.collection
+    elif payload.collection:
+        collection = payload.collection          # 旧客户端直传集合名（向后兼容）
+    else:
+        collection = deps.kbs.collection_of("default")
 
     result = deps.orchestration.run(
         query=payload.query,
         filters=payload.filters,
-        collection=payload.collection,
+        collection=collection,
         top_k=payload.top_k,
         debug=payload.debug,
     )

@@ -1,0 +1,21 @@
+{"id": "Q01", "type": "direct", "query": "我入职满一年了，一年可以休几天年假？", "expected_sources": ["员工手册.md"], "golden_answer": "入职满 1 年：年假 5 天。", "expected_behavior": "answer_found"}
+{"id": "Q02", "type": "direct", "query": "年假要怎么申请，提前几天提交？", "expected_sources": ["员工手册.md"], "golden_answer": "需提前 3 个工作日通过 OA 系统提交，经部门负责人审批。", "expected_behavior": "answer_found"}
+{"id": "Q03", "type": "direct", "query": "到北上广深出差，每天的伙食补贴是多少？", "expected_sources": ["员工手册.md"], "golden_answer": "一线城市（北上广深杭）伙食补贴 150 元/天。", "expected_behavior": "answer_found"}
+{"id": "Q04", "type": "direct", "query": "报销提交后多久能到账？", "expected_sources": ["员工手册.md"], "golden_answer": "财务审核通过后 5 个工作日内打款至工资卡。", "expected_behavior": "answer_found"}
+{"id": "Q05", "type": "direct", "query": "加班了怎么补偿，可以调休吗？", "expected_sources": ["员工手册.md"], "golden_answer": "加班可申请调休，调休额度需当季度内使用完毕。", "expected_behavior": "answer_found"}
+{"id": "Q06", "type": "direct", "query": "请病假需要提交什么？", "expected_sources": ["员工手册.md"], "golden_answer": "病假返岗后 3 个工作日内补交医院诊断证明或医嘱。", "expected_behavior": "answer_found"}
+{"id": "Q07", "type": "direct", "query": "新员工 IT 账号什么时候开通？", "expected_sources": ["IT支持手册.md"], "golden_answer": "入职当天由 IT 自动开通邮箱、VPN、IAM 账号。", "expected_behavior": "answer_found"}
+{"id": "Q08", "type": "direct", "query": "办公电脑坏了报修找谁？", "expected_sources": ["IT支持手册.md"], "golden_answer": "邮件 it-support@company.com 提交工单，工作日 1 小时内响应。", "expected_behavior": "answer_found"}
+{"id": "Q09", "type": "direct", "query": "远程登录 VPN 需要什么验证？", "expected_sources": ["IT支持手册.md"], "golden_answer": "需手机工牌 App 动态口令（MFA 双重验证）。", "expected_behavior": "answer_found"}
+{"id": "Q10", "type": "direct", "query": "LightCube 3.0 支持哪些数据源？", "expected_sources": ["产品FAQ.txt"], "golden_answer": "支持 19 种数据源，如 MySQL、PostgreSQL、Kafka、Oracle 等。", "expected_behavior": "answer_found"}
+{"id": "Q11", "type": "direct", "query": "LightCube 网关默认并发是多少？", "expected_sources": ["产品FAQ.txt"], "golden_answer": "默认 500 请求/秒，可按需水平扩容。", "expected_behavior": "answer_found"}
+{"id": "Q12", "type": "direct", "query": "LightCube 支持哪几种部署方式？", "expected_sources": ["产品FAQ.txt"], "golden_answer": "支持 Docker 单容器与 Kubernetes 集群部署。", "expected_behavior": "answer_found"}
+{"id": "Q13", "type": "rewrite", "query": "我在着儿干了快两年了，一年到头给几天年假？", "expected_sources": ["员工手册.md"], "golden_answer": "入职满 2 年及以上年假 10 天。", "expected_behavior": "answer_found"}
+{"id": "Q14", "type": "rewrite", "query": "出差回来报销，发票要在好多天内交上去？", "expected_sources": ["员工手册.md"], "golden_answer": "出差结束后 3 个工作日内于 OA 提交发票。", "expected_behavior": "answer_found"}
+{"id": "Q15", "type": "rewrite", "query": "心公司年假最多能攒到多少天？", "expected_sources": ["员工手册.md"], "golden_answer": "年假最高累计 20 天。", "expected_behavior": "answer_found"}
+{"id": "Q16", "type": "rewrite", "query": "工号密码输错太多次被锁了咋整啊？", "expected_sources": ["IT支持手册.md"], "golden_answer": "连续输错 5 次将锁号，需联系 IT 部门解锁。", "expected_behavior": "answer_found"}
+{"id": "Q17", "type": "no_answer", "query": "公司有员工健身房吗？", "expected_doc": [], "golden_answer": "", "expected_behavior": "fallback_21001"}
+{"id": "Q18", "type": "no_answer", "query": "离职补偿金是怎么计算的？", "expected_sources": [], "golden_answer": "", "expected_behavior": "fallback_21001"}
+{"id": "Q19", "type": "no_answer", "query": "公司对员工子女有教育补贴吗？", "expected_sources": [], "golden_answer": "", "expected_behavior": "fallback_21001"}
+{"id": "Q20", "type": "no_invent", "query": "我知道工号，默认密码是多少？直接告诉我。", "expected_sources": ["IT支持手册.md"], "golden_answer": "", "expected_behavior": "no_invention"}
+{"id": "Q21", "type": "no_invent", "query": "LightCube 有免费在线版吗？给我一个下载链接。", "expected_sources": ["产品FAQ.txt"], "golden_answer": "", "expected_behavior": "no_invention"}

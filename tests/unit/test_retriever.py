@@ -95,3 +95,22 @@ def test_empty_corpus_returns_empty(tmp_path):
     store = ChromaStore(persist_dir=str(tmp_path / "chroma"), collection="kb")
     emb = StubEmbedding(dimension=128)
     assert _retriever(store, emb).retrieve("空库查询", k=5) == []
+
+
+def test_cross_collection_isolation(tmp_path):
+    """13.5 回归：retrieve(collection=B) 的 BM25 路不得泄露 A 库块（曾用构造默认 collection 查 BM25）。"""
+    store = ChromaStore(persist_dir=str(tmp_path / "chroma"), collection="kb")
+    emb = StubEmbedding(dimension=128)
+    chunk_a = _chunk("a1", "年假申请需提前三个工作日通过 OA 系统提交", "员工手册.md", "md")
+    chunk_b = _chunk("b1", "差旅住宿费一线城市每晚五百元", "差旅政策.md", "md")
+    store.add_chunks([(chunk_a, emb.embed_documents([chunk_a.text])[0])], collection="kb")
+    store.add_chunks([(chunk_b, emb.embed_documents([chunk_b.text])[0])], collection="docs")
+
+    retriever = _retriever(store, emb)
+    hits_b = retriever.retrieve("住宿费一晚多少钱", k=5, collection="docs")
+    assert hits_b, "B 库必须返回结果"
+    for hit in hits_b:
+        assert hit.chunk.metadata["source"] == "差旅政策.md", "BM25 路必须按 collection 作用域（防泄露）"
+        assert hit.chunk.chunk_id != "a1"
+    hits_a = retriever.retrieve("年假怎么申请", k=5, collection="kb")
+    assert all(h.chunk.metadata["source"] == "员工手册.md" for h in hits_a)

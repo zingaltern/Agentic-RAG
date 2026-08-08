@@ -45,7 +45,7 @@ def test_load_real_settings_defaults():
     assert cfg.retriever.provider == "hybrid_rrf"
     # W5（第 13 章）默认切新 provider；旧实现保留可回退
     assert cfg.reranker.provider == "bge_reranker"
-    assert cfg.reranker.model_name == "BAAI/bge-reranker-v2-m3"
+    assert cfg.reranker.model_name == "BAAI/bge-reranker-base"  # 13.2：CPU 场景默认 base（v2-m3 可配置切换）
     assert cfg.evaluator.provider == "semantic_v2"
     assert cfg.evaluator.semantic_v2_threshold == 0.45
     assert cfg.rewriter.provider == "llm"

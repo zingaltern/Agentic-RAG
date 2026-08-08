@@ -35,9 +35,9 @@ test:
 coverage:
 	$(PYTHON) -m pytest tests -m "not integration" --cov=app --cov-report=term-missing -q --cov-fail-under=0
 
-## 评测（8.3）：进程内模式跑 qa_pairs，输出 reports/eval-*.md
+## 评测（8.3/13.6）：全库（default+docs）进程内评测，输出 reports/eval-*.md（含按库汇总）
 eval:
-	$(PYTHON) -m app.cli.rageval --in-process
+	$(PYTHON) -m app.cli.rageval --in-process --all-kbs
 
 ## 集成测试（8.2）：需要本机 BGE 模型缓存（不联网下载）
 integration:

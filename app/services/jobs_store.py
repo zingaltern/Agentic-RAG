@@ -16,10 +16,10 @@ class JobStore:
         self._jobs: dict[str, Job] = {}
         self._lock = threading.Lock()
 
-    def create(self, filename: str) -> Job:
+    def create(self, filename: str, kb_id: str | None = None) -> Job:
         now = time.time()
         job = Job(job_id=uuid4().hex[:8], filename=filename,
-                  status="pending", created_at=now, updated_at=now)
+                  status="pending", kb_id=kb_id, created_at=now, updated_at=now)
         with self._lock:
             self._jobs[job.job_id] = job
         return job

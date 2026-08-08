@@ -39,8 +39,9 @@ class _Retriever:
         self.chunks = chunks
         self.calls = []
 
-    def retrieve(self, query, k, filters=None, path="hybrid"):
-        self.calls.append({"query": query, "k": k, "filters": filters, "path": path})
+    def retrieve(self, query, k, filters=None, path="hybrid", collection=None):
+        self.calls.append({"query": query, "k": k, "filters": filters, "path": path,
+                           "collection": collection})
         return self.chunks[:k]
 
 
@@ -137,7 +138,7 @@ def test_request_timeout_raises_21002():
     config.orchestration.request_timeout_seconds = 0.05
 
     class _SlowRetriever(_Retriever):
-        def retrieve(self, query, k, filters=None, path="hybrid"):
+        def retrieve(self, query, k, filters=None, path="hybrid", collection=None):
             time.sleep(0.2)
             return self.chunks[:k]
 
@@ -156,7 +157,7 @@ def test_search_budget_per_iteration():
     config.orchestration.search_timeout_seconds = 0.05
 
     class _SlowRetriever(_Retriever):
-        def retrieve(self, query, k, filters=None, path="hybrid"):
+        def retrieve(self, query, k, filters=None, path="hybrid", collection=None):
             time.sleep(0.15)
             return self.chunks[:k]
 
@@ -217,12 +218,11 @@ def test_filters_pass_through_loop():
     assert all(c["filters"] == {"metadata": {"kind": "md"}} for c in retriever.calls)
 
 
-def test_unknown_collection_rejected():
-    """collection 非默认 → ValidationError（MVP 单库）。"""
+def test_collection_passes_through():
+    """13.5：collection 由路由按 kb_id 解析后贯穿检索（编排层不再限制单库）。"""
     retriever = _Retriever([_scored("年假")])
-    svc = _build(retriever, _Evaluator([EvaluationResult(True, 0.9, "ok")]),
-                 _Rewriter([]), _Detector(), _LLM())
-    from app.core.errors import ValidationError
-
-    with pytest.raises(ValidationError):
-        svc.run("年假怎么申请", collection="other_kb")
+    evaluator = _Evaluator([EvaluationResult(True, 0.9, "ok")])
+    svc = _build(retriever, evaluator, _Rewriter([]), _Detector(), _LLM())
+    svc.run("年假怎么申请", collection="docs")
+    assert retriever.calls, "必须执行检索"
+    assert all(c["collection"] == "docs" for c in retriever.calls), "collection 必须贯穿检索"
