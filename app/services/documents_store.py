@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 
 from app.core.domain import Document
 from app.core.logging import get_logger
+from app.core.persist import atomic_write_json
 
 if TYPE_CHECKING:
     from app.core.interfaces import VectorStore
@@ -71,9 +72,7 @@ class DocumentsStore:
                 "docs": [asdict(e) for e in self._docs.values()],
                 "by_hash": [[kb, h, doc_id] for (kb, h), doc_id in self._by_hash.items()],
             }
-            path = Path(self._persist_file)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
+            atomic_write_json(self._persist_file, payload)   # S7：原子写 + 0o600
         except Exception as exc:  # noqa: BLE001
             logger.warning("documents.json 写入失败（降级内存态）：%s", exc)
 
@@ -166,6 +165,18 @@ class DocumentsStore:
                     del self._by_hash[key]
         self._persist()
         return True
+
+    def delete_by_kb(self, kb_id: str) -> int:
+        """C7：删除知识库时清理其文档索引与幂等表（防止残留导致重建同名库后幂等误判）。"""
+        with self._lock:
+            removed = [did for did, e in self._docs.items() if e.kb_id == kb_id]
+            for did in removed:
+                del self._docs[did]
+            for key in [k for k in self._by_hash if k[0] == kb_id]:
+                del self._by_hash[key]
+        if removed:
+            self._persist()
+        return len(removed)
 
     @staticmethod
     def _to_dict(entry: DocEntry) -> dict:

@@ -98,7 +98,8 @@ def wire(config: "SystemConfig", components: bool = True, *,
          kbs: "KbStore | None" = None,
          users: "UserStore | None" = None,
          documents: "DocumentsStore | None" = None,
-         jobs: "JobStore | None" = None) -> Dependencies:
+         jobs: "JobStore | None" = None,
+         pipeline: "IngestionPipeline | None" = None) -> Dependencies:
     """按 config 装配默认实现。
 
     - components=False：仅返回 config（契约/UI 冒烟测试用，不加载模型）。
@@ -154,7 +155,8 @@ def wire(config: "SystemConfig", components: bool = True, *,
     deps.documents = documents if documents is not None else DocumentsStore()
     deps.kbs = kbs if kbs is not None else KbStore()
     deps.users = users if users is not None else UserStore()
-    deps.pipeline = IngestionPipeline(
+    # C4：pipeline 可注入复用（热切换时避免重建 worker 线程/重载模型）
+    deps.pipeline = pipeline if pipeline is not None else IngestionPipeline(
         config=config, embedding=embedding, vector_store=vector_store,
         jobs=deps.jobs, documents=deps.documents,
     )

@@ -11,7 +11,7 @@ from typing import Any
 
 from app.adapters.base import LocalModelAdapter
 from app.core.domain import ScoredChunk
-from app.core.errors import EmbeddingError
+from app.core.errors import EmbeddingError, RerankError
 from app.core.interfaces import Reranker
 
 
@@ -40,9 +40,9 @@ class BGEReranker(LocalModelAdapter, Reranker):
                 [(query, c.chunk.text) for c in chunks],
                 batch_size=self.batch_size,
             )
-        except EmbeddingError:
+        except (EmbeddingError, RerankError):
             raise
         except Exception as exc:
-            raise EmbeddingError(f"重排打分失败: {exc}") from exc
+            raise RerankError(f"重排打分失败: {exc}") from exc
         ordered = sorted(zip(chunks, [float(s) for s in scores]), key=lambda kv: kv[1], reverse=True)
         return [ScoredChunk(chunk=item.chunk, score=score, notion="rerank") for item, score in ordered]

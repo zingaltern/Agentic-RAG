@@ -149,13 +149,54 @@ class OrchestrationConfig(BaseModel):
 
 class IngestionConfig(BaseModel):
     max_file_size_mb: int = 50
-    allowed_extensions: list[str] = ["pdf", "docx", "xlsx", "pptx", "md", "txt"]
+    allowed_extensions: list[str] = ["pdf", "docx", "xlsx", "pptx", "md", "txt",
+                                     "html", "htm", "eml", "msg"]
     embed_batch_size: int = 64
     desensitize_enabled: bool = False   # S5：敏感数据（身份证/手机号/银行卡）脱敏开关
     max_queue_size: int = 64            # C5（V5.1）：Worker 队列上限，满时拒绝并返回 43003
     # S2（V5.1）：zip 系格式解压防御上限（防止 zip 炸弹炸内存/CPU）
     zip_max_total_mb: int = 200
     zip_max_entries: int = 1000
+
+
+class CleanerConfig(BaseModel):
+    """数据清洗层（解析后、分块前，app/adapters/cleaner）。默认关闭：不改现有入库行为。"""
+
+    enabled: bool = False
+    normalize: bool = True       # 全半角/空白/控制字符归一
+    noise: bool = True           # 页码/页眉页脚/模板串去噪
+    dedup: bool = True           # 段落级 simhash 近重复去重
+    quality: bool = True         # 质量过滤（过短/无实词）
+    dedup_threshold: float = 0.9
+    min_chunk_chars: int = 20
+
+
+class InjectionConfig(BaseModel):
+    """入库侧提示注入扫描（P-C，默认关闭：不改变现有入库行为）。
+
+    - mode=audit：命中仅审计日志 + metadata[injection_hits] 标记，不拒收；
+    - mode=reject：命中抛 InjectionError（40002），Job failed。
+    - patterns 为追加模式（内置模式表始终生效，自定义正则追加其后）；
+      whitelist 为误杀白名单子串（命中该子串的行整行豁免）。
+    """
+
+    enabled: bool = False
+    mode: str = "audit"          # audit | reject
+    patterns: list[str] = []
+    whitelist: list[str] = []
+
+
+class ModerationConfig(BaseModel):
+    """入库前内容审核层（P-C，默认关闭）。
+
+    - mode=reject：命中抛 ContentModerationError（40003），Job failed；
+    - mode=flag：命中写 metadata[moderation_flags]，不拒收。
+    - keywords_csv 缺失/损坏时用内置最小词表兜底（与 synonyms.csv 同款范式）。
+    """
+
+    enabled: bool = False
+    mode: str = "reject"         # reject | flag
+    keywords_csv: str = "./configs/moderation_keywords.csv"
 
 
 class LoggingConfig(BaseModel):
@@ -206,6 +247,9 @@ class SystemConfig(BaseSettings):
     llm: LlmConfig = LlmConfig()
     orchestration: OrchestrationConfig = OrchestrationConfig()
     ingestion: IngestionConfig = IngestionConfig()
+    cleaner: CleanerConfig = CleanerConfig()
+    injection: InjectionConfig = InjectionConfig()
+    moderation: ModerationConfig = ModerationConfig()
     logging: LoggingConfig = LoggingConfig()
     documents: DocumentsConfig = DocumentsConfig()
     kbs: KbsConfig = KbsConfig()
@@ -238,6 +282,17 @@ class SystemConfig(BaseSettings):
             raise SystemConfigError("detector.similarity_threshold 必须在 [0,1]")
         if not 0 <= self.detector.semantic_similarity_threshold <= 1:
             raise SystemConfigError("detector.semantic_similarity_threshold 必须在 [0,1]")
+        # C6（V5.1）：并发/限速/队列数值护栏 —— 0 会被 queue.Queue(0) 视为无界、限速永久拒绝
+        if self.api.query_rate_per_min < 1 or self.api.upload_rate_per_min < 1:
+            raise SystemConfigError("api.query_rate_per_min / upload_rate_per_min 必须 >= 1")
+        if self.ingestion.max_queue_size < 1:
+            raise SystemConfigError("ingestion.max_queue_size 必须 >= 1（0 会被 queue.Queue 视为无界）")
+        if self.orchestration.max_concurrent_queries < 1:
+            raise SystemConfigError("orchestration.max_concurrent_queries 必须 >= 1")
+        if self.orchestration.request_timeout_seconds < 1 or self.orchestration.search_timeout_seconds < 1:
+            raise SystemConfigError("orchestration 超时配置必须 >= 1 秒")
+        if self.orchestration.semaphore_acquire_timeout_seconds < 0:
+            raise SystemConfigError("orchestration.semaphore_acquire_timeout_seconds 必须 >= 0（0=不等待立即 43001）")
         return self
 
 

@@ -179,6 +179,17 @@ def delete_user(user_id: str, request: Request,
     require_admin(request)
     if user_id == current_user(request):
         raise ValidationError("不能删除当前登录账号")
-    if not deps.users.delete(user_id):
+    # 先确认用户存在，再执行级联（避免对不存在用户的孤儿库静默清理被 404 掩盖）
+    if deps.users.get_by_id(user_id) is None:
         raise NotFoundError(f"用户不存在: {user_id}")
+    # S6：级联清理该用户的私有库（drop_collection + kb 映射 + 文档索引），避免孤儿库残留
+    if deps.kbs is not None:
+        for info in list(deps.kbs.list()):
+            if info.owner == user_id and info.scope == "private":
+                if deps.vector_store is not None:
+                    deps.vector_store.drop_collection(info.collection)
+                if deps.documents is not None:
+                    deps.documents.delete_by_kb(info.kb_id)
+                deps.kbs.delete(info.kb_id)
+    deps.users.delete(user_id)
     return ok({"user_id": user_id})

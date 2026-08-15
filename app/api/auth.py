@@ -53,9 +53,22 @@ class TokenAuth:
             except OSError:
                 pass
         SECRET_FILE.parent.mkdir(parents=True, exist_ok=True)
-        secret = secrets.token_hex(32)
-        SECRET_FILE.write_text(secret, encoding="utf-8")
-        os.chmod(SECRET_FILE, 0o600)
+        # S8：O_CREAT|O_EXCL 原子创建——多 worker 并发启动时只有一个写入者，
+        # 其余进程读既有密钥，避免互相覆盖导致签名不一致的间歇性 401
+        try:
+            fd = os.open(SECRET_FILE, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            # 并发写入者可能尚未写完：短重试直到读到完整密钥（token_hex(32) = 64 字符）
+            for _ in range(20):
+                value = SECRET_FILE.read_text(encoding="utf-8").strip()
+                if len(value) == 64:
+                    return value
+                time.sleep(0.02)
+            raise OSError(f"secret.key 并发创建未完成: {SECRET_FILE}")
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            secret = secrets.token_hex(32)
+            fh.write(secret)
+        os.chmod(SECRET_FILE, 0o600)   # 兜底：确保权限为 0o600（防御 umask 放宽）
         return secret
 
     def create_token(self, user_id: str, username: str, role: str,

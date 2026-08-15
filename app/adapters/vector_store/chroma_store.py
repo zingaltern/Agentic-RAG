@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import threading
 from typing import Iterable
 
 import chromadb
@@ -26,6 +27,18 @@ class ChromaStore(VectorStore):
             raise EmbeddingError(f"Chroma 初始化失败（{persist_dir}）: {exc}") from exc
         self._default_collection = collection
         self._batch_size = batch_size
+        # C2：语料变更纪元——add_chunks/delete_document 递增，供 BM25 缓存做变更检测
+        self._epoch: dict[str, int] = {}
+        self._epoch_lock = threading.Lock()
+
+    def mutation_epoch(self, collection: str = "kb") -> int:
+        """附加适配器方法（非接口契约）：返回集合的语料变更纪元。"""
+        with self._epoch_lock:
+            return self._epoch.get(collection, 0)
+
+    def _bump_epoch(self, collection: str) -> None:
+        with self._epoch_lock:
+            self._epoch[collection] = self._epoch.get(collection, 0) + 1
 
     # -- 内部工具 ------------------------------------------------------------
 
@@ -77,6 +90,7 @@ class ChromaStore(VectorStore):
                 ids, documents, embeddings, metadatas = [], [], [], []
         if ids:
             coll.upsert(ids=ids, documents=documents, embeddings=embeddings, metadatas=metadatas)
+        self._bump_epoch(collection)   # C2：语料变更，通知 BM25 缓存失效
 
     def search(self, query_vector: list[float], k: int,
                filters: dict | None = None, collection: str = "kb") -> list[ScoredChunk]:
@@ -108,6 +122,7 @@ class ChromaStore(VectorStore):
         deleted = len(hit["ids"])
         if deleted:
             coll.delete(where={"document_id": document_id})
+            self._bump_epoch(collection)   # C2：语料变更，通知 BM25 缓存失效
         return deleted
 
     def count(self, collection: str = "kb") -> int:
@@ -123,16 +138,19 @@ class ChromaStore(VectorStore):
         from app.core.logging import get_logger
 
         name = self._chroma_name(collection)
+        executor = ThreadPoolExecutor(max_workers=1)
+        future = executor.submit(self._client.delete_collection, name)
         try:
-            with ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(self._client.delete_collection, name)
-                future.result(timeout=60)
+            future.result(timeout=60)
             return True
         except _TimeoutError:
+            # C8：超时后不得等待（shutdown(wait=False)），否则 __exit__ 仍会阻塞，超时保护形同虚设
             get_logger("vector_store").warning("drop_collection 超时（>60s）：%s，按清理失败处理", name)
             return False
         except Exception:
             return True  # 集合不存在等异常按"已清理"处理（静默兼容旧行为）
+        finally:
+            executor.shutdown(wait=False)
 
     # -- 适配器扩展（BM25 索引 / 幂等去重） ------------------------------------
 

@@ -42,7 +42,9 @@ class HybridRRFRetriever(Retriever):
         self.candidates = candidates
         self.rr_fused_k = rr_fused_k
         self.collection = collection
-        self._bm25_cache: dict[str, tuple[int, BM25Okapi, list[ScoredChunk]]] = {}
+        # C2（V5.1）：缓存指纹 = (collection, filters, count, epoch)——epoch 随 add/delete 递增，
+        # 修复「删 N 块+增 N 块后 count 不变 → 已删文档仍可检索」的陈旧语料问题
+        self._bm25_cache: dict[str, tuple[int, int, BM25Okapi, list[ScoredChunk]]] = {}
         self._bm25_lock = threading.Lock()   # C2（V5.1）：缓存读写互斥，并发 miss 只构建一次
 
     # -- 工具 ----------------------------------------------------------------
@@ -68,20 +70,22 @@ class HybridRRFRetriever(Retriever):
         cond = self._metadata_filters(filters)
         cache_key = json.dumps([collection, sorted(cond.items())], ensure_ascii=False, sort_keys=True)
         count = self.vector_store.count(collection)
+        # C2：epoch 变更检测（向量库不支持时降级为 0，退化为仅 count 校验的旧行为）
+        epoch = getattr(self.vector_store, "mutation_epoch", lambda c: 0)(collection)
         # 快路径：无锁读缓存（读多写少，容忍瞬时重复构建由慢路径兜底）
         cached = self._bm25_cache.get(cache_key)
-        if cached is not None and cached[0] == count:
-            return cached[1], cached[2]
+        if cached is not None and cached[0] == count and cached[1] == epoch:
+            return cached[2], cached[3]
 
         with self._bm25_lock:            # C2：双重检查后单次构建，其他线程等待复用结果
             cached = self._bm25_cache.get(cache_key)
-            if cached is not None and cached[0] == count:
-                return cached[1], cached[2]
+            if cached is not None and cached[0] == count and cached[1] == epoch:
+                return cached[2], cached[3]
             chunks = [c for c in self.vector_store.get_all_chunks(collection)
                       if self._matches(c.metadata, cond)]
             tokenized = [list(jieba.cut(c.text)) for c in chunks]
             bm25 = BM25Okapi(tokenized) if chunks else None
-            self._bm25_cache[cache_key] = (count, bm25, chunks)
+            self._bm25_cache[cache_key] = (count, epoch, bm25, chunks)
             return bm25, chunks
 
     # -- 契约（3.3） ----------------------------------------------------------

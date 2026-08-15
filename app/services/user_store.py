@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from app.core.logging import get_logger
+from app.core.persist import atomic_write_json
 
 logger = get_logger("user_store")
 
@@ -96,12 +97,8 @@ class UserStore:
 
     def _persist(self) -> None:
         try:
-            Path(self._persist_file).parent.mkdir(parents=True, exist_ok=True)
-            Path(self._persist_file).write_text(
-                json.dumps([self._to_dict(u) for u in self._users.values()],
-                           ensure_ascii=False, indent=1),
-                encoding="utf-8",
-            )
+            # S7：原子写 + 0o600（users.json 含 scrypt 哈希/salt，必须最小权限）
+            atomic_write_json(self._persist_file, [self._to_dict(u) for u in self._users.values()])
         except Exception as exc:  # noqa: BLE001
             logger.warning("users.json 写入失败：%s", exc)
 
@@ -134,7 +131,11 @@ class UserStore:
     def authenticate(self, username: str, password: str) -> User | None:
         with self._lock:
             user = self._users.get(self._by_username.get(username.strip(), ""))
-        if user is None or not verify_password(password, user.password_salt, user.password_hash):
+        if user is None:
+            # S9：用户不存在也执行一次伪 scrypt——抹平响应时间差，防用户名枚举侧信道
+            hash_password("__no_such_user__", salt=b"\x00" * 16)
+            return None
+        if not verify_password(password, user.password_salt, user.password_hash):
             return None
         user.last_login = time.time()
         self._persist()

@@ -32,6 +32,20 @@ class ValidationError(AppError):
     message = "参数校验失败"
 
 
+class InjectionError(AppError):
+    """入库阶段提示注入扫描命中（P-C，入库安全）。"""
+
+    code = 40002
+    message = "文档内容疑似包含提示注入指令，已拒绝入库"
+
+
+class ContentModerationError(AppError):
+    """入库阶段内容审核命中（P-C，入库安全）。"""
+
+    code = 40003
+    message = "文档内容未通过内容审核，已拒绝入库"
+
+
 class AuthError(AppError):
     """鉴权失败（api.auth_enabled=true 时）。"""
 
@@ -58,6 +72,13 @@ class EmbeddingError(AppError):
 
     code = 30002
     message = "向量化失败"
+
+
+class RerankError(AppError):
+    """重排打分失败（bge_reranker，语义区别于向量化失败 30002）。"""
+
+    code = 30004
+    message = "重排打分失败"
 
 
 class ParseError(AppError):

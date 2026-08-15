@@ -16,7 +16,12 @@ from uuid import uuid4
 
 from app.core.config import SystemConfig
 from app.core.domain import Job
-from app.core.errors import EmbeddingError, ParseError
+from app.core.errors import (
+    ContentModerationError,
+    EmbeddingError,
+    InjectionError,
+    ParseError,
+)
 from app.core.interfaces import VectorEngine, VectorStore
 from app.core.logging import get_logger, set_trace_id
 from app.services.documents_store import DocumentsStore
@@ -51,16 +56,43 @@ class IngestionPipeline:
                 w.start()
         self._hash_locks: dict[str, threading.Lock] = {}
         self._locks_guard = threading.Lock()
+        self._closing = False                # C4：shutdown 置位后拒绝新提交，防 job 永久 pending
 
     def _worker_loop(self) -> None:
         while True:
-            raw, filename, job, kb_id, collection = self._queue.get()
+            item = self._queue.get()
+            if item[0] is None:        # C4：shutdown 哨兵（首元素 None）
+                self._queue.task_done()
+                break
+            raw, filename, job, kb_id, collection = item
             try:
                 self._run(raw, filename, job, kb_id=kb_id, collection=collection)
             except Exception:
                 self.jobs.update(job.job_id, status="failed", error_code="50001")
             finally:
                 self._queue.task_done()
+
+    def shutdown(self, timeout: float = 10.0) -> None:
+        """C4：停 worker（热切换/退出时释放线程）。
+
+        先置关闭标志（新提交被拒绝，标记 50003），再 drain 队列中未处理任务
+        （标记中断 50003，复用 C6 中断语义），随后投递哨兵让各 worker 退出；
+        join 超时不强杀（daemon 线程，进程退出不阻塞）。
+        """
+        from app.services.jobs_store import INTERRUPTED_CODE
+
+        self._closing = True
+        while True:
+            try:
+                raw, filename, job, kb_id, collection = self._queue.get_nowait()
+                self.jobs.update(job.job_id, status="failed", error_code=INTERRUPTED_CODE)
+                self._queue.task_done()
+            except queue.Empty:
+                break
+        for _ in self._workers:
+            self._queue.put((None, None, None, None, None))
+        for worker in self._workers:
+            worker.join(timeout=timeout)
 
     def _lock_for(self, content_hash: str) -> threading.Lock:
         """按 content_hash 取互斥锁（并发同内容上传串行化，防 TOCTOU 双份入库）。"""
@@ -92,7 +124,13 @@ class IngestionPipeline:
         """异步提交入库任务（HTTP 线程立即返回）。
 
         C5：队列满时拒绝提交，Job 标记 failed（error_code=43003），返回 False。
+        C4：pipeline 关闭中（热切换/退出）拒绝新提交并标记 50003，防止 job 永久 pending。
         """
+        if self._closing:
+            from app.services.jobs_store import INTERRUPTED_CODE
+
+            self.jobs.update(job.job_id, status="failed", error_code=INTERRUPTED_CODE)
+            return False
         try:
             self._queue.put_nowait((raw, filename, job, kb_id, collection))
             return True
@@ -124,6 +162,61 @@ class IngestionPipeline:
                 from app.services.desensitize import desensitize_text
 
                 doc.text = desensitize_text(doc.text)
+
+            # 数据清洗层（解析后、分块前）：归一/去噪/段落去重/质量过滤，默认关闭
+            if self.config.cleaner.enabled:
+                from app.adapters.cleaner import DefaultCleaner
+
+                cleaner = DefaultCleaner(
+                    enabled=True,
+                    normalize=self.config.cleaner.normalize,
+                    noise=self.config.cleaner.noise,
+                    dedup=self.config.cleaner.dedup,
+                    quality=self.config.cleaner.quality,
+                    dedup_threshold=self.config.cleaner.dedup_threshold,
+                    min_chunk_chars=self.config.cleaner.min_chunk_chars,
+                )
+                doc.text = cleaner.clean(doc.text)
+                if not doc.text.strip():
+                    logger.warning("清洗后文档为空（%s）：全部段落被噪声/去重/质量过滤剔除，仍按空文档入库",
+                                   filename,
+                                   extra={"extra_fields": {"job_id": job.job_id, "filename": filename}})
+
+            # P-C：入库侧提示注入扫描（默认关闭，不改变现有入库行为）
+            if self.config.injection.enabled:
+                from app.adapters.injection_scanner import InjectionScanner
+
+                scanner = InjectionScanner(patterns=self.config.injection.patterns,
+                                           whitelist=self.config.injection.whitelist)
+                injection_hits = scanner.scan(doc.text)
+                if injection_hits:
+                    logger.warning(
+                        "提示注入扫描命中",
+                        extra={"extra_fields": {"job_id": job.job_id,
+                                                "hits": [h["pattern"][:60] for h in injection_hits],
+                                                "snippet": injection_hits[0]["snippet"][:80]}},
+                    )
+                    if self.config.injection.mode == "reject":
+                        raise InjectionError()
+                    doc.metadata["injection_hits"] = injection_hits
+
+            # P-C：入库前内容审核（默认关闭）
+            if self.config.moderation.enabled:
+                from app.adapters.content_moderation.keyword_moderator import KeywordModerator
+
+                result = KeywordModerator(
+                    keywords_csv=self.config.moderation.keywords_csv).moderate(doc.text)
+                if result.verdict == "reject":
+                    categories = sorted({r["category"] for r in result.matched_rules})
+                    logger.warning(
+                        "内容审核命中",
+                        extra={"extra_fields": {"job_id": job.job_id,
+                                                "categories": categories,
+                                                "snippet": result.snippet[:80]}},
+                    )
+                    if self.config.moderation.mode == "reject":
+                        raise ContentModerationError(f"命中类别：{'、'.join(categories)}")
+                    doc.metadata["moderation_flags"] = result.matched_rules
 
             # TOCTOU 防护：同 content_hash 的并发入库串行化（per-hash 锁），
             # 幂等检查与写入之间不再存在竞态窗口
@@ -172,6 +265,14 @@ class IngestionPipeline:
         except EmbeddingError as exc:
             self.jobs.update(job.job_id, status="failed", error_code=str(exc.code))
             logger.warning("入库失败：向量化错误", extra={"extra_fields": {"job_id": job.job_id, "error_code": exc.code}})
+        except InjectionError as exc:
+            # P-C：提示注入 reject（40002）
+            self.jobs.update(job.job_id, status="failed", error_code=str(exc.code))
+            logger.warning("入库失败：提示注入命中", extra={"extra_fields": {"job_id": job.job_id, "error_code": exc.code}})
+        except ContentModerationError as exc:
+            # P-C：内容审核 reject（40003）
+            self.jobs.update(job.job_id, status="failed", error_code=str(exc.code))
+            logger.warning("入库失败：内容审核未通过", extra={"extra_fields": {"job_id": job.job_id, "error_code": exc.code}})
         except Exception as exc:
             self.jobs.update(job.job_id, status="failed", error_code="50001")
             logger.exception("入库失败：未知错误", extra={"extra_fields": {"job_id": job.job_id}})

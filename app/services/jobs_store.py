@@ -15,6 +15,7 @@ from uuid import uuid4
 
 from app.core.domain import Job
 from app.core.logging import get_logger
+from app.core.persist import atomic_write_json
 
 logger = get_logger("jobs_store")
 
@@ -58,10 +59,8 @@ class JobStore:
 
     def _persist(self) -> None:
         try:
-            Path(self._persist_file).parent.mkdir(parents=True, exist_ok=True)
             payload = [self._to_dict(j) for j in self._pending.values()]
-            Path(self._persist_file).write_text(
-                json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
+            atomic_write_json(self._persist_file, payload)   # S7：原子写 + 0o600
         except Exception as exc:  # noqa: BLE001
             logger.warning("jobs.json 写入失败（降级内存态）：%s", exc)
 

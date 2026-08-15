@@ -79,11 +79,31 @@ orchestration:
 
 ingestion:
   max_file_size_mb: 50
-  allowed_extensions: [pdf, docx, xlsx, pptx, md, txt]
+  allowed_extensions: [pdf, docx, xlsx, pptx, md, txt, html, htm, eml, msg]
   embed_batch_size: 64
   max_queue_size: 64              # C5（V5.1）：入库队列上限，满时返回 43003
   zip_max_total_mb: 200           # S2（V5.1）：zip 解压总大小上限（防炸弹）
   zip_max_entries: 1000           # S2：zip 条目数上限
+
+cleaner:
+  enabled: false                  # 数据清洗层开关（解析后、分块前），默认关不改变现有行为
+  normalize: true
+  noise: true
+  dedup: true
+  quality: true
+  dedup_threshold: 0.9
+  min_chunk_chars: 20
+
+injection:                        # P-C：入库侧提示注入扫描（默认关，不改变现有入库行为）
+  enabled: false
+  mode: audit                     # audit=命中仅审计日志+metadata 标记；reject=拒收（Job failed 40002）
+  patterns: []                    # 追加模式：内置模式表始终生效，此处追加自定义正则
+  whitelist: []                   # 误杀白名单子串
+
+moderation:                       # P-C：入库前内容审核层（默认关）
+  enabled: false
+  mode: reject                    # reject=拒收（40003）；flag=仅标记 metadata
+  keywords_csv: ./configs/moderation_keywords.csv
 
 logging:
   level: info

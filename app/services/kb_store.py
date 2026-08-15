@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Callable
 
 from app.core.logging import get_logger
+from app.core.persist import atomic_write_json
 
 logger = get_logger("kb_store")
 
@@ -88,11 +89,7 @@ class KbStore:
 
     def _persist(self) -> None:
         try:
-            Path(self._persist_file).parent.mkdir(parents=True, exist_ok=True)
-            Path(self._persist_file).write_text(
-                json.dumps([self._to_dict(k) for k in self._kbs.values()], ensure_ascii=False, indent=1),
-                encoding="utf-8",
-            )
+            atomic_write_json(self._persist_file, [self._to_dict(k) for k in self._kbs.values()])  # S7
         except Exception as exc:  # noqa: BLE001
             logger.warning("kb.json 写入失败：%s", exc)
 
@@ -125,9 +122,12 @@ class KbStore:
         if not KB_ID_RE.match(kb_id):
             kb_id = "kb"
         with self._lock:
-            if kb_id in self._kbs:
+            # C1（V5.1）：collection 必须唯一（与默认库 "kb" 及其它库冲突即追加 hash），
+            # 否则两个库会共享同一 Chroma 集合，破坏 13.5「一库一 collection」数据隔离
+            used_collections = {info.collection for info in self._kbs.values()}
+            if kb_id in self._kbs or kb_id in used_collections:
                 kb_id = f"{base}_{hashlib.md5(name.encode('utf-8')).hexdigest()[:4]}"
-                if kb_id in self._kbs:      # 极端冲突：再追加
+                if kb_id in self._kbs or kb_id in used_collections:      # 极端冲突：再追加
                     kb_id = f"kb_{hashlib.md5(name.encode('utf-8')).hexdigest()[:8]}"
             info = KbInfo(kb_id=kb_id, name=name.strip(), description=description,
                           collection=kb_id, owner=owner, scope=scope, created_at=time.time())

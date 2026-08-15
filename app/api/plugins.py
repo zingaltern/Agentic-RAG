@@ -69,19 +69,50 @@ def switch(payload: SwitchRequest, request: Request,
     new_config = deepcopy(deps.config)
     getattr(new_config, payload.module).provider = payload.strategy
     if payload.config:
-        for key, value in payload.config.items():
-            setattr(getattr(new_config, payload.module), key, value)
+        if any(key in payload.config for key in ("api_key", "secret")):
+            raise ValidationError("不允许热切修改密钥类配置（api_key/secret）")
+        from pydantic import ValidationError as PydanticValidationError
+
+        module_cfg = getattr(new_config, payload.module)
+        try:
+            # 模型级重建：pydantic 对类型/约束完整校验，替代逐键 setattr
+            updated = type(module_cfg)(**{**module_cfg.model_dump(), **payload.config})
+        except PydanticValidationError as exc:
+            raise ValidationError(f"非法配置项: {exc}") from exc
+        setattr(new_config, payload.module, updated)
 
     try:
-        # 热切换仅换 provider：复用现有存储（kbs/users/documents/jobs），避免回落到默认路径
-        new_deps = wire(new_config, kbs=deps.kbs, users=deps.users,
-                        documents=deps.documents, jobs=deps.jobs)
+        # C4：按模块复用未切换组件——避免重载模型与泄漏 pipeline worker 线程。
+        # 复用规则：被切换模块本身除外；**下游依赖模块变更时依赖方必须重建**
+        # （retriever 依赖 embedding/vector_store；evaluator/detector 依赖 embedding；
+        #  rewriter 依赖 llm；pipeline 依赖 embedding/vector_store），否则热切换对查询路径无效。
+        old = deps
+
+        def _reuse(name: str, depends_on: tuple = ()) -> object:
+            if payload.module == name or payload.module in depends_on:
+                return None
+            return getattr(old, name)
+
+        new_deps = wire(new_config, kbs=old.kbs, users=old.users,
+                        documents=old.documents, jobs=old.jobs,
+                        embedding=_reuse("embedding"),
+                        vector_store=_reuse("vector_store"),
+                        retriever=_reuse("retriever", depends_on=("embedding", "vector_store")),
+                        llm=_reuse("llm"),
+                        reranker=_reuse("reranker"),
+                        evaluator=_reuse("evaluator", depends_on=("embedding",)),
+                        rewriter=_reuse("rewriter", depends_on=("llm",)),
+                        detector=_reuse("detector", depends_on=("embedding",)),
+                        pipeline=_reuse("pipeline", depends_on=("embedding", "vector_store")))
+        # C4：先原子替换 deps，再关闭旧 pipeline——避免 shutdown 窗口内新请求
+        # 提交到将被停用的队列导致 job 永久 pending（shutdown 会拒绝新提交）
+        request.app.state.deps = new_deps
+        request.app.state.config = new_config
+        if old.pipeline is not None and new_deps.pipeline is not old.pipeline:
+            old.pipeline.shutdown()
     except Exception as exc:  # noqa: BLE001
         logger.warning("热切换装配失败（已回滚，deps 不变）：%s", exc)
         raise InternalError(f"热切换装配失败（已回滚）: {exc}") from exc
-
-    request.app.state.deps = new_deps
-    request.app.state.config = new_config
     logger.info("热切换成功",
                 extra={"extra_fields": {"module": payload.module,
                                         "provider": payload.strategy}})

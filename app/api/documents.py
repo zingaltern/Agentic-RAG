@@ -4,6 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
+from pydantic import BaseModel, Field
 
 from app.api.auth import get_authorizer
 from app.api.utils import get_deps, ok
@@ -12,6 +13,12 @@ from app.core.registry import Dependencies
 from app.services.ingestion import compute_content_hash
 
 router = APIRouter(prefix="/api/documents", tags=["documents"])
+
+
+class BatchDeleteRequest(BaseModel):
+    """批量删除请求体：一次最多 200 条（前端多选上限）。"""
+
+    document_ids: list[str] = Field(default_factory=list, max_length=200)
 
 
 @router.post("/upload")
@@ -51,7 +58,7 @@ async def upload(file: UploadFile = File(...),
                     raise ValidationError(f"文件超过 {cfg.max_file_size_mb}MB 限制: {filename}")
             except ValueError:
                 pass
-    raw = await file.read()
+    raw = await file.read(max_bytes + 1)   # C3：限量读取——无 content-length（chunked）请求也会被截断，防全量入内存 DoS
     if len(raw) > max_bytes:
         raise ValidationError(f"文件超过 {cfg.max_file_size_mb}MB 限制: {filename}")
 
@@ -159,3 +166,38 @@ def delete_document(document_id: str, request: Request = None,
     if deps.documents is not None:
         deps.documents.delete(document_id)
     return ok({"document_id": document_id, "deleted_chunks": deleted})
+
+
+@router.post("/batch-delete")
+def batch_delete_documents(body: BatchDeleteRequest, request: Request = None,
+                           deps: Dependencies = Depends(get_deps)) -> dict:
+    """批量删除（级联清向量块，6.5）；与单条删除同权限语义：
+    不存在的条目与无权访问的库一律记入 failed（不泄露存在性）。"""
+    ids = body.document_ids
+    if not ids:
+        raise ValidationError("document_ids 不能为空")
+    if len(ids) > 200:
+        raise ValidationError("批量删除一次最多 200 条")
+    deleted, failed = [], []
+    for document_id in ids:
+        entry = deps.documents.get(document_id) if deps.documents else None
+        if entry is None:
+            failed.append({"document_id": document_id, "reason_code": 40401})
+            continue
+        if request is not None:
+            info = deps.kbs.get(entry.kb_id) if deps.kbs else None
+            if info is None or not get_authorizer(request).can_write_kb(
+                    getattr(request.state, "user", None), info):
+                failed.append({"document_id": document_id, "reason_code": 40401})
+                continue
+        collection = None
+        if deps.kbs is not None:
+            collection = deps.kbs.collection_of(entry.kb_id)
+        chunks = 0
+        if deps.vector_store is not None:
+            chunks = deps.vector_store.delete_document(
+                document_id, collection=collection or deps.config.vector_store.collection)
+        if deps.documents is not None:
+            deps.documents.delete(document_id)
+        deleted.append({"document_id": document_id, "deleted_chunks": chunks})
+    return ok({"deleted": deleted, "failed": failed})

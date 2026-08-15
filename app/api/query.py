@@ -85,9 +85,11 @@ def _query_impl(payload: QueryRequest, request: Request,
     else:
         info = deps.kbs.get("default")
         collection = deps.kbs.collection_of("default")
-    # V5.1：读权限校验（不可见库一律 40101 语义由 Authorizer 判定）
+    # V5.1：读权限校验 —— 越权访问知识库统一 40101（S14：与上传/删除路径的鉴权语义一致）
     if not get_authorizer(request).can_read_kb(getattr(request.state, "user", None), info):
-        raise ValidationError(f"无权访问知识库: {info.kb_id!r}")
+        from app.core.errors import AuthError
+
+        raise AuthError(f"无权访问知识库: {info.kb_id!r}")
 
     result = deps.orchestration.run(
         query=payload.query,

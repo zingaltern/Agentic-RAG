@@ -19,13 +19,19 @@ class KbCreate(BaseModel):
     scope: str = Field(default="shared", pattern="^(shared|private)$", description="V5.1：shared|private")
 
 
-def _kb_dict(info) -> dict:
+def _kb_dict(info, users=None) -> dict:
+    """V5.1：owner 为 user_id，另附 owner_name（反查用户名）便于前端展示。"""
+    owner_name = None
+    if info.scope == "private" and users is not None:
+        owner = users.get_by_id(info.owner) if info.owner != "admin" else None
+        owner_name = owner.name if owner else None
     return {
         "kb_id": info.kb_id,
         "name": info.name,
         "description": info.description,
         "collection": info.collection,
         "owner": info.owner,
+        "owner_name": owner_name,
         "scope": info.scope,
         "created_at": info.created_at,
     }
@@ -37,7 +43,7 @@ def list_kbs(request: Request, deps: Dependencies = Depends(get_deps)) -> dict:
         raise InternalError("知识库服务尚未装配")
     user = getattr(request.state, "user", None)
     accessible = get_authorizer(request).list_accessible_kbs(user, deps.kbs.list())
-    items = [_kb_dict(k) for k in accessible]
+    items = [_kb_dict(k, deps.users) for k in accessible]
     return ok({"kbs": items, "total": len(items)})
 
 
@@ -59,7 +65,7 @@ def create_kb(payload: KbCreate, request: Request,
         raise ValidationError(str(exc)) from exc
     if deps.vector_store is not None:
         deps.vector_store.count(info.collection)
-    return ok(_kb_dict(info))
+    return ok(_kb_dict(info, deps.users))
 
 
 @router.delete("/{kb_id}")
@@ -81,5 +87,10 @@ def delete_kb(kb_id: str, request: Request,
         dropped = deps.vector_store.drop_collection(info.collection)
         if not dropped:
             get_logger("kbs").warning("知识库删除：集合清理失败/超时（%s），映射仍删除", info.collection)
+    # C7：清理文档索引与幂等表残留（否则重建同名库上传同文件会幂等误判为 duplicate）
+    if deps.documents is not None:
+        cleaned = deps.documents.delete_by_kb(kb_id)
+        if cleaned:
+            get_logger("kbs").info("知识库删除：清理文档索引 %d 条（%s）", cleaned, kb_id)
     deps.kbs.delete(kb_id)
     return ok({"kb_id": kb_id})
