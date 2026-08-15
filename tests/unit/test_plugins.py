@@ -106,3 +106,77 @@ def test_status_whitelisted_when_auth_enabled(tmp_path, isolated_stores):
     with TestClient(_app(tmp_path, auth_enabled=True, isolated_stores=isolated_stores)) as client:
         body = client.get("/api/plugins/status").json()
         assert body["code"] == 0
+
+
+# -- C5（V5.1）：switch config 白名单 + pydantic 模型级校验 -------------------------
+
+def test_switch_config_rejects_secret_keys(tmp_path):
+    with TestClient(_app(tmp_path)) as client:
+        body = client.post("/api/plugins/switch",
+                           json={"module": "llm", "strategy": "deepseek",
+                                 "config": {"api_key": "LEAKED"}}).json()
+        assert body["code"] == 40001
+        assert "密钥" in body["message"]
+        assert client.app.state.config.llm.api_key != "LEAKED"
+
+
+def test_switch_config_invalid_type_rejected(tmp_path):
+    """非法类型经 pydantic 模型重建拒绝（40001），而非逐键 setattr 后装配期裸异常。"""
+    with TestClient(_app(tmp_path)) as client:
+        body = client.post("/api/plugins/switch",
+                           json={"module": "reranker", "strategy": "bge_reranker",
+                                 "config": {"rerank_top_k": "not-a-number"}}).json()
+        assert body["code"] == 40001
+        assert "非法配置项" in body["message"]
+        assert client.app.state.config.reranker.rerank_top_k == 5
+
+
+def test_switch_config_valid_field_applies(tmp_path):
+    with TestClient(_app(tmp_path)) as client:
+        body = client.post("/api/plugins/switch",
+                           json={"module": "reranker", "strategy": "bge_reranker",
+                                 "config": {"rerank_top_k": 3}}).json()
+        assert body["code"] == 0
+        assert client.app.state.config.reranker.rerank_top_k == 3
+
+
+# -- C4：热切换复用组件，避免 worker 线程/模型泄漏 ---------------------------------
+
+def test_switch_reranker_reuses_pipeline_and_embedding(tmp_path):
+    with TestClient(_app(tmp_path)) as client:
+        deps0 = client.app.state.deps
+        emb0, pipe0 = deps0.embedding, deps0.pipeline
+        r1 = client.post("/api/plugins/switch", json={"module": "reranker", "strategy": "identity"}).json()
+        assert r1["code"] == 0
+        r2 = client.post("/api/plugins/switch", json={"module": "reranker", "strategy": "identity"}).json()
+        assert r2["code"] == 0
+        deps2 = client.app.state.deps
+        assert deps2.embedding is emb0, "切换 reranker 不得重载 embedding"
+        assert deps2.pipeline is pipe0, "切换 reranker 不得重建 pipeline（避免 worker 线程泄漏）"
+
+
+def test_switch_reranker_no_worker_thread_leak(tmp_path):
+    import threading
+
+    with TestClient(_app(tmp_path)) as client:
+        before = threading.active_count()
+        for _ in range(3):
+            r = client.post("/api/plugins/switch",
+                            json={"module": "reranker", "strategy": "identity"}).json()
+            assert r["code"] == 0
+        after = threading.active_count()
+        assert after <= before + 1, f"热切换泄漏 worker 线程（{before} → {after}）"
+
+
+def test_switch_vector_store_rebuilds_retriever_and_pipeline(tmp_path):
+    """C4：vector_store 变更必须重建 retriever（否则查询仍走旧库）+ 重建 pipeline 并关闭旧的。"""
+    with TestClient(_app(tmp_path)) as client:
+        deps0 = client.app.state.deps
+        old_retriever, old_pipeline = deps0.retriever, deps0.pipeline
+        body = client.post("/api/plugins/switch",
+                           json={"module": "vector_store", "strategy": "chroma"}).json()
+        assert body["code"] == 0
+        deps1 = client.app.state.deps
+        assert deps1.retriever is not old_retriever, "vector_store 变更必须重建 retriever，否则查询走旧库"
+        assert deps1.pipeline is not old_pipeline, "vector_store 变更必须重建 pipeline"
+        assert old_pipeline._closing, "旧 pipeline 必须进入关闭态（拒绝新提交）"
