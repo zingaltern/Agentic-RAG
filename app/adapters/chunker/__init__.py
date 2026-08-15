@@ -77,6 +77,19 @@ def _group_to_target(segments: list[str], target_tokens: int, token_char_ratio: 
     return groups
 
 
+def _build_line_sections(text: str, sections: list) -> list:
+    """T5：把 [(title, 行号)] 展开为逐行 section 归属（标题行起到下一标题行前）。"""
+    lines = text.split("\n")
+    line_section: list = [None] * len(lines)
+    for idx, (title, line_no) in enumerate(sections):
+        if not (0 <= line_no < len(lines)):
+            continue
+        next_no = sections[idx + 1][1] if idx + 1 < len(sections) else len(lines)
+        for i in range(line_no, min(next_no, len(lines))):
+            line_section[i] = title
+    return line_section
+
+
 def _chunk_id(document_id: str, order: int) -> str:
     return hashlib.sha256(f"{document_id}:{order}".encode("utf-8")).hexdigest()[:16]
 
@@ -94,50 +107,70 @@ def split_chunks(
     chunks: list[Chunk] = []
     order = 0
 
-    # 1) 以自然段落（换行分隔）聚合成父块
-    paragraphs = [p.strip() for p in text.split("\n") if p.strip()]
-    parents: list[str] = []
+    # T5：章节标题 → 逐行 section 归属（sections 为解析器产出的 [(title, 行号)]）
+    line_section: list = []
+    sections_meta = doc.metadata.get("sections") or []
+    if sections_meta:
+        line_section = _build_line_sections(text, sections_meta)
+
+    def section_of(line_no: int) -> str | None:
+        if not line_section:
+            return None
+        return line_section[line_no] if 0 <= line_no < len(line_section) else None
+
+    # 1) 以自然段落（换行分隔）聚合成父块（记录每段起始行号，用于 section 归属）
+    raw_lines = text.split("\n")
+    items = [(i, line.strip()) for i, line in enumerate(raw_lines) if line.strip()]
+    parents: list[tuple[str, int]] = []      # (text, start_line)
     current: list[str] = []
+    current_start = 0
     current_tokens = 0
-    for para in paragraphs:
+    for line_no, para in items:
         para_tokens = _estimate_tokens(para, token_char_ratio)
         if current and current_tokens + para_tokens > parent_target_tokens:
-            parents.append("".join(current))
+            parents.append(("".join(current), current_start))
             current, current_tokens = [], 0
         if para_tokens > parent_target_tokens:
             if current:
-                parents.append("".join(current))
+                parents.append(("".join(current), current_start))
                 current, current_tokens = [], 0
-            parents.extend(_group_to_target(_split_sentences(para), parent_target_tokens, token_char_ratio))
+            for group in _group_to_target(_split_sentences(para), parent_target_tokens, token_char_ratio):
+                parents.append((group, line_no))
         else:
+            if not current:
+                current_start = line_no
             current.append(para)
             current_tokens += para_tokens
     if current:
-        parents.append("".join(current))
+        parents.append(("".join(current), current_start))
 
-    # 2) 产出父块 + 按子块目标切分子块
-    def emit(text: str, parent_id: str | None) -> str:
+    # 2) 产出父块 + 按子块目标切分子块（section 继承：子块沿用父块章节）
+    def emit(text: str, parent_id: str | None, section: str | None) -> str:
         nonlocal order
+        meta = {k: v for k, v in doc.metadata.items() if k != "sections"}
+        if section is not None:
+            meta["section"] = section         # T5：章节标题落库（可参与 filters 等值过滤）
         chunk = Chunk(
             chunk_id=_chunk_id(doc.document_id, order),
             document_id=doc.document_id,
             text=text,
             order=order,
             parent_id=parent_id,
-            metadata=dict(doc.metadata),
+            metadata=meta,
         )
         chunks.append(chunk)
         order += 1
         return chunk.chunk_id
 
-    for parent_text in parents:
+    for parent_text, start_line in parents:
         parent_text = parent_text.strip()
         if not parent_text:
             continue
-        parent_chunk_id = emit(parent_text, None)
+        section = section_of(start_line)
+        parent_chunk_id = emit(parent_text, None, section)
         if _estimate_tokens(parent_text, token_char_ratio) <= child_target_tokens:
             continue  # 父块本身已在子块目标内，不产出重复子块
         for group in _group_to_target(_split_sentences(parent_text), child_target_tokens, token_char_ratio):
-            emit(group, parent_chunk_id)
+            emit(group, parent_chunk_id, section)
 
     return chunks

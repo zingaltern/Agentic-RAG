@@ -18,7 +18,8 @@ def _parse_bytes(raw: bytes, filename: str):
 
 
 def test_supported_extensions():
-    assert SUPPORTED_EXTENSIONS == {".pdf", ".docx", ".xlsx", ".pptx", ".md", ".txt"}
+    assert SUPPORTED_EXTENSIONS == {".pdf", ".docx", ".xlsx", ".pptx", ".md", ".txt",
+                                    ".html", ".htm", ".eml", ".msg"}
 
 
 def test_parse_txt():
@@ -214,3 +215,59 @@ def test_s2_legit_formats_still_pass():
     wb.save(xlsx_buf)
     doc = parse_file(io.BytesIO(xlsx_buf.getvalue()), "c.xlsx")
     assert "a" in doc.text
+
+
+def test_parse_html_extracts_body():
+    from app.adapters.parser import parse_file
+    import io as _io
+
+    html = ("<html><head><title>t</title><script>var x=1;</script></head><body>"
+            "<h1>公司制度</h1><p>年假需提前申请。</p><style>.x{}</style></body></html>").encode()
+    doc = parse_file(_io.BytesIO(html), "制度.html")
+    assert "公司制度" in doc.text
+    assert "年假需提前申请" in doc.text
+    assert "var x" not in doc.text, "script 内容应被剔除"
+    assert ".x{}" not in doc.text, "style 内容应被剔除"
+    assert doc.metadata["kind"] == "html"
+
+
+def test_parse_eml_extracts_subject_and_body():
+    from app.adapters.parser import parse_file
+    import io as _io
+
+    eml = "From: boss@corp.com\nTo: hr@corp.com\nSubject: 报销新规\n\n出差报销需发票实报实销。".encode()
+    doc = parse_file(_io.BytesIO(eml), "通知.eml")
+    assert "报销新规" in doc.text, "主题应进入文本"
+    assert "出差报销需发票实报实销" in doc.text
+    assert "boss@corp.com" in (doc.metadata.get("author") or "")
+
+
+def test_parse_eml_html_fallback():
+    from app.adapters.parser import parse_file
+    import io as _io
+
+    eml = ("From: a@b.c\nSubject: HTML 邮件\nContent-Type: text/html; charset=utf-8\n\n"
+           "<html><body><p>会议改期到周三。</p></body></html>").encode()
+    doc = parse_file(_io.BytesIO(eml), "会议.eml")
+    assert "会议改期到周三" in doc.text
+
+
+def test_parse_ocr_not_enabled():
+    from app.core.errors import ParseError
+    import pytest as _pytest
+
+    with _pytest.raises(ParseError, match="OCR 未启用"):
+        from app.adapters.parser import _parse_ocr
+        _parse_ocr(b"fake-png", ".png")
+
+
+def test_html_renamed_as_pdf_rejected():
+    """S2：魔数校验对新格式同样生效（HTML 冒充 PDF 被拒）。"""
+    from app.adapters.parser import parse_file
+    from app.core.errors import ParseError
+    import io as _io
+    import pytest as _pytest
+
+    fake = "<html><body>不是真 PDF</body></html>".encode()
+    with _pytest.raises(ParseError, match="非 PDF"):
+        parse_file(_io.BytesIO(fake), "伪装.pdf")

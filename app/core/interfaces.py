@@ -81,6 +81,17 @@ class QueryRewriter(ABC):
     def rewrite(self, query: str, feedback: EvaluationResult) -> str: ...
 
 
+class Cleaner(ABC):
+    """文档清洗器（解析后、分块前）：去噪/归一/质量过滤/段落级近重复去重。
+
+    输入输出均为纯文本（Document.text），无副作用、无状态；
+    由 DefaultCleaner 提供规则实现，可扩展第三方清洗器（如 OCR 前置预处理）。
+    """
+
+    @abstractmethod
+    def clean(self, text: str) -> str: ...
+
+
 class HallucinationDetector(ABC):
     """幻觉检测器（3.7）。"""
 
