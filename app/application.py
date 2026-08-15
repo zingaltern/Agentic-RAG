@@ -87,6 +87,16 @@ def create_app(settings_path: str = DEFAULT_SETTINGS_PATH,
             logger.warning("认证已启用但用户表为空：请配置 RAG_ADMIN_USER/RAG_ADMIN_PASSWORD "
                            "后重启，或通过 CLI 创建首管理员")
 
+    # 6.5 兜底重建：documents.json 缺失/为空但 Chroma 有数据时，全量重建文档索引
+    # （幽灵文档恢复；空索引才重建，已有数据不覆盖，异常不影响启动）
+    if components and deps.documents is not None:
+        try:
+            rebuilt = deps.documents.rebuild_from_vector_store(deps.vector_store, deps.kbs)
+            if rebuilt:
+                logger.info("已从 Chroma 兜底重建文档索引: %s 个文档", rebuilt)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("文档索引兜底重建失败（不影响启动）: %s", exc)
+
     # 13.8 CORS：dev 模式 5173 跨域白名单（生产同源不受影响）
     if config.api.cors_origins:
         app.add_middleware(
