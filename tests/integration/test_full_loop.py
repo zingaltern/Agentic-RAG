@@ -34,16 +34,19 @@ def integration_client(tmp_path_factory):
     from app.adapters.reranker.identity import IdentityReranker
 
     config = load_config()
+    config.api.auth_enabled = False   # 隔离测试不依赖认证（settings 默认已启用）
     config.vector_store.persist_dir = str(tmp_path_factory.mktemp("chroma"))
     config.documents.persist_file = str(tmp_path_factory.mktemp("persist") / "documents.json")
     config.kbs.persist_file = str(tmp_path_factory.mktemp("persist") / "kb.json")
     from app.services.documents_store import DocumentsStore
+    from app.services.jobs_store import JobStore
     from app.services.user_store import UserStore
 
     app = create_app(config=config, components=True, prewarm=False, llm=StubLLM(),
                      reranker=IdentityReranker(rerank_top_k=5),
                      users=UserStore(persist_file=str(tmp_path_factory.mktemp("persist") / "users.json")),
-                     documents=DocumentsStore(persist_file=str(tmp_path_factory.mktemp("persist") / "documents.json")))
+                     documents=DocumentsStore(persist_file=str(tmp_path_factory.mktemp("persist") / "documents.json")),
+                     jobs=JobStore(persist_file=str(tmp_path_factory.mktemp("persist") / "jobs.json")))
     with TestClient(app) as client:
         yield client
 

@@ -36,6 +36,7 @@ def q_client(tmp_path, isolated_stores):
     from app.adapters.reranker.identity import IdentityReranker
 
     config = load_config()
+    config.api.auth_enabled = False   # 与仓库 settings.yaml 解耦：这些用例按个人模式契约编写
     config.vector_store.persist_dir = str(tmp_path / "chroma")
     config.documents.persist_file = str(tmp_path / "documents.json")
     config.kbs.persist_file = str(tmp_path / "kb.json")
@@ -47,7 +48,7 @@ def q_client(tmp_path, isolated_stores):
         reranker=IdentityReranker(rerank_top_k=5),
         evaluator=RuleEvaluator(rule_threshold=0.45, top_n=5),
         kbs=isolated_stores["kbs"], users=isolated_stores["users"],
-        documents=isolated_stores["documents"],
+        documents=isolated_stores["documents"], jobs=isolated_stores["jobs"],
     )
     # 入库一份文档供检索
     sample = Path(__file__).resolve().parent.parent / "eval" / "sample_data" / "员工手册.md"

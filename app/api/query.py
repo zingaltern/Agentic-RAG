@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 
 from app.api.auth import get_authorizer
 from app.api.utils import fail, get_deps, ok
-from app.core.errors import InternalError, ValidationError
+from app.core.errors import BusyError, InternalError, RateLimitError, ValidationError
 from app.core.registry import Dependencies
 
 router = APIRouter(prefix="/api/query", tags=["query"])
@@ -49,6 +49,23 @@ def _detection_payload(answer) -> dict:
 @router.post("")
 def query(payload: QueryRequest, request: Request,
           deps: Dependencies = Depends(get_deps)) -> dict:
+    """C3/C4（V5.1）：并发信号量 + 速率限制包裹（43001/43002），成功后进入查询链路。"""
+    config = request.app.state.config
+    sem = request.app.state.query_semaphore
+    if not sem.acquire(timeout=config.orchestration.semaphore_acquire_timeout_seconds):
+        raise BusyError()
+    try:
+        return _query_impl(payload, request, deps)
+    finally:
+        sem.release()
+
+
+def _query_impl(payload: QueryRequest, request: Request,
+                deps: Dependencies) -> dict:
+    limiter = request.app.state.rate_limiters["query"]
+    client = request.client.host if request.client else "unknown"
+    if not limiter.allow(client):
+        raise RateLimitError()
     if deps.orchestration is None:
         raise InternalError("问答链路尚未装配（W3 交付）")
     if deps.kbs is None:

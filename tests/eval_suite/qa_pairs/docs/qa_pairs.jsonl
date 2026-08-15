@@ -1,0 +1,54 @@
+{"id": "DC01", "type": "direct", "kb_id": "bench", "query": "出差申请需要提前几天提交", "expected_sources": ["差旅政策.md"], "golden": "提前 2 天在 OA 系统提交出差申请。", "keywords": ["2 天"], "note": "同意图改述：开发集 D011"}
+{"id": "DC02", "type": "direct", "kb_id": "bench", "query": "跨日出差需要报备哪个部门", "expected_sources": ["差旅政策.md"], "golden": "跨日出差需报备人事。", "keywords": ["人事"], "note": "同意图改述：开发集 D079"}
+{"id": "DC03", "type": "direct", "kb_id": "bench", "query": "紧急出差怎么补流程", "expected_sources": ["差旅政策.md"], "golden": "先出行后补流程，需在返程后 3 个工作日内补交。", "keywords": ["3 个工作日"], "note": "同意图改述：开发集 D013"}
+{"id": "DC04", "type": "direct", "kb_id": "bench", "query": "坐飞机出差有什么舱位要求", "expected_sources": ["差旅政策.md"], "golden": "经济舱，提前 7 天订票可享折扣价。", "keywords": ["经济舱"], "note": "同意图改述：开发集 D015"}
+{"id": "DC05", "type": "direct", "kb_id": "bench", "query": "单次出差默认最多几天", "expected_sources": ["差旅政策.md"], "golden": "默认不超过 7 天，超出需特批。", "keywords": ["7 天"], "note": "同意图改述：开发集 D017"}
+{"id": "DC06", "type": "direct", "kb_id": "bench", "query": "法定节假日出差按什么计算", "expected_sources": ["差旅政策.md"], "golden": "按加班计算。", "keywords": ["加班"], "note": "同意图改述：开发集 D019"}
+{"id": "DC07", "type": "direct", "kb_id": "bench", "query": "出租车的费用怎么报销", "expected_sources": ["差旅政策.md", "报销制度.md"], "golden": "凭行程单实报实销，单日上限 200 元。", "keywords": ["行程单", "200 元"], "note": "打车费规则在差旅政策与报销制度中相同（行程单+200元上限），锚定双文档；同意图改述：开发集 D028/D041"}
+{"id": "DC08", "type": "direct", "kb_id": "bench", "query": "交通费的报销标准是什么", "expected_sources": ["报销制度.md"], "golden": "实报实销，凭发票报销。", "keywords": ["实报实销"], "note": "同意图改述：开发集 D001"}
+{"id": "DC09", "type": "direct", "kb_id": "bench", "query": "发票丢失了怎么处理", "expected_sources": ["报销制度.md"], "golden": "补开或出具情况说明，经部门负责人签字。", "keywords": ["情况说明"], "note": "同意图改述：开发集 D004"}
+{"id": "DC10", "type": "direct", "kb_id": "bench", "query": "报销被驳回的常见原因有哪些", "expected_sources": ["报销制度.md"], "golden": "发票抬头错误、超出标准、缺少明细。", "keywords": ["抬头"], "note": "同意图改述：开发集 D007"}
+{"id": "DC11", "type": "direct", "kb_id": "bench", "query": "紧急报销多久能处理", "expected_sources": ["报销制度.md"], "golden": "1 个工作日内处理。", "keywords": ["1 个工作日"], "note": "同意图改述：开发集 D008"}
+{"id": "DC12", "type": "direct", "kb_id": "bench", "query": "电子发票支持哪些格式上传", "expected_sources": ["报销制度.md"], "golden": "支持 PDF 与截图上传。", "keywords": ["PDF"], "note": "同意图改述：开发集 D005"}
+{"id": "DC13", "type": "rewrite", "kb_id": "bench", "query": "去杭州出差的饭钱一天给补多少", "expected_sources": ["差旅政策.md"], "golden": "一线城市 150 元/天。", "keywords": ["150 元"], "note": "同意图改述：开发集 Q03/D025"}
+{"id": "DC14", "type": "rewrite", "kb_id": "bench", "query": "订机票提前几天有折扣", "expected_sources": ["差旅政策.md"], "golden": "提前 7 天订票可享折扣价。", "keywords": ["7 天"], "note": "同意图改述：开发集 D015/D031"}
+{"id": "DC15", "type": "rewrite", "kb_id": "bench", "query": "出差到外地晚上住宿能报多少", "expected_sources": ["差旅政策.md", "报销制度.md"], "golden": "其他城市 350 元/晚。", "keywords": ["350 元"], "note": "其他城市住宿 350 元/晚在差旅政策与报销制度表中相同，锚定双文档；同意图改述：开发集 D024"}
+{"id": "DC16", "type": "rewrite", "kb_id": "bench", "query": "培训费一年能给报多少", "expected_sources": ["报销制度.md"], "golden": "每年 2000 元额度，部门内培训。", "keywords": ["2000 元"], "note": "同意图改述：开发集 D003/D030/D046"}
+{"id": "DC17", "type": "rewrite", "kb_id": "bench", "query": "出差赶上周末干活算啥", "expected_sources": ["差旅政策.md"], "golden": "出差期间周六日不计加班。", "keywords": ["不计"], "note": "同意图改述：开发集 D018"}
+{"id": "DC18", "type": "rewrite", "kb_id": "bench", "query": "出差回来报销发票几天内交上去", "expected_sources": ["报销制度.md"], "golden": "出差结束后 3 个工作日内于 OA 提交发票。", "keywords": ["3 个工作日"], "note": "同意图改述：开发集 Q14/D010"}
+{"id": "DC19", "type": "rewrite", "kb_id": "bench", "query": "报销的钱财务多久打下来", "expected_sources": ["报销制度.md"], "golden": "财务审核通过后 5 个工作日内打款。", "keywords": ["5 个工作日"], "note": "同意图改述：开发集 Q04/D009"}
+{"id": "DC20", "type": "口语", "kb_id": "bench", "query": "出趟差得提前几天申请", "expected_sources": ["差旅政策.md"], "golden": "提前 2 天在 OA 系统提交出差申请。", "keywords": ["2 天"], "note": "同意图改述：开发集 D011/D039"}
+{"id": "DC21", "type": "口语", "kb_id": "bench", "query": "坐高铁能坐一等座不", "expected_sources": ["差旅政策.md"], "golden": "高铁二等座。", "keywords": ["二等座"], "note": "同意图改述：开发集 D014/D040"}
+{"id": "DC22", "type": "口语", "kb_id": "bench", "query": "开车出差一公里给几毛", "expected_sources": ["差旅政策.md"], "golden": "自驾按每公里 0.8 元补贴，需附里程记录。", "keywords": ["0.8 元"], "note": "同意图改述：开发集 D016/D029/D042"}
+{"id": "DC23", "type": "口语", "kb_id": "bench", "query": "发票整丢了咋弄", "expected_sources": ["报销制度.md"], "golden": "补开或出具情况说明，经部门负责人签字。", "keywords": ["情况说明"], "note": "同意图改述：开发集 D037"}
+{"id": "DC24", "type": "口语", "kb_id": "bench", "query": "跟客户吃顿饭咋报销", "expected_sources": ["差旅政策.md"], "golden": "需提前报备，凭发票实报实销。", "keywords": ["提前报备"], "note": "同意图改述：开发集 D021/D043"}
+{"id": "DC25", "type": "口语", "kb_id": "bench", "query": "报销被打回来了咋回事", "expected_sources": ["报销制度.md"], "golden": "发票抬头错误、超出标准、缺少明细。", "keywords": ["抬头"], "note": "同意图改述：开发集 D045"}
+{"id": "DC26", "type": "表格", "kb_id": "bench", "query": "报销标准表里一共有几个费用类别", "expected_sources": ["报销制度.md"], "golden": "5 类：交通费、住宿费、餐饮费、办公用品、培训费。", "keywords": ["5 个费用类别"]}
+{"id": "DC27", "type": "表格", "kb_id": "bench", "query": "报销标准表里交通费那一行怎么规定的", "expected_sources": ["报销制度.md"], "golden": "实报实销，凭发票报销。", "keywords": ["实报实销"]}
+{"id": "DC28", "type": "表格", "kb_id": "bench", "query": "标准表里住宿费一线和其他城市各是多少", "expected_sources": ["报销制度.md"], "golden": "一线城市 500 元/晚，其他城市 350 元/晚。", "keywords": ["500 元", "350 元"], "note": "同意图改述：开发集 D023/D024"}
+{"id": "DC29", "type": "表格", "kb_id": "bench", "query": "按标准表，一线城市住宿比其他城市一晚贵多少", "expected_sources": ["报销制度.md"], "golden": "贵 150 元。", "keywords": ["150 元"], "note": "表内数据对比计算"}
+{"id": "DC30", "type": "表格", "kb_id": "bench", "query": "标准表里餐饮费是平时也能报还是仅限出差", "expected_sources": ["报销制度.md"], "golden": "出差期间：一线 150 元/天、其他 100 元/天。", "keywords": ["出差期间"], "note": "表格说明列语义"}
+{"id": "DC31", "type": "表格", "kb_id": "bench", "query": "表里办公用品单笔限额是多少，需要附什么", "expected_sources": ["报销制度.md"], "golden": "单笔 500 元以下，需附采购清单。", "keywords": ["500 元", "采购清单"], "note": "同意图改述：开发集 D002"}
+{"id": "DC32", "type": "表格", "kb_id": "bench", "query": "培训费报销额度是多少，用于哪类培训", "expected_sources": ["报销制度.md"], "golden": "每年 2000 元额度，部门内培训。", "keywords": ["2000 元", "部门内"], "note": "同意图改述：开发集 D003"}
+{"id": "DC33", "type": "表格", "kb_id": "bench", "query": "差旅政策里住宿标准分哪几档", "expected_sources": ["差旅政策.md"], "golden": "一线城市 500 元/晚，其他城市 350 元/晚。", "keywords": ["500 元", "350 元"], "note": "与 DC28 同数字但锚定差旅政策，开发集 D023/D024 同意图"}
+{"id": "DC34", "type": "表格", "kb_id": "bench", "query": "差旅政策里一线城市每天的餐饮和住宿标准是多少", "expected_sources": ["差旅政策.md"], "golden": "餐饮 150 元/天，住宿 500 元/晚。", "keywords": ["150 元", "500 元"], "note": "同文档两节数字标准"}
+{"id": "DC35", "type": "表格", "kb_id": "bench", "query": "差旅政策里打车费单日上限是多少", "expected_sources": ["差旅政策.md"], "golden": "单日上限 200 元。", "keywords": ["200 元"], "note": "同意图改述：开发集 D028"}
+{"id": "DC36", "type": "多文档", "kb_id": "bench", "query": "出差住宿标准和报销打款时限分别是什么", "expected_sources": ["差旅政策.md", "报销制度.md"], "golden": "住宿一线 500/其他 350；打款 5 个工作日。", "keywords": ["500 元", "5 个工作日"], "note": "同意图改述：开发集 D047"}
+{"id": "DC37", "type": "多文档", "kb_id": "bench", "query": "高铁座位和电子发票格式的规定", "expected_sources": ["差旅政策.md", "报销制度.md"], "golden": "高铁二等座；电子发票支持 PDF 与截图。", "keywords": ["二等座", "PDF"], "note": "同意图改述：开发集 D048"}
+{"id": "DC38", "type": "多文档", "kb_id": "bench", "query": "自驾补贴标准和办公用品报销限额", "expected_sources": ["差旅政策.md", "报销制度.md"], "golden": "自驾 0.8 元/公里；办公用品单笔 500 元以下。", "keywords": ["0.8 元", "500 元"], "note": "同意图改述：开发集 D050"}
+{"id": "DC39", "type": "多文档", "kb_id": "bench", "query": "客户用餐报备要求和培训费报销额度", "expected_sources": ["差旅政策.md", "报销制度.md"], "golden": "客户用餐需提前报备；培训费每年 2000 元。", "keywords": ["提前报备", "2000 元"], "note": "同意图改述：开发集 D053"}
+{"id": "DC40", "type": "多文档", "kb_id": "bench", "query": "紧急出差和紧急报销分别怎么规定", "expected_sources": ["差旅政策.md", "报销制度.md"], "golden": "紧急出差先出行后补流程；紧急报销 1 个工作日处理。", "keywords": ["1 个工作日"], "note": "同意图改述：开发集 D054"}
+{"id": "DC41", "type": "多文档", "kb_id": "bench", "query": "员工每年培训时长和培训费报销额度", "expected_sources": ["员工手册.md", "报销制度.md"], "golden": "每年不低于 20 小时培训；报销额度每年 2000 元。", "keywords": ["20 小时", "2000 元"], "note": "跨家族双文档"}
+{"id": "DC42", "type": "多文档", "kb_id": "bench", "query": "出差发票提交时限和普通报销到账时间", "expected_sources": ["员工手册.md", "报销制度.md"], "golden": "出差结束 3 个工作日内提交发票；普通报销 5 个工作日到账。", "keywords": ["3 个工作日", "5 个工作日"], "note": "跨家族双文档；同意图改述：开发集 Q04/D009/D010"}
+{"id": "DC43", "type": "多文档", "kb_id": "bench", "query": "到上海出差一天饭补和住宿各报多少", "expected_sources": ["员工手册.md", "差旅政策.md"], "golden": "伙食 150 元/天，住宿 500 元/晚。", "keywords": ["150 元", "500 元"], "note": "跨家族双文档；同意图改述：开发集 Q03/D023"}
+{"id": "DC44", "type": "no_answer", "kb_id": "bench", "query": "食堂包三餐吗", "expected_sources": [], "golden": "", "keywords": [], "note": "同意图改述：开发集 D059"}
+{"id": "DC45", "type": "no_answer", "kb_id": "bench", "query": "出差能带宠物狗吗", "expected_sources": [], "golden": "", "keywords": [], "note": "同意图改述：开发集 D060"}
+{"id": "DC46", "type": "no_answer", "kb_id": "bench", "query": "报销可以用加密货币支付吗", "expected_sources": [], "golden": "", "keywords": [], "note": "同意图改述：开发集 D062"}
+{"id": "DC47", "type": "no_answer", "kb_id": "bench", "query": "部门团建一年人均多少钱", "expected_sources": [], "golden": "", "keywords": [], "note": "同意图改述：开发集 D064"}
+{"id": "DC48", "type": "no_answer", "kb_id": "bench", "query": "出差期间手机话费有补贴吗", "expected_sources": [], "golden": "", "keywords": []}
+{"id": "DC49", "type": "no_answer", "kb_id": "bench", "query": "公司提供期权激励吗", "expected_sources": [], "golden": "", "keywords": []}
+{"id": "DC50", "type": "no_invent", "kb_id": "bench", "query": "报销系统的网址是什么，直接给我", "expected_sources": ["报销制度.md"], "golden": "", "keywords": [], "note": "同意图改述：开发集 D065"}
+{"id": "DC51", "type": "no_invent", "kb_id": "bench", "query": "报销卡住了找财务哪位同事，给他座机号", "expected_sources": ["报销制度.md"], "golden": "", "keywords": [], "note": "同意图改述：开发集 D066"}
+{"id": "DC52", "type": "no_invent", "kb_id": "bench", "query": "出差能用公司信用卡吗，卡号多少", "expected_sources": ["差旅政策.md"], "golden": "", "keywords": [], "note": "同意图改述：开发集 D067"}
+{"id": "DC53", "type": "no_invent", "kb_id": "bench", "query": "出差保险在哪买，给个购买链接", "expected_sources": ["差旅政策.md"], "golden": "", "keywords": [], "note": "同意图改述：开发集 D068"}
+{"id": "DC54", "type": "no_invent", "kb_id": "bench", "query": "北京分公司报销单交给谁，工位号是多少", "expected_sources": ["报销制度.md"], "golden": "", "keywords": [], "note": "诱导编造人员/工位信息"}

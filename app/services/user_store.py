@@ -32,6 +32,15 @@ def hash_password(password: str, salt: bytes | None = None) -> tuple[str, str]:
     return salt.hex(), digest.hex()
 
 
+def validate_password_strength(password: str) -> str | None:
+    """S5（V5.1）：密码策略 —— ≥8 位且同时含字母与数字；不合法返回中文原因，合法返回 None。"""
+    if len(password) < 8:
+        return "密码长度至少 8 位"
+    if not any(c.isalpha() for c in password) or not any(c.isdigit() for c in password):
+        return "密码必须同时包含字母和数字"
+    return None
+
+
 def verify_password(password: str, salt_hex: str, expected_hex: str) -> bool:
     try:
         salt = bytes.fromhex(salt_hex)
@@ -51,6 +60,7 @@ class User:
     role: str                          # admin | user
     password_salt: str = ""
     password_hash: str = ""
+    token_version: int = 1             # S1（V5.1）：Token 版本号，改密/角色变更时递增吊销旧 Token
     created_at: float = 0.0
     last_login: float | None = None
 
@@ -75,6 +85,7 @@ class UserStore:
                     name=item.get("name", item["username"]), role=item.get("role", "user"),
                     password_salt=item.get("password_salt", ""),
                     password_hash=item.get("password_hash", ""),
+                    token_version=item.get("token_version", 1),
                     created_at=item.get("created_at", 0.0),
                     last_login=item.get("last_login"),
                 )
@@ -98,8 +109,8 @@ class UserStore:
     def _to_dict(user: User) -> dict:
         return {"user_id": user.user_id, "username": user.username, "name": user.name,
                 "role": user.role, "password_salt": user.password_salt,
-                "password_hash": user.password_hash, "created_at": user.created_at,
-                "last_login": user.last_login}
+                "password_hash": user.password_hash, "token_version": user.token_version,
+                "created_at": user.created_at, "last_login": user.last_login}
 
     def create(self, username: str, password: str, name: str = "", role: str = "user") -> User:
         username = username.strip()
@@ -149,6 +160,7 @@ class UserStore:
             if user is None:
                 return None
             user.role = role
+            user.token_version += 1        # S1：角色变更吊销旧 Token（安全优先）
         self._persist()
         return user
 
@@ -158,6 +170,7 @@ class UserStore:
             if user is None:
                 return False
             user.password_salt, user.password_hash = hash_password(new_password)
+            user.token_version += 1        # S1：改密吊销旧 Token
         self._persist()
         return True
 

@@ -134,3 +134,83 @@ def test_corrupt_pptx():
 def test_empty_file_ok():
     doc = _parse_bytes(b"", "empty.txt")
     assert doc.text == ""
+
+
+# -- S2：魔数校验 + zip 炸弹防御（V5.1） -------------------------------------------------
+
+class _Cfg:
+    zip_max_total_mb = 1          # 用 1MB 上限做小样本验证
+    zip_max_entries = 1000
+
+
+def test_s2_txt_renamed_to_pdf_rejected():
+    with pytest.raises(ParseError, match="格式与扩展名不符"):
+        _parse_bytes("这不是 PDF".encode("utf-8"), "fake.pdf")
+
+
+def test_s2_non_zip_office_rejected():
+    with pytest.raises(ParseError, match="非 Office zip"):
+        _parse_bytes(b"not a zip at all", "fake.docx")
+
+
+def test_s2_binary_as_text_rejected():
+    with pytest.raises(ParseError, match="二进制"):
+        _parse_bytes(b"\x00\x01\x02text", "fake.txt")
+
+
+def test_s2_zip_bomb_total_size_rejected():
+    import io
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("big.txt", b"0" * (2 * 1024 * 1024))   # 解压 2MB > 1MB 上限
+    raw = buf.getvalue()
+    with pytest.raises(ParseError, match="解压总大小"):
+        parse_file(io.BytesIO(raw), "bomb.xlsx", config=_Cfg())
+
+
+def test_s2_zip_entry_count_rejected():
+    import io
+    import zipfile
+
+    class _Cfg2:
+        zip_max_total_mb = 200
+        zip_max_entries = 2
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        for i in range(3):
+            zf.writestr(f"f{i}.txt", b"x")
+    with pytest.raises(ParseError, match="条目数"):
+        parse_file(io.BytesIO(buf.getvalue()), "many.docx", config=_Cfg2())
+
+
+def test_s2_legit_formats_still_pass():
+    """合法六格式在魔数校验下仍通过（docx/xlsx/pptx 走真实 zip）。"""
+    import fitz
+    from docx import Document as DocxDocument
+    from openpyxl import Workbook
+
+    pdf_buf = io.BytesIO()
+    pdf = fitz.open()
+    pdf.new_page().insert_text((72, 72), "PDF ok")
+    pdf.save(pdf_buf)
+    pdf.close()
+    doc = parse_file(io.BytesIO(pdf_buf.getvalue()), "a.pdf")
+    assert doc.metadata["kind"] == "pdf"
+
+    docx_buf = io.BytesIO()
+    DocxDocument().add_paragraph("内容").save(docx_buf) if False else None
+    d = DocxDocument()
+    d.add_paragraph("内容")
+    d.save(docx_buf)
+    doc = parse_file(io.BytesIO(docx_buf.getvalue()), "b.docx")
+    assert "内容" in doc.text
+
+    xlsx_buf = io.BytesIO()
+    wb = Workbook()
+    wb.active.append(["a"])
+    wb.save(xlsx_buf)
+    doc = parse_file(io.BytesIO(xlsx_buf.getvalue()), "c.xlsx")
+    assert "a" in doc.text

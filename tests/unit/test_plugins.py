@@ -12,6 +12,7 @@ from tests.unit.fakes import StubEmbedding
 
 def _app(tmp_path, auth_enabled: bool = False, isolated_stores=None):
     from app.services.documents_store import DocumentsStore
+    from app.services.jobs_store import JobStore
     from app.services.kb_store import KbStore
     from app.services.user_store import UserStore
 
@@ -28,9 +29,11 @@ def _app(tmp_path, auth_enabled: bool = False, isolated_stores=None):
         "kbs": KbStore(persist_file=str(tmp_path / "kb.json")),
         "users": UserStore(persist_file=str(tmp_path / "users.json")),
         "documents": DocumentsStore(persist_file=str(tmp_path / "documents.json")),
+        "jobs": JobStore(persist_file=str(tmp_path / "jobs.json")),
     }
     return create_app(config=config, components=True, prewarm=False, embedding=StubEmbedding(dimension=512),
-                      kbs=stores["kbs"], users=stores["users"], documents=stores["documents"])
+                      kbs=stores["kbs"], users=stores["users"], documents=stores["documents"],
+                      jobs=stores["jobs"])
 
 
 def test_status_reports_providers(tmp_path):

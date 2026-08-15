@@ -10,6 +10,9 @@
 | `DEVELOPMENT.md` | **唯一规格来源**（接口契约、数据模型、算法、配置、API、验收）。开发前**必须**按任务范围读取对应章节，禁止凭别的理解自由发挥 | 高 |
 | `TASK.md` | 当前任务简报（某周里程碑与验收判据）——由任务指令给定 | 高 |
 | `README.md` | 快速启动（`make run / make test`） | 中 |
+| `PRODUCT_MANUAL.md` | 产品说明书（面向终端用户，界面/功能口径） | 中 |
+| `docs/review-followup.md` | 评审延后项清单与状态 | 低 |
+| `tests/eval_suite/README.md` | 独立基准评测规范（120 条冻结集，第二道门禁） | 评测时必读 |
 
 - 冲突时：`DEVELOPMENT.md` > 任务指令 > `AGENTS.md` 中与上述冲突的表述。
 - 若你发现规格确实需要变更：**先改 DEVELOPMENT.md 再改代码**，并在 commit message 里说明。
@@ -18,10 +21,10 @@
 
 ```bash
 make bootstrap      # 虚拟环境 + 安装依赖（首次）
-make run            # 启动 API（含 /ui 测试页）→ http://localhost:8000/ui
-make test           # 跑全部单测
+make run            # 启动 API（SPA + /ui 测试页）→ http://127.0.0.1:8000
+make test           # 跑全部单测（含覆盖率门禁 ≥80%）
 make eval           # 评测（reports/eval-*.md）
-python -m app.cli.rageval --pairs tests/eval/qa_pairs.json   # 评测
+python -m app.cli.rageval --kb default   # 评测（按库；--all-kbs 全库；--in-process 进程内）
 # —— 第二阶段（第 13 章）——
 cd frontend && npm install && npm run dev     # Web 前端（vite，proxy → :8000）
 cd frontend && npm run build                  # 产物 dist，由 FastAPI 挂载
@@ -57,8 +60,9 @@ make desktop        # Electron 桌面（内置拉起后端）【W8 落地】
 
 ## 测试要求
 
-- 完成任何功能后必须 `make test` 全绿；新模块补齐对应单测（对照 DEVELOPMENT 第 8.1 矩阵）。
-- 集成/评测：`tests/eval/qa_pairs.json` 至少 20 条通过 `rage_eval` 出报告。
+- 完成任何功能后必须 `make test` 全绿（293 项，2026-08-15 实测，含覆盖率门禁 ≥80%）；新模块补齐对应单测（对照 DEVELOPMENT 第 8.1 矩阵）。
+- 评测回归：开发集 `tests/eval/qa_pairs/{default,docs}/` 107 条经 `app.cli.rageval` 出报告（13.1 度量协议，改检索/改写/检测等影响指标的功能必须前后对比）；
+  独立基准集 `tests/eval_suite/`（120 条冻结）规范见该目录 README，不随开发周期增删。
 
 ## 提交与 GitHub（用户要求时执行）
 

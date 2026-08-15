@@ -12,8 +12,9 @@ class AppError(Exception):
     code: int = 50001
     message: str = "未知内部错误"
 
-    def __init__(self, message: str | None = None):
+    def __init__(self, message: str | None = None, data: dict | None = None):
         self.message = message or self.message
+        self.data = data if data is not None else {}
         super().__init__(self.message)
 
 
@@ -78,6 +79,34 @@ class RequestTimeoutError(AppError):
 
     code = 21002
     message = "请求超时"
+
+
+class BusyError(AppError):
+    """并发信号量耗尽：系统繁忙（C3，V5.1 并发加固）。"""
+
+    code = 43001
+    message = "系统繁忙，请稍后重试"
+
+
+class RateLimitError(AppError):
+    """速率限制：请求过于频繁（C4，V5.1 并发加固）。"""
+
+    code = 43002
+    message = "请求过于频繁，请稍后重试"
+
+
+class QueueFullError(AppError):
+    """入库队列已满（C5，V5.1 并发加固）。"""
+
+    code = 43003
+    message = "入库队列已满，请稍后重试"
+
+
+class JobInterruptedError(AppError):
+    """服务重启导致任务中断（C6，V5.1 并发加固）。"""
+
+    code = 50003
+    message = "服务重启，任务中断"
 
 
 class InternalError(AppError):

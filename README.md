@@ -19,9 +19,10 @@ make demo-ingest    # 入库 demo 文档并检索验证
 
 ## 前端 SPA（W7，Vue3 + Vite + Element Plus）
 
-前后端分离：`frontend/` 独立工程（Vue3 + Vue Router + Pinia + Element Plus），五区块
-（问答控制台 / 文档管理 / 知识库管理 / 设置总览 / 错误码提示条）全部对接真实 API；
+前后端分离：`frontend/` 独立工程（Vue3 + Vue Router + Pinia + Element Plus），四区块
+（问答控制台 / 文档管理 / 知识库管理 / 设置总览）全部对接真实 API；
 `src/api/base.js` 是 `BASE_URL` 单一常量（13.11.2，Web 与桌面共享的后端地址策略唯一入口）。
+错误提示为中文人话文案（错误码/trace_id 仅入日志，不上界面）。
 
 ```bash
 make frontend-install   # 首次安装前端依赖（cd frontend && npm install）
@@ -83,6 +84,7 @@ make desktop   # 依赖：.venv（make bootstrap）、frontend 依赖（make fro
 - **启动**：探测端口（默认 8000，占用自动后移，最多试 5 个）→ 以项目 `.venv/bin/python` 拉起
   `uvicorn app.main:app`（仅 `127.0.0.1` 监听）；子进程失败弹错误框而非白屏。
 - **就绪**：轮询 `/api/health`（≤30s，窗口就绪后才显示）→ 加载与 Web 端同一 SPA。
+- **异常自动恢复**：运行中后端进程意外退出（含被外部信号终止）→ 桌面壳自动重启并重新等待就绪（最多 2 次），恢复失败才弹错误框退出，不再卡死。
 - **退出**：关窗/退出 → 级联终止后端子进程（Windows taskkill /T，其他 SIGTERM→SIGKILL 兜底），
   可用 `lsof -i :8000` 自验无残留。
 - **外部后端模式**：设置页「外部后端」填写 `127.0.0.1:port` → 保存后重启应用，不再自动拉起本地服务。
@@ -96,7 +98,7 @@ make desktop   # 依赖：.venv（make bootstrap）、frontend 依赖（make fro
 
 ## 认证与权限（V5.1，S1/13.11.1）
 
-**① 个人模式（默认）**：`auth_enabled=false` 时无登录页、无鉴权，所有操作可用，行为与单用户版一致。
+**① 个人模式（契约默认）**：`auth_enabled=false` 时无登录页、无鉴权，所有操作可用，行为与单用户版一致（当前部署已开启团队模式）。
 
 **② 团队模式三步**（小团队共享，管理员/普通用户两级）：
 1. `configs/settings.yaml` 设 `api.auth_enabled: true`；
@@ -107,11 +109,21 @@ make desktop   # 依赖：.venv（make bootstrap）、frontend 依赖（make fro
 - 登录：`POST /api/auth/login` → `{token, user}`，前端本地持久化（`Authorization: Bearer <token>`）；
   `GET /api/auth/me`、`POST /api/auth/change-password`；未带/错误凭证 → `40101`；
   `/api/health`、`/api/plugins/status`、`/ui`、`/api/auth` 白名单放行；响应保持 `{code,message,data}` 契约。
+  密码 scrypt 哈希存储；登录失败返回通用文案「用户名或密码错误」（不泄露账号是否存在）；
+  **防爆破：连续失败 5 次锁定来源 IP 5 分钟**（进程内计数，成功登录重置）。
 - **权限（知识库级，V5.1）**：共享库（`scope=shared`，含 default）全员可读、仅管理员可写/删；
   私有库（`scope=private`）仅 owner 与管理员可见可管理；普通用户建库服务端强制为私有。
-- **用户管理 API（仅 admin）**：`GET/POST /api/users`、`POST /api/users/{id}/reset-password|role`、`DELETE /api/users/{id}`（禁删自己）。
+- **用户管理 API（仅 admin）**：`GET/POST /api/users`、`POST /api/users/import`（CSV 批量导入：表头
+  `用户名,姓名,初始密码,角色`，全量校验通过才写入，失败返回逐行明细）、`POST /api/users/{id}/reset-password|role`、`DELETE /api/users/{id}`（禁删自己）。
 - 审计（S6）：query/upload 事件含 `user_id`（认证态取真实用户，否则 anonymous）、kb_id 与回答摘要，
-  不含密码/Token/完整敏感文本；`trace_id` 全链路贯穿（前端设置页/问答区可查）。
+  不含密码/Token/完整敏感文本；`trace_id` 全链路贯穿（记录于后端 JSON 日志，前端不展示）。
+  **注意（V5.1）**：审计日志含用户查询与回答摘要，属个人数据——日志文件权限已收紧（桌面 `backend.log` 0o600），
+  留存与访问控制由部署方制度化管理。
+- 密码策略（V5.1）：新密码/重置密码 ≥8 位且同时含字母与数字；已有用户不强求改密。
+- 敏感数据脱敏（S6）：`ingestion.desensitize_enabled=true` 时身份证/手机号/银行卡入库前替换为 `***`
+  （默认关闭；HR/财务等合规场景建议开启，开启后号码类检索会失效，改策略前跑 `make eval` 对比）。
+- 并发与限速（V5.1）：并发查询上限 `orchestration.max_concurrent_queries`（默认 4，超限 43001）；
+  `/api/query` 20 次/分/IP、上传 10 次/分/IP（超限 43002）；入库队列上限 64（超限 43003）。
 - CLI 评测（认证启用时）：`python -m app.cli.rageval --base-url http://127.0.0.1:8000 --login <user> <pass>` 或 `--token <token>`。
 
 ## API 速览
@@ -126,7 +138,7 @@ make desktop   # 依赖：.venv（make bootstrap）、frontend 依赖（make fro
 | GET | `/api/jobs/{job_id}` | 上传任务状态轮询 |
 | POST | `/api/query` | 问答（可选 `kb_id`，与 `collection` 二选一，kb_id 优先） |
 | GET/POST/DELETE | `/api/kbs` | 知识库 CRUD（13.5：内置 default 不可删） |
-| GET/POST | `/api/plugins/status` `/api/plugins/switch` | 插件 provider 状态 / 热切换（switch 待 W 后续） |
+| GET/POST | `/api/plugins/status` `/api/plugins/switch` | 插件 provider 状态 / 热切换（switch 需登录且仅管理员） |
 
 **多知识库（13.5）**：`kb_id → Chroma collection` 物理隔离；上传/问答按 `kb_id` 作用域，
 A/B 库内容互不可见；`/api/kbs` 建库（name 自动 slug 化生成 kb_id）、删库级联清空向量集合。
@@ -154,21 +166,23 @@ A/B 库内容互不可见；`/api/kbs` 建库（name 自动 slug 化生成 kb_id
 | W7 | Web 前端：前后端分离，`frontend/` Vue3+Vite SPA | 已落地 |
 | W8 | Electron 桌面壳（内置拉起后端）+ 收尾 | 已落地 |
 
-当前阶段面向收尾与加固：桌面打包、认证/权限（`api.auth_enabled` + `RAG_API_KEY`）、文档索引持久化等。
+当前阶段面向收尾与加固：桌面打包（Python 运行时捆绑待决策）、认证/权限（`api.auth_enabled` + `RAG_ADMIN_USER/RAG_ADMIN_PASSWORD`，当前部署已开启团队模式）、文档索引持久化等。
 
 Web 前端开发期用 `cd frontend && npm run dev`（proxy 到 :8000）；桌面端 W8 落地后 `make desktop`。
 
 ## 目录速览
 
 ```
+application.py           # 装配层：中间件（CORS/安全头/限速/审计）+ 依赖注入
 app/
 ├── main.py            # FastAPI 入口（装配 DI → 启动，托管 /ui）
-├── api/               # health / documents / query / plugins / jobs 路由
-├── core/              # domain 数据模型 / interfaces 接口契约 / config / errors / logging / registry
+├── api/               # health / documents / query / plugins / jobs / kbs / users / auth 路由
+├── core/              # domain 数据模型 / interfaces 接口契约 / config / errors / logging / registry / rate_limit
 ├── adapters/          # embedding / vector_store / retriever / reranker / evaluator / rewriter / detector / llm / parser / chunker
-├── services/          # orchestration（反思循环）/ ingestion / jobs_store / documents_store
+├── services/          # orchestration（反思循环）/ ingestion / jobs_store / documents_store / kb_store / user_store / rbac / desensitize
 └── cli/               # demo_ingest / rageval
-web/                   # /ui 内置测试页（无前端工程）
+web/                   # /ui 内置测试页（无前端工程，冒烟/降级入口）
+frontend/              # Vue3 SPA + Electron 桌面壳（electron/main.cjs、bootstrap.cjs）
 configs/settings.yaml  # 系统配置
 tests/unit/            # 单测；tests/integration/ 集成测试（-m integration）
 ```

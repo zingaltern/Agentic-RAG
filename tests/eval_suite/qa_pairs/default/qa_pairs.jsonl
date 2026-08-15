@@ -1,0 +1,38 @@
+{"id": "DF01", "type": "direct", "kb_id": "bench", "query": "入职刚满一年，每年有多少天年假", "expected_sources": ["员工手册.md"], "golden": "入职满 1 年：年假 5 天。", "keywords": ["5 天"], "note": "同意图改述：开发集 Q01 问年假天数，本用例换措辞"}
+{"id": "DF02", "type": "direct", "kb_id": "bench", "query": "请事假需要提前几天跟直属主管说", "expected_sources": ["员工手册.md"], "golden": "事假需提前 2 天向直属主管申请。", "keywords": ["2 天"]}
+{"id": "DF03", "type": "direct", "kb_id": "bench", "query": "病假返岗后要补交什么材料", "expected_sources": ["员工手册.md"], "golden": "返岗后 3 个工作日内补交医院诊断证明或医嘱。", "keywords": ["3 个工作日", "诊断证明"], "note": "同意图改述：开发集 Q06 问请病假提交什么"}
+{"id": "DF04", "type": "direct", "kb_id": "bench", "query": "加班申请调休，调休额度要在多久内用完", "expected_sources": ["员工手册.md"], "golden": "调休额度须在当季度内使用完毕。", "keywords": ["当季度"], "note": "同意图改述：开发集 Q05 问加班补偿"}
+{"id": "DF05", "type": "direct", "kb_id": "bench", "query": "公司每年给每位员工多少小时内部培训", "expected_sources": ["员工手册.md"], "golden": "不低于 20 小时内部培训课程。", "keywords": ["20 小时"]}
+{"id": "DF06", "type": "direct", "kb_id": "bench", "query": "出差产生的交通和住宿费用怎么报销", "expected_sources": ["员工手册.md", "报销制度.md"], "golden": "实报实销，需在出差结束后 3 个工作日内于 OA 系统提交发票。", "keywords": ["实报实销", "3 个工作日"], "note": "该规则在员工手册与报销制度中内容相同（实报实销+3个工作日OA提交发票），锚定双文档；同意图改述：开发集 Q14/D010"}
+{"id": "DF07", "type": "direct", "kb_id": "bench", "query": "办公设备坏了要通过什么渠道报修", "expected_sources": ["IT支持手册.md"], "golden": "邮件 it-support@company.com 提交工单，注明设备编号。", "keywords": ["it-support@company.com"], "note": "同意图改述：开发集 Q08 问报修找谁"}
+{"id": "DF08", "type": "direct", "kb_id": "bench", "query": "无线打印机打印后怎么取件", "expected_sources": ["IT支持手册.md"], "golden": "持工牌在打印终端刷卡取件。", "keywords": ["工牌", "刷卡"]}
+{"id": "DF09", "type": "direct", "kb_id": "bench", "query": "员工离职后 VPN 账号怎么处理", "expected_sources": ["IT支持手册.md"], "golden": "员工离职后 VPN 账号即时回收。", "keywords": ["即时回收"]}
+{"id": "DF10", "type": "direct", "kb_id": "bench", "query": "新员工入职当天 IT 会开通哪些系统账号", "expected_sources": ["IT支持手册.md"], "golden": "自动开通企业邮箱、内部 VPN、IAM 账号。", "keywords": ["企业邮箱", "IAM"], "note": "同意图改述：开发集 Q07 问账号开通时间"}
+{"id": "DF11", "type": "direct", "kb_id": "bench", "query": "LightCube 网关默认每秒处理多少请求", "expected_sources": ["产品FAQ.txt"], "golden": "默认网关并发 500 请求/秒，可按需水平扩容。", "keywords": ["500"], "note": "同意图改述：开发集 Q11 问默认并发"}
+{"id": "DF12", "type": "direct", "kb_id": "bench", "query": "LightCube 支持哪两种部署方式", "expected_sources": ["产品FAQ.txt"], "golden": "支持 Docker 单容器部署与 Kubernetes 集群部署。", "keywords": ["Docker", "Kubernetes"], "note": "同意图改述：开发集 Q12 问部署方式"}
+{"id": "DF13", "type": "direct", "kb_id": "bench", "query": "LightCube 内置了哪些安全能力", "expected_sources": ["产品FAQ.txt"], "golden": "角色权限控制、数据脱敏、操作审计日志。", "keywords": ["脱敏", "审计"]}
+{"id": "DF14", "type": "rewrite", "kb_id": "bench", "query": "干了满一年了，能休几天带薪假", "expected_sources": ["员工手册.md"], "golden": "入职满 1 年：年假 5 天。", "keywords": ["5 天"], "note": "同意图改述：开发集 Q01/Q13 年假天数"}
+{"id": "DF15", "type": "rewrite", "kb_id": "bench", "query": "年假攒着不花，最多能攒几个", "expected_sources": ["员工手册.md"], "golden": "最高累计 20 天。", "keywords": ["20 天"], "note": "同意图改述：开发集 Q15 年假上限"}
+{"id": "DF16", "type": "rewrite", "kb_id": "bench", "query": "感冒请病假，回头要交啥材料", "expected_sources": ["员工手册.md"], "golden": "返岗后 3 个工作日内补交医院诊断证明或医嘱。", "keywords": ["诊断证明", "3 个工作日"], "note": "同 DF03 角度（开发集 Q06），口语化改述"}
+{"id": "DF17", "type": "rewrite", "kb_id": "bench", "query": "打印机坏了，上哪儿报修", "expected_sources": ["IT支持手册.md"], "golden": "邮件 it-support@company.com 提交工单。", "keywords": ["it-support@company.com"], "note": "同意图改述：开发集 Q08"}
+{"id": "DF18", "type": "rewrite", "kb_id": "bench", "query": "忘了密码，多久能重置好", "expected_sources": ["IT支持手册.md"], "golden": "在 IAM 系统自助重置，24 小时内生效。", "keywords": ["24 小时"]}
+{"id": "DF19", "type": "rewrite", "kb_id": "bench", "query": "出差回来总结要几天内交", "expected_sources": ["差旅政策.md"], "golden": "出差结束后 3 个工作日内提交出差总结。", "keywords": ["3 个工作日"], "note": "同意图改述：开发集 D020/D081"}
+{"id": "DF20", "type": "rewrite", "kb_id": "bench", "query": "数据中台能接哪些数据库", "expected_sources": ["产品FAQ.txt"], "golden": "支持 19 种数据源：MySQL、PostgreSQL、Kafka 等。", "keywords": ["19 种"], "note": "同意图改述：开发集 Q10 问数据源"}
+{"id": "DF21", "type": "rewrite", "kb_id": "bench", "query": "报销单网上哪儿填", "expected_sources": ["报销制度.md"], "golden": "在 OA 填写报销单并上传发票。", "keywords": ["OA"], "note": "同意图改述：开发集 D069"}
+{"id": "DF22", "type": "口语", "kb_id": "bench", "query": "我入职一年了年假几天", "expected_sources": ["员工手册.md"], "golden": "入职满 1 年：年假 5 天。", "keywords": ["5 天"], "note": "无标点口语"}
+{"id": "DF23", "type": "口语", "kb_id": "bench", "query": "报销的钱啥时候到帐", "expected_sources": ["员工手册.md", "报销制度.md"], "golden": "财务审核通过后 5 个工作日内打款至工资卡。", "keywords": ["5 个工作日"], "note": "打款时限在员工手册与报销制度中相同，锚定双文档；错别字『帐』；同意图改述：开发集 Q04/D038"}
+{"id": "DF24", "type": "口语", "kb_id": "bench", "query": "电脑黑屏了找谁修", "expected_sources": ["IT支持手册.md"], "golden": "邮件 it-support@company.com 提交工单。", "keywords": ["it-support@company.com"]}
+{"id": "DF25", "type": "口语", "kb_id": "bench", "query": "密码输错多了锁了咋整", "expected_sources": ["IT支持手册.md"], "golden": "连续输错 5 次将被锁号，需联系 IT 部门解锁。", "keywords": ["5 次"], "note": "同意图改述：开发集 Q16 密码锁号"}
+{"id": "DF26", "type": "口语", "kb_id": "bench", "query": "出差饭钱一天给补多少", "expected_sources": ["员工手册.md", "差旅政策.md", "报销制度.md"], "golden": "一线城市 150 元/天，其他城市 100 元/天。", "keywords": ["150 元"], "note": "伙食补贴标准在员工手册、差旅政策、报销制度中一致（150/100），锚定三文档；同意图改述：开发集 Q03"}
+{"id": "DF27", "type": "口语", "kb_id": "bench", "query": "打印机咋打东西", "expected_sources": ["IT支持手册.md"], "golden": "浏览器上传文件发起打印，持工牌在打印终端刷卡取件。", "keywords": ["刷卡"]}
+{"id": "DF28", "type": "no_answer", "kb_id": "bench", "query": "公司里有没有健身房可以用", "expected_sources": [], "golden": "", "keywords": [], "note": "同意图改述：开发集 Q17"}
+{"id": "DF29", "type": "no_answer", "kb_id": "bench", "query": "被裁员的话赔偿几个月工资", "expected_sources": [], "golden": "", "keywords": [], "note": "同意图改述：开发集 Q18"}
+{"id": "DF30", "type": "no_answer", "kb_id": "bench", "query": "娃上学公司给补助吗", "expected_sources": [], "golden": "", "keywords": [], "note": "同意图改述：开发集 Q19"}
+{"id": "DF31", "type": "no_answer", "kb_id": "bench", "query": "五险一金的缴纳比例是多少", "expected_sources": [], "golden": "", "keywords": []}
+{"id": "DF32", "type": "no_answer", "kb_id": "bench", "query": "公司每年什么时候调薪", "expected_sources": [], "golden": "", "keywords": []}
+{"id": "DF33", "type": "no_answer", "kb_id": "bench", "query": "上班有通勤班车吗", "expected_sources": [], "golden": "", "keywords": []}
+{"id": "DF34", "type": "no_invent", "kb_id": "bench", "query": "我知道工号，初始密码是不是六个八", "expected_sources": ["IT支持手册.md"], "golden": "", "keywords": [], "note": "诱导编造密码；同意图改述：开发集 Q20"}
+{"id": "DF35", "type": "no_invent", "kb_id": "bench", "query": "LightCube 有免费在线版吗，给个下载链接", "expected_sources": ["产品FAQ.txt"], "golden": "", "keywords": [], "note": "同意图改述：开发集 Q21"}
+{"id": "DF36", "type": "no_invent", "kb_id": "bench", "query": "员工生日公司发多少钱红包", "expected_sources": ["员工手册.md"], "golden": "", "keywords": [], "note": "诱导编造金额"}
+{"id": "DF37", "type": "no_invent", "kb_id": "bench", "query": "年假不休能折现金吗，一天折多少", "expected_sources": ["员工手册.md"], "golden": "", "keywords": [], "note": "诱导编造折现数字"}
+{"id": "DF38", "type": "no_invent", "kb_id": "bench", "query": "LightCube 出问题打哪个售后电话", "expected_sources": ["产品FAQ.txt"], "golden": "", "keywords": [], "note": "诱导编造电话号码"}

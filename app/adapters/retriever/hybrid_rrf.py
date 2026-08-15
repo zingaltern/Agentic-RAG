@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from typing import Any
 
 import jieba
@@ -42,6 +43,7 @@ class HybridRRFRetriever(Retriever):
         self.rr_fused_k = rr_fused_k
         self.collection = collection
         self._bm25_cache: dict[str, tuple[int, BM25Okapi, list[ScoredChunk]]] = {}
+        self._bm25_lock = threading.Lock()   # C2（V5.1）：缓存读写互斥，并发 miss 只构建一次
 
     # -- 工具 ----------------------------------------------------------------
 
@@ -65,16 +67,22 @@ class HybridRRFRetriever(Retriever):
         """
         cond = self._metadata_filters(filters)
         cache_key = json.dumps([collection, sorted(cond.items())], ensure_ascii=False, sort_keys=True)
-        cached = self._bm25_cache.get(cache_key)
         count = self.vector_store.count(collection)
+        # 快路径：无锁读缓存（读多写少，容忍瞬时重复构建由慢路径兜底）
+        cached = self._bm25_cache.get(cache_key)
         if cached is not None and cached[0] == count:
             return cached[1], cached[2]
 
-        chunks = [c for c in self.vector_store.get_all_chunks(collection) if self._matches(c.metadata, cond)]
-        tokenized = [list(jieba.cut(c.text)) for c in chunks]
-        bm25 = BM25Okapi(tokenized) if chunks else None
-        self._bm25_cache[cache_key] = (count, bm25, chunks)
-        return bm25, chunks
+        with self._bm25_lock:            # C2：双重检查后单次构建，其他线程等待复用结果
+            cached = self._bm25_cache.get(cache_key)
+            if cached is not None and cached[0] == count:
+                return cached[1], cached[2]
+            chunks = [c for c in self.vector_store.get_all_chunks(collection)
+                      if self._matches(c.metadata, cond)]
+            tokenized = [list(jieba.cut(c.text)) for c in chunks]
+            bm25 = BM25Okapi(tokenized) if chunks else None
+            self._bm25_cache[cache_key] = (count, bm25, chunks)
+            return bm25, chunks
 
     # -- 契约（3.3） ----------------------------------------------------------
 

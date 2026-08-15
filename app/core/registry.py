@@ -97,7 +97,8 @@ def wire(config: "SystemConfig", components: bool = True, *,
          detector: "HallucinationDetector | None" = None,
          kbs: "KbStore | None" = None,
          users: "UserStore | None" = None,
-         documents: "DocumentsStore | None" = None) -> Dependencies:
+         documents: "DocumentsStore | None" = None,
+         jobs: "JobStore | None" = None) -> Dependencies:
     """按 config 装配默认实现。
 
     - components=False：仅返回 config（契约/UI 冒烟测试用，不加载模型）。
@@ -148,9 +149,8 @@ def wire(config: "SystemConfig", components: bool = True, *,
     from app.services.kb_store import DEFAULT_COLLECTION, KbStore
     from app.services.orchestration import OrchestrationService
     from app.services.user_store import UserStore
-    from app.services.user_store import UserStore
 
-    deps.jobs = JobStore()
+    deps.jobs = jobs if jobs is not None else JobStore()
     deps.documents = documents if documents is not None else DocumentsStore()
     deps.kbs = kbs if kbs is not None else KbStore()
     deps.users = users if users is not None else UserStore()

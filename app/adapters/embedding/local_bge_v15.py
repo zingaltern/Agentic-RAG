@@ -3,18 +3,19 @@
 - 默认模型 BAAI/bge-small-zh-v1.5（稠密 512 维），首次加载联网下载到 HF 缓存。
 - 硬约束：embed_query 自动拼 query_instruction 前缀；embed_documents 不加（BGE 中文特性）。
 - normalize_embeddings=True（余弦相似即点积）。
-- 模型懒加载：首个 embed/ready() 调用时才下载加载；配置维度与模型实际不符 → SystemConfigError。
-- 外部 I/O（模型加载/推理）统一包装为 EmbeddingError（1.3）。
+- 懒加载/device 解析/异常包装复用 LocalModelAdapter 公共基类（13.11.2）。
+- 配置维度与模型实际不符 → SystemConfigError（启动即错，禁止静默降级）。
 """
 from __future__ import annotations
 
 from typing import Any
 
+from app.adapters.base import LocalModelAdapter
 from app.core.errors import EmbeddingError, SystemConfigError
 from app.core.interfaces import VectorEngine
 
 
-class LocalBGEV15Embedding(VectorEngine):
+class LocalBGEV15Embedding(LocalModelAdapter, VectorEngine):
     def __init__(
         self,
         model_name: str = "BAAI/bge-small-zh-v1.5",
@@ -25,57 +26,27 @@ class LocalBGEV15Embedding(VectorEngine):
         model_factory: Any = None,     # 测试注入：() -> 带 encode/get_sentence_embedding_dimension 的桩
         **_: Any,
     ):
-        self.model_name = model_name
+        super().__init__(model_name=model_name, device=device,
+                         batch_size=batch_size, model_factory=model_factory)
         self.query_instruction = query_instruction
-        self.device = device
-        self.batch_size = batch_size
         self.configured_dimension = dimension
-        self._model_factory = model_factory
-        self._model: Any = None
         self._dimension: int | None = dimension or None
 
-    # -- 工具 ----------------------------------------------------------------
+    # -- 基类钩子 --------------------------------------------------------------
 
-    def _resolve_device(self) -> str:
-        if self.device != "auto":
-            return self.device
-        try:
-            import torch
+    def _load_model(self) -> Any:
+        from sentence_transformers import SentenceTransformer
 
-            return "cuda" if torch.cuda.is_available() else "cpu"
-        except ImportError:
-            return "cpu"
+        return SentenceTransformer(self.model_name, device=self._resolve_device())
 
-    def _ensure_model(self) -> None:
-        """懒加载模型（首次联网下载），并校验维度一致性（5.3 对齐硬约束）。"""
-        if self._model is not None:
-            return
-        try:
-            if self._model_factory is not None:
-                self._model = self._model_factory()
-            else:
-                from sentence_transformers import SentenceTransformer
-
-                self._model = SentenceTransformer(self.model_name, device=self._resolve_device())
-            _get_dim = getattr(self._model, "get_embedding_dimension", None) \
-                or self._model.get_sentence_embedding_dimension
-            actual = int(_get_dim())
-        except SystemConfigError:
-            raise
-        except Exception as exc:
-            self._model = None
-            raise EmbeddingError(f"嵌入模型加载失败（{self.model_name}）: {exc}") from exc
+    def _post_load(self) -> None:
+        _get_dim = getattr(self._model, "get_embedding_dimension", None) \
+            or self._model.get_sentence_embedding_dimension
+        actual = int(_get_dim())
         if self.configured_dimension and self.configured_dimension != actual:
-            self._model = None
             raise SystemConfigError(
-                f"embedding.dimension={self.configured_dimension} 与模型实际维度 {actual} 不符"
-            )
+                f"embedding.dimension={self.configured_dimension} 与模型实际维度 {actual} 不符")
         self._dimension = actual
-
-    def ready(self) -> bool:
-        """探活：确认模型已加载（供 /api/health 使用）。"""
-        self._ensure_model()
-        return self._model is not None
 
     # -- 契约（3.1） ----------------------------------------------------------
 

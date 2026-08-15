@@ -29,11 +29,16 @@ def _hermetic_env(monkeypatch):
 
 @pytest.fixture(scope="session")
 def client(tmp_path_factory) -> TestClient:
-    """契约/UI 冒烟用应用（components=False：不加载嵌入模型，健康检查为 not_loaded）。"""
+    """契约/UI 冒烟用应用（components=False：不加载嵌入模型，健康检查为 not_loaded）。
+
+    与仓库 settings.yaml 解耦：强制个人模式（auth_enabled=False）——
+    settings.yaml 里的 auth_enabled 由部署方控制（如团队模式），不得影响单测结果。
+    """
     from app.application import create_app
     from app.core.config import load_config
 
     config = load_config()
+    config.api.auth_enabled = False
     persist = tmp_path_factory.mktemp("persist")
     config.documents.persist_file = str(persist / "documents.json")
     config.kbs.persist_file = str(persist / "kb.json")
@@ -54,6 +59,7 @@ def stub_embedding():
 def isolated_stores(tmp_path):
     """V5.1：持久化存储隔离夹具（避免真实 data/*.json 污染测试）。"""
     from app.services.documents_store import DocumentsStore
+    from app.services.jobs_store import JobStore
     from app.services.kb_store import KbStore
     from app.services.user_store import UserStore
 
@@ -61,4 +67,5 @@ def isolated_stores(tmp_path):
         "kbs": KbStore(persist_file=str(tmp_path / "kb.json")),
         "users": UserStore(persist_file=str(tmp_path / "users.json")),
         "documents": DocumentsStore(persist_file=str(tmp_path / "documents.json")),
+        "jobs": JobStore(persist_file=str(tmp_path / "jobs.json")),
     }

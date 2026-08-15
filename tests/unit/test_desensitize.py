@@ -59,7 +59,8 @@ def test_ingestion_desensitizes_chunks(tmp_path, isolated_stores):
     config.kbs.persist_file = str(tmp_path / "kb.json")
     config.ingestion.desensitize_enabled = True
     deps = wire(config, embedding=StubEmbedding(dimension=512),
-                kbs=stores["kbs"], users=stores["users"], documents=stores["documents"])
+                kbs=stores["kbs"], users=stores["users"], documents=stores["documents"],
+                jobs=stores["jobs"])
     raw = "客服电话 13812345678，请在工作日联系。".encode("utf-8")
     job = deps.pipeline.ingest(raw, "contact.txt")
     assert job.status == "success"
@@ -79,9 +80,19 @@ def test_ingestion_keeps_plain_when_disabled(tmp_path, isolated_stores):
     config.documents.persist_file = str(tmp_path / "documents.json")
     config.kbs.persist_file = str(tmp_path / "kb.json")
     deps = wire(config, embedding=StubEmbedding(dimension=512),
-                kbs=stores["kbs"], users=stores["users"], documents=stores["documents"])
+                kbs=stores["kbs"], users=stores["users"], documents=stores["documents"],
+                jobs=stores["jobs"])
     raw = "客服电话 13812345678，请在工作日联系。".encode("utf-8")
     job = deps.pipeline.ingest(raw, "contact.txt")
     assert job.status == "success"
     chunks = deps.vector_store.get_all_chunks("kb")
     assert chunks and any("13812345678" in c.text for c in chunks)
+
+
+def test_s6_combined_sensitive_sample_all_masked():
+    """S6：身份证/手机号/银行卡混合样本全部脱敏。"""
+    sample = "员工 110101199003076715 电话 13812345678 卡号 6222021234567890123 登记完成"
+    out = desensitize_text(sample)
+    for secret in ("110101199003076715", "13812345678", "6222021234567890123"):
+        assert secret not in out
+    assert out.count(MASK) >= 3

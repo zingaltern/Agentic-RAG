@@ -41,8 +41,47 @@ def _build_document(filename: str, raw: bytes, text: str, metadata: dict) -> Doc
     )
 
 
-def parse_file(file_stream: BinaryIO, filename: str) -> Document:
-    """按扩展名分发解析；统一异常包装为 ParseError（5.1）。"""
+def _check_magic(ext: str, raw: bytes, filename: str, config: object | None = None) -> None:
+    """S2（V5.1）：上传前按魔数校验真实格式与扩展名一致（pdf %PDF；zip 系 PK\x03\x04；txt/md 文本嗅探）。
+
+    不一致抛 ParseError（伪造扩展名/损坏文件统一语义）。
+    """
+    if ext == ".pdf":
+        if not raw.startswith(b"%PDF"):
+            raise ParseError(f"文件格式与扩展名不符（非 PDF）: {filename!r}")
+    elif ext in (".docx", ".xlsx", ".pptx"):
+        if not raw.startswith(b"PK\x03\x04"):
+            raise ParseError(f"文件格式与扩展名不符（非 Office zip）: {filename!r}")
+        _check_zip_bomb(raw, filename, config)
+    else:  # .md / .txt
+        sample = raw[:512]
+        if sample and b"\x00" in sample:
+            raise ParseError(f"文件格式与扩展名不符（疑似二进制冒充文本）: {filename!r}")
+
+
+def _check_zip_bomb(raw: bytes, filename: str, config: object | None = None) -> None:
+    """S2（V5.1）：zip 解压炸弹防御 —— 解压后总大小/条目数上限（默认 200MB/1000 条）。"""
+    import io as _io
+    import zipfile as _zipfile
+
+    total_mb = int(getattr(config, "zip_max_total_mb", 200)) if config is not None else 200
+    max_entries = int(getattr(config, "zip_max_entries", 1000)) if config is not None else 1000
+    try:
+        with _zipfile.ZipFile(_io.BytesIO(raw)) as zf:
+            infos = zf.infolist()
+            if len(infos) > max_entries:
+                raise ParseError(f"zip 条目数超过上限（{max_entries}）: {filename!r}")
+            total = sum(info.file_size for info in infos)
+            if total > total_mb * 1024 * 1024:
+                raise ParseError(f"zip 解压总大小超过上限（{total_mb}MB）: {filename!r}")
+    except ParseError:
+        raise
+    except Exception as exc:
+        raise ParseError(f"zip 校验失败: {filename!r}（{exc}）") from exc
+
+
+def parse_file(file_stream: BinaryIO, filename: str, config: object | None = None) -> Document:
+    """按扩展名分发解析；统一异常包装为 ParseError（5.1）；S2 魔数/zip 炸弹预检。"""
     ext = Path(filename).suffix.lower()
     if ext not in SUPPORTED_EXTENSIONS:
         raise ParseError(f"不支持的文档格式: {filename!r}（支持：{sorted(e for e in SUPPORTED_EXTENSIONS)}）")
@@ -52,6 +91,7 @@ def parse_file(file_stream: BinaryIO, filename: str) -> Document:
         raise ParseError(f"读取文件失败: {filename}") from exc
     if not isinstance(raw, bytes):
         raw = bytes(raw)
+    _check_magic(ext, raw, filename, config)
     try:
         if ext == ".pdf":
             text, meta = _parse_pdf(raw)

@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 
 from app.api.auth import get_authorizer
 from app.api.utils import get_deps, ok
-from app.core.errors import AuthError, NotFoundError, ValidationError
+from app.core.errors import AuthError, NotFoundError, RateLimitError, ValidationError
 from app.core.registry import Dependencies
 from app.services.ingestion import compute_content_hash
 
@@ -19,7 +19,12 @@ async def upload(file: UploadFile = File(...),
                  kb_id: str = Form(default="default"),          # 13.5：目标知识库（缺省 default）
                  request: Request = None,
                  deps: Dependencies = Depends(get_deps)) -> dict:
-    """上传 → 校验 → content_hash 幂等（按库）→ 创建 Job → 异步入库（5.10）。"""
+    """上传 → 校验 → content_hash 幂等（按库）→ 创建 Job → 异步入库（5.10）。C4（V5.1）：上传速率限制（43002）。"""
+    if request is not None:
+        limiter = request.app.state.rate_limiters["upload"]
+        client = request.client.host if request.client else "unknown"
+        if not limiter.allow(client):
+            raise RateLimitError()
     if deps.pipeline is None:
         from app.core.errors import InternalError
 

@@ -27,7 +27,9 @@
 | 文档解析 | pymupdf / python-docx / openpyxl / python-pptx | 各自 >= 稳定版 | PDF/Word/Excel/PPT 文本抽取 |
 | LLM 客户端 | openai（OpenAI 兼容协议） | >= 1.30 | 调用 DeepSeek API |
 | 测试 | pytest + pytest-asyncio + respx | —— | 单元/契约 Mock |
-| 前端测试页 | 原生 HTML+JS | 无依赖 | 由 FastAPI 静态托管于 `/ui` |
+| 前端 SPA | Vue3 + Vite + Vue Router + Pinia + Element Plus | 见 `frontend/package.json` | 主界面（13.7），Web 与桌面共用 |
+| 桌面壳 | Electron | ^43（package.json 锁定） | 内置拉起后端的桌面形态（13.7 / W8） |
+| 前端测试页 | 原生 HTML+JS | 无依赖 | 由 FastAPI 静态托管于 `/ui`（冒烟/降级入口） |
 | 容器 | docker / docker-compose | 可选 | 集成测试/部署（MVP 可不装） |
 
 依赖清单统一写入 `pyproject.toml`，禁止任何代码直接 `import` 清单外的第三方库。
@@ -36,6 +38,7 @@
 
 ```
 rag_kb/
+├── application.py             # 装配层：中间件（CORS/安全头/限速/审计）+ 依赖注入
 ├── app/
 │   ├── main.py               # FastAPI 入口：装配 DI → 启动
 │   ├── api/
@@ -44,6 +47,7 @@ rag_kb/
 │   │   ├── plugins.py        # status / switch（热切换，已实现）
 │   │   ├── jobs.py           # /api/jobs/{id}
 │   │   ├── kbs.py            # /api/kbs CRUD（13.5 多知识库）
+│   │   ├── users.py          # 用户管理（仅 admin，V5.1 / 6.8）
 │   │   ├── health.py         # /api/health
 │   │   ├── auth.py           # S1：密码登录 + Bearer Token 认证 + 白名单
 │   │   └── utils.py          # ok/fail 响应包 + get_deps
@@ -52,7 +56,8 @@ rag_kb/
 │   │   ├── domain.py         # 全部数据模型（第 2 章）
 │   │   ├── interfaces.py     # 全部抽象接口（第 3 章）
 │   │   ├── registry.py       # PluginRegistry + wire() 装配
-│   │   ├── errors.py         # 异常层级与错误码（6.7）
+│   │   ├── errors.py         # 异常层级与错误码（2.2）
+│   │   ├── rate_limit.py     # 滑动窗口限速器（V5.1，纯标准库）
 │   │   └── logging.py        # JSON 结构化日志 + trace_id
 │   ├── services/
 │   │   ├── ingestion.py      # IngestionPipeline（上传/入库，含脱敏 S5）
@@ -60,7 +65,8 @@ rag_kb/
 │   │   ├── kb_store.py       # KbStore：kb_id→collection 映射（持久化）
 │   │   ├── documents_store.py# 文档索引（持久化 + Chroma 兜底重建）
 │   │   ├── jobs_store.py     # Job 存储（内存实现 + 锁）
-│   │   ├── rbac.py           # RBAC 预留接口（13.11.3）
+│   │   ├── user_store.py     # 用户存储（scrypt 哈希 + token_version，V5.1）
+│   │   ├── rbac.py           # RBAC 权限映射（V5.1 已接线：Authorizer + kb owner/scope）
 │   │   └── desensitize.py    # S5：敏感数据脱敏（正则）
 │   └── adapters/
 │       ├── base.py           # LocalModelAdapter 公共基类（13.11.2）
@@ -193,7 +199,11 @@ class DetectionResult:
 | 30003 | 解析失败（损坏文件/格式不支持） |
 | 21001 | 兜底：反思达到上限仍未找到可靠答案 |
 | 21002 | 全局请求超时 |
+| 43001 | 系统繁忙（并发查询信号量耗尽/超时，V5.1） |
+| 43002 | 请求过于频繁（登录之外接口限速，V5.1） |
+| 43003 | 入库队列已满（背压，V5.1） |
 | 50001 | 未知内部错误 |
+| 50003 | 服务重启，残留任务中断（V5.1） |
 
 > 幂等说明：重复上传同一 `content_hash` 文档时返回 `code=0` 且 `data.duplicate=true`、`data.document_id` 为既有 ID，不重复入库。
 
@@ -380,7 +390,9 @@ env: dev
 api:
   host: 127.0.0.1            # S2：默认仅本机；0.0.0.0 需显式配置暴露
   port: 8000
-  auth_enabled: false        # S1：true 时启用密码登录 + Token 认证（admin 经 RAG_ADMIN_USER/PASSWORD 引导）
+  auth_enabled: true         # S1：契约默认 false（个人模式）；此处为 settings.yaml 现值（当前部署已开启团队模式）
+  query_rate_per_min: 20     # V5.1：/api/query 每 IP 每分钟上限（超限 43002）
+  upload_rate_per_min: 10    # V5.1：/api/documents/upload 每 IP 每分钟上限（超限 43002）
   cors_origins: ["http://localhost:5173"]   # dev 模式 vite proxy 之外的白名单
 
 frontend:                    # 13.7：SPA 托管
@@ -447,12 +459,17 @@ orchestration:
   max_reflection_iterations: 3
   search_timeout_seconds: 10
   request_timeout_seconds: 30
+  max_concurrent_queries: 4              # V5.1：并发查询上限，耗尽/等待超时返回 43001
+  semaphore_acquire_timeout_seconds: 5.0 # V5.1：获取并发信号量的等待超时（秒）
 
 ingestion:
   max_file_size_mb: 50
   allowed_extensions: [pdf, docx, xlsx, pptx, md, txt]
   embed_batch_size: 64
-  desensitize_enabled: false     # S5：身份证/手机号/银行卡脱敏开关
+  max_queue_size: 64             # V5.1：入库队列上限，满时返回 43003
+  zip_max_total_mb: 200          # V5.1：zip 系格式解压总大小上限（防炸弹 S2）
+  zip_max_entries: 1000          # V5.1：zip 条目数上限（防炸弹 S2）
+  # desensitize_enabled: false   # S5：脱敏开关（config.py 默认 false，settings.yaml 未显式配置）
 
 documents:                       # V5.0：文档索引持久化（D1）
   persist_file: ./data/documents.json
@@ -611,7 +628,13 @@ POST /api/documents/upload (multipart file)
   └─ 立即返回 {job_id}
 ```
 
-- MVP JobStore：进程内字典，重启后 Job 状态丢失（可接受，生产再上 Redis/MQ）。
+- MVP JobStore：进程内字典 + 轻量持久化（`data/jobs.json`，仅落盘未终态任务）。
+  **重启语义（V5.1 修订）**：启动时把残留的 `pending/running` Job 统一标记为
+  `failed`（error_code=`50003`「服务重启，任务中断」），前端轮询收到明确终止而非 404/超时误报；
+  终态（success/failed）任务不入盘。生产可换 Redis/MQ（注释与接口不变）。
+- **并发背压（V5.1 修订）**：Worker 队列有界（`ingestion.max_queue_size`，默认 64）；
+  队列满时 `submit` 拒绝，Job 标记 `failed`（error_code=`43003`「入库队列已满，请稍后重试」），
+  路由层据此返回契约包（HTTP 200 + body code，不静默排队）。
 - 说明：**解析/向量化全程不占用 HTTP worker 阻塞线程**；/query 时才同步走各模块。
 - **S5 脱敏（V5.0）**：`ingestion.desensitize_enabled=true` 时，parse 之后、分块之前对全文执行
   `app/services/desensitize.desensitize_text`（身份证/手机号/银行卡 → `***`），默认关闭。
@@ -722,6 +745,17 @@ class PluginRegistry:
    "version": "1.0.0" } }
 ```
 
+### 6.8 认证与用户管理（V5.1）
+
+- 登录：`POST /api/auth/login`（`{username, password}` → `{token, user}`）；Token 为 HMAC 签名、有效期 `auth.token_ttl_days`（默认 7 天）、payload 含 `token_version`（`ver`）；
+  `GET /api/auth/me`；`POST /api/auth/change-password`。
+- **防爆破**：连续登录失败 5 次锁定来源 IP 5 分钟（进程内 `_LoginGuard`，成功登录重置；逻辑见 13.11.1 S1）。
+- **Token 吊销（S1）**：改密/删号/降权时 `token_version += 1`，旧 token 再访问一律 40101。
+- 用户管理（仅 admin）：`GET/POST /api/users`、`POST /api/users/import`（CSV 批量导入：表头 `用户名,姓名,初始密码,角色`，全量校验通过才写入，失败返回逐行明细 `data.errors`）、
+  `POST /api/users/{id}/reset-password`、`POST /api/users/{id}/role`、`DELETE /api/users/{id}`（禁删自己）。
+- 认证豁免白名单：`/api/health`、`/api/plugins/status`、`/ui`+`/assets`、`/api/auth`（`AUTH_WHITELIST_PATHS/PREFIXES`）。
+- 密码策略：新密码/重置密码 ≥8 位且同时含字母与数字；已有用户不强求改密（产品策略）。
+
 ---
 
 ## 第 7 章 内置 Web 测试页 `/ui`
@@ -770,7 +804,7 @@ class PluginRegistry:
 ## 第 9 章 开发计划与验收
 
 **MVP（W1~W4）与 Phase2（W5~W8）均已交付并验收通过**（详见第 13 章交付状态）。
-V1.0 发布标准已达成：pytest 全绿（`-m "not integration"`，257 项）、`/ui` 与 SPA 闭环
+V1.0 发布标准已达成：pytest 全绿（`-m "not integration"`，293 项，2026-08-15 实测）、`/ui` 与 SPA 闭环
 （上传→问→看引用→删）、`rageval` 可运行且报告非空（`reports/` 存档 20+ 份）。
 
 ---
@@ -798,7 +832,7 @@ V1.0 发布标准已达成：pytest 全绿（`-m "not integration"`，257 项）
 |---|---|
 | 本地嵌入 CPU 慢（Air 上 mvp） | 默认 `bge-small` 已轻量；仍慢则改 `batch_size` 或设备 mps；超时容忍（入库不阻塞 HTTP） |
 | 查询指令忘拼（bge_zh 特性） | 5.3 已放入接口契约；单测覆盖 `embed_query` 是否含 `query_instruction` |
-| DeepSeek 不可用/限流 | 超时+重试 3 次→回 sign 30001；One-pass 后可选 Ollama 兜底 |
+| DeepSeek 不可用/限流 | 超时+重试 3 次→返回 30001；One-pass 后可选 Ollama 兜底 |
 | 幻觉检测误杀 | `similarity_threshold` 下调（0.8→0.75）→ 复测 Effect；用 `rage_eval` Faithfulness 校准 |
 | 反思死锁 | `max_reflection_iterations` 配置 + `request_timeout_seconds` 强制超时 |
 | 重复上传/幂等 | 以 `content_hash` 去幂等（已设计） |
@@ -832,7 +866,7 @@ V1.0 发布标准已达成：pytest 全绿（`-m "not integration"`，257 项）
 
 | 需求 | 现架构缺什么 | 何时再动 |
 |---|---|---|
-| 多租户/细粒度权限（不同用户只能看部分库） | 需引入"用户→collection/过滤条件"的鉴权映射，并防 metadata 伪造 | **已落地（轻量两级，V5.1）**：`Authorizer` + kb owner/scope（shared/private），用户→库判定见 `app/services/rbac.py`；细粒度到文档级/角色矩阵扩展仍属深度 C |
+| 多租户/细粒度权限（不同用户只能看部分库） | 需引入"用户→collection/过滤条件"的鉴权映射，并防 metadata 伪造 | **已落地（轻量两级，V5.1）**：`Authorizer` + kb owner/scope（shared/private），用户→库判定见 `app/services/rbac.py`；权限矩阵：`can_upload/can_query` 仅限 shared 或 owner 自己的 private 库；`can_delete_kb` —— admin 可删任意库，private 库 owner 可删自己的库，shared 库仅 admin 可删；细粒度到文档级/角色矩阵扩展仍属深度 C |
 | 秒级实时同步（文档经常更新） | 需增量索引 + 消息队列、文档变更监听 | 内容更新频率成瓶颈时 |
 | 跨业务系统对接（OA/工单/数据库） | 需"接入器 + 数据变更事件"而非通用 RAG | 单独立项 |
 | 亿级向量高并发 | Milvus + 多副本 + 横向扩展 | 单机瓶颈量化后再做（另见 10.1） |
@@ -917,7 +951,7 @@ V1.0 发布标准已达成：pytest 全绿（`-m "not integration"`，257 项）
 - `tests/eval/` 已扩容至 **107 条**（`qa_pairs/{default,docs}/*.jsonl`），类型覆盖 direct/rewrite/no_answer/no_invent/口语/表格/多文档。
 - **no_answer 判据修订（已落地）**：`pass =（返回 code0 且 answer 含"未找到相关依据"类文案）∨（返回 21001）`（`rageval.py` 单一常量 + 单测）。
 - 指标：`Faithfulness` 分类型、`Hit@1`、按库汇总、基线 diff 列。
-- CLI：`--kb`（按库）、`--all-kbs`、`--baseline <path>`（对比模式）、`--in-process`（Stub LLM 进程内）/ `--base-url`（HTTP 真实后端）。
+- CLI：`--kb`（按库）、`--all-kbs`、`--baseline <path>`（对比模式）、`--in-process`（Stub LLM 进程内）/ `--base-url`（HTTP 真实后端）；认证启用时 HTTP 模式加 `--login <用户> <密码>` 或 `--token <token>`。
 - **评测口径统一（13.11.2）**：进程内模式走 `orchestration.run` 同一链路，禁止两套实现。
 - 报告存档：`reports/eval-{ts}.md`（20+ 份，含本轮真实 DeepSeek 报告）。
 
@@ -928,30 +962,25 @@ V1.0 发布标准已达成：pytest 全绿（`-m "not integration"`，257 项）
   1. 问答控制台：库选择、提问、引用 `[N]`、来源、幻觉徽标、已证率、debug 反思面板（默认收起）；
   2. 文档管理：按库上传（`kb_id`，带上传/入库进度）+ 按库列表 + 删除；
   3. 知识库管理：`/api/kbs` CRUD（删除带确认弹窗）；
-  4. 设置总览：`/api/health`、`/api/plugins/status`、API Key、外部后端、组件加载状态（折叠）；
+  4. 设置总览：服务状态红绿灯（`/api/health` 10 秒自动轮询）、组件详情（折叠，中文+英文专名对照）、用户管理（仅管理员）、登录/退出、外部后端（IPC）；
   5. 错误码提示条（`api()` 统一语义：网络/解析失败返回 `{code:50001}` 契约包，不 throw）。
 - 状态管理：问答会话在 Pinia store（切页不丢）；携带 `history`（最近 6 轮，不含当前问题）供后端指代解析。
 - **Web 模式**：dev 用 vite proxy（`/api → http://127.0.0.1:8000`，CORS 放行 `http://localhost:5173`）；生产 `vite build` 产出 `frontend/dist`，由 FastAPI 挂载 `/`（SPA catch-all，未知 `/api/*` 返回 404 JSON）。
 - **桌面模式（Electron，已交付）**：
   - `frontend/electron/main.cjs`：① 探测端口（默认 8000，占用自动换）→ ② 以项目 `.venv` 拉起 uvicorn（仅 127.0.0.1）→ ③ 轮询 `/api/health` 就绪（带 splash 窗口）→ ④ 退出级联停止后端；
+  - **运行中后端意外退出 → 自动重启**（带 splash 重新等待就绪，最多 2 次；恢复失败弹错误框并以 `app.exit()` 强退——避免 macOS 模态弹窗下退不掉）；关窗常驻期间后端退出则静默，Dock 激活时自动拉起；
   - 外部后端模式（userData 持久化，不本机拉起）；设置页经 IPC 回显真实值；
   - macOS 惯例：关窗保留 Dock 与后端，`activate` 重建窗口，Cmd+Q 才退出；
   - S8：`contextIsolation=true`、`nodeIntegration=false`、`sandbox=true`，仅 loopback/自托管地址；
-  - 测试：`npm run test:desktop`（`node --test electron/*.test.cjs`，7 用例）；`npm run desktop` 启动。
+  - 测试：`npm run test:desktop`（`node --test electron/*.test.cjs`，11 用例）；`npm run desktop` 启动。
 - 旧 `web/` 测试页保留为冒烟/降级入口（README 注明）。
 
 ### 13.8 配置与迁移（settings.yaml 已落地）
 
-- **当前完整 schema 以第 4.2 节为准**（已含 reranker/evaluator/rewriter/detector 新 provider、`cors_origins`、`documents/kbs` 持久化路径、`ingestion.desensitize_enabled`）。
-- 各模块可配置切换 provider；`identity/rule/citation` 为可回退默认。
-- 依赖：reranker 用 `sentence-transformers.CrossEncoder`（现有依赖，零新增）；如改 `FlagEmbedding` 须先登记 `pyproject` 并说明理由。
-frontend:
-  dev_port: 5173
-  dist_dir: ./frontend/dist
-```
-
-- 注：以上为 W5~W8 落地目标。**在对应组件实现合并前，settings.yaml 不写入新键**（未识别键会被静默忽略，禁止留隐患）；各模块按 13.2~13.5 章节切换 provider，`identity/rule/citation` 为可回退默认。
-- 依赖：reranker 用 `sentence-transformers.CrossEncoder`（现有依赖，零新增）；如改 `FlagEmbedding` 须先登记 `pyproject` 并说明理由（§10 附录约束）。
+- **当前完整 schema 以第 4.2 节为准**（含 reranker/evaluator/rewriter/detector 新 provider、`cors_origins`、V5.1 的 rate/queue/zip 上限、`documents/kbs` 持久化路径）。
+- 各模块可配置切换 provider；`identity/rule/citation` 为可回退默认。依赖：reranker 用 `sentence-transformers.CrossEncoder`（现有依赖，零新增）；
+  如改 `FlagEmbedding` 须先登记 `pyproject` 并说明理由（附录 A 约束）。
+- **迁移纪律**：未识别配置键会被静默忽略（留隐患）——settings.yaml 只保留已生效键且带注释；V5.1 起 W5~W8 全部键已落地，不再有"规划注释段"。
 
 ### 13.9 演进路线与 DoD（W5~W8）—— ✅ 全部交付
 
@@ -966,33 +995,15 @@ frontend:
 
 ### 13.10 可选适配器包（P3 预留规格，暂不实现）
 
-> 业务人员真实文档中常含图片、表格、复杂版式；为不挤压 W5~W8 主线，本节的五类扩展**只立规格、不排期**。何时启动以 13.1 度量协议 + 用户决策为准。全部属于第 12 章「深度 B」：仅新增/扩展 `app/adapters/` 下实现，接口契约与核心编排不动。
+> 本节的五类扩展**只立规格、不排期**；启动时机以 13.1 度量协议 + 用户决策为准。全部属第 12 章「深度 B」：仅新增/扩展 `app/adapters/` 实现，接口契约与核心编排不动。
 
-1. **OCR 通道（扫描件/图片型 PDF）**
-   - 触发：`_parse_pdf` 抽取文本层为空或字密度极低 → 标记 `needs_ocr`，走 OCR 适配器（如 PaddleOCR 本地 / 可选商用），产物仍为归一化纯文本 + `metadata.ocr=true`。
-   - 约束：OCR 结果评估集要单列（识别错字会直接影响检索与引用）；体积/启动慢 → 懒加载 + 配置开关（`parser.ocr.enabled=false` 默认关）；不强制，拒绝时提示"扫描版请先转文本"。
-   - 验收：10 份含图 PDF 抽出且检索可命中 ≥ 阈值。
-
-2. **表格结构保留（表格感知解析与分块）**
-   - Parser 对 xlsx/pdf(表格区)/docx 表输出"结构化文本标记"（如 `|列名|值|`）或 JSON 行、表头单独成块；Chunker 按表块/表行规则切（`kind==tab`）。
-   - 目标：支持"某产品什么价格/某条件对应规则"这类列-值问答；检索字段覆盖 `table_cells` 元数据。
-   - 验收：表格问答 qa_pairs 子集通过率达标。
-
-3. **多分块策略 + 混合分派**
-   - 按文档 `kind` 自动分派：md/txt→父子；xlsx→按 sheet/表块；pdf→按页/标题块（`heading` 识别）；pptx→按页。
-   - 新增 `chunker.provider: mixed`（自动分派）与可选 `rule_based`；现有 `父/子` 保留为 `hierarchical`。
-   - 约束：每加策略**必须先标定**（qa_pairs 验证召回差异）再上配置，禁止拍脑袋堆策略。
-   - 验收：多格式样例库每个 kind 命中率 ≥ 基准，且 `make eval` 对比报告。
-
-4. **embedding 多模型（本地多档切换）**
-   - 支持 `bge-small-zh`(快) / `bge-base-zh`(衡) / `bge-large-zh`(准) / `bge-m3`(多语言·NF 多向量) 配置切换（`embedding.model_name`）。
-   - 必须配套**向量版本管理**：换模型=维度/分布变化 → 提示"需全量重入库"，提供 `make reindex`（重建集合）与版本字段 `meta.embed_model`，避免旧向量混用。
-   - 验收：两档模型切换后检索指标（Hit@1/Faithfulness）对比有记录；重新入库流程可用。
-
-5. **LLM 多协议多模型（provider 工厂）**
-   - 按 §3.8 已有接口补实现：`OllamaLocalLLM`、`OpenAICompatibleLLM`（任意 OpenAI 兼容网关），并在前端设置面板提供模型选择下拉（官方 API / 本地 Ollama / 自定义网关）。
-   - 注意：各 provider 的抽吐格式、超时、降级策略可配置；DeepSeek 失败时可选 One-pass→Ollama 兜底（第 11 章风险表）。
-   - 验收：至少三 provider 各跑通 1 条问答（本地 Ollama 若未装则文档验证）。
+| # | 扩展 | 要点 | 验收 |
+|---|---|---|---|
+| 1 | OCR（扫描件 PDF） | 文本层缺失/字密度极低 → `needs_ocr` 走 OCR 适配器；懒加载 + `parser.ocr.enabled=false` 默认关；评估集单列（识别错字影响检索） | 10 份含图 PDF 抽文且检索命中 ≥ 阈值 |
+| 2 | 表格结构保留 | xlsx/表格区输出结构化标记（`\|列名\|值\|`）、表头成块（`kind==tab`）；支持列-值问答，检索覆盖 `table_cells` 元数据 | 表格问答 qa_pairs 子集通过率达标 |
+| 3 | 多分块策略+混合分派 | `chunker.provider: mixed` 按 kind 自动分派；父/子保留为 `hierarchical`；**每加策略必须先用 qa_pairs 标定再上配置** | 各 kind 命中率 ≥ 基准 + `make eval` 对比报告 |
+| 4 | embedding 多模型 | 配置切换 `bge-small/base/large-zh`/`bge-m3`；换模型=维度变化 → `make reindex` 全量重入库 + `meta.embed_model` 版本管理 | 两档切换指标（Hit@1/Faithfulness）对比有记录 |
+| 5 | LLM 多协议 | 补 `OllamaLocalLLM`/`OpenAICompatibleLLM`（§3.8 接口）+ 前端模型选择下拉；DeepSeek 失败可 One-pass→Ollama 兜底 | 三 provider 各跑通 1 条问答 |
 
 ### 13.11 非功能需求与工程化底线（安全 / 复用 / 拓展）
 
@@ -1002,12 +1013,13 @@ frontend:
 
 | # | 项 | 状态（V5.0） | 落点 |
 |---|---|---|---|
-| S1 | **API 认证** | ✅ 密码登录 + Token（V5.1；默认 `auth_enabled=false` 个人模式，启用后 `RAG_ADMIN_USER/RAG_ADMIN_PASSWORD` 引导首管理员） | `app/api/auth.py`（HMAC Token、login/me/change-password、白名单）；`app/api/users.py`（用户管理）；`Authorizer` 知识库级权限（`rbac.py`） |
+| S1 | **API 认证** | ✅ 密码登录 + HMAC Token（V5.1；契约默认 `auth_enabled=false`，当前部署已开启）；启用后 `RAG_ADMIN_USER/RAG_ADMIN_PASSWORD` 引导首管理员；**防爆破**：连续失败 5 次锁定来源 IP 5 分钟（`_LoginGuard`，成功重置）；改密/删号/降权吊销旧 token（`token_version`） | `app/api/auth.py` |
+| S1a | **密码策略（V5.1）** | 新密码/重置密码：≥8 位且同时含字母与数字（纯标准库校验，不引依赖）；已有用户不强求改密（产品策略），弱口令告警见 README「已知限制」 | `app/services/user_store.py`（validate_password_strength） |
 | S2 | **监听地址** | ✅ 默认 `127.0.0.1` | `api.host` |
 | S3 | **XSS 治理** | ✅ 前端统一模板插值，禁 innerHTML/v-html | SPA `api()` + 组件渲染 |
 | S4 | **Prompt 注入防护** | ✅ 系统提示声明"文档区不可执行指令" | `orchestration.SYSTEM_PROMPT` |
-| S5 | **敏感数据** | ✅ 脱敏钩子已实现（默认关：`ingestion.desensitize_enabled`） | `app/services/desensitize.py` |
-| S6 | **审计** | ✅ query/upload 结构化审计（user_id/kb_id/摘要/trace_id，不含 key 与完整敏感文本） | `app/api/query.py`、`documents.py` |
+| S5 | **敏感数据** | ✅ 脱敏开关 `ingestion.desensitize_enabled`（默认 false，V5.0 落地）；**启用条件与合规建议（V5.1）**：HR/财务等含身份证/手机号/银行卡的文档建议开启——正则替换为 `***` 后入库（全文+向量均脱敏）；开启后影响检索命中（号码类查询将失效），需业务侧评估；改策略前必须跑 `make eval` 对比 | `app/services/desensitize.py` |
+| S6 | **审计** | ✅ query/upload 结构化审计（user_id/kb_id/摘要/trace_id，不含 key 与完整敏感文本，V5.1）；**日志含用户查询与回答摘要，属个人数据**：日志文件 0o600（桌面 `backend.log` 已收紧），访问控制与留存由部署方制度化管理 | `app/api/query.py`、`documents.py`、`core/logging.py` |
 | S7 | **依赖与模型** | ✅ pyproject 版本锁定；扫描/哈希校验为可选（未接） | pyproject.toml |
 | S8 | **Electron 安全** | ✅ contextIsolation/nodeIntegration:false/sandbox、仅 loopback、密钥运行时注入 | `frontend/electron/main.cjs` |
 
@@ -1041,13 +1053,13 @@ frontend:
 
 ---
 
-## 第 14 章 当前状态与遗留（V5.0，2026-08-11）
+## 第 14 章 当前状态与遗留（V5.1，2026-08-15）
 
 > 给后续开发/运维 Agent 的**现状快照**：当前可运行形态、常用命令、已知遗留与触发条件。
 
 ### 14.1 当前运行形态
 
-- **后端**：`uvicorn app.main:app --host 127.0.0.1 --port 8000`（S2）；`auth_enabled=false`（个人模式，V5.1 默认）；团队模式：`auth_enabled=true` + `RAG_ADMIN_USER/RAG_ADMIN_PASSWORD`（首管理员引导）。
+- **后端**：`uvicorn app.main:app --host 127.0.0.1 --port 8000`（S2）；**当前部署 `auth_enabled=true`（团队模式，本机账号 admin/admin123、user1）**；契约默认 `false`（个人模式）；团队模式首管理员经 `RAG_ADMIN_USER/RAG_ADMIN_PASSWORD`（或 CLI 引导）创建。
 - **模型**：embedding `bge-small-zh-v1.5`（本地）+ reranker `bge-reranker-base`（本地）+ LLM `deepseek-chat`（唯一外部调用，key 经 `RAG_DEEPSEEK_API_KEY`）。
 - **数据**：`data/chroma`（向量，`rag_<kb>` 集合）+ `data/kb.json`（知识库映射）+ `data/documents.json`（文档索引，重启自动从 Chroma 兜底重建）。
 - **前端**：`frontend/dist` 由后端托管（SPA，静态资源 no-store）；桌面端 `npm run desktop`（或打包 App，自动拉起后端）。
@@ -1059,14 +1071,14 @@ frontend:
 |---|---|
 | `make bootstrap` | venv + 依赖 |
 | `make run` | 启动后端（8000） |
-| `make test` | 全量单测（`-m "not integration"`，257 项） |
+| `make test` | 全量单测（`-m "not integration"`，293 项，2026-08-15 实测） |
 | `make eval` | 进程内评测（Stub LLM）并存档报告 |
 | `make desktop` | 启动 Electron 桌面（前端需先 `npm run build`） |
 | `cd frontend && npm run build` | 重建 SPA（静态托管实时生效） |
-| `cd frontend && npm run test:desktop` | Electron 壳测试（7 用例） |
+| `cd frontend && npm run test:desktop` | Electron 壳测试（11 用例） |
 | `python -m app.cli.rageval --base-url http://127.0.0.1:8000 --all-kbs --baseline reports/<最新>` | 真实 DeepSeek 评测 + 基线对比 |
 
-### 14.3 当前实测指标（2026-08-11）
+### 14.3 当前实测指标（2026-08-11 存档，历史基线）
 
 - Stub 进程内全量（107 条）：**107/107 通过**，Hit@1=90%，Hit@5=100%，AnswerRelevancy=100%（Faithfulness 为 Stub 假 0%，无参考意义）。
 - 真实 DeepSeek（`--kb default`，21 条，当前知识库 = 5 份业务文档）：**14/21 通过**，Faithfulness(direct)=**56%**，Hit@1=44%。
@@ -1076,14 +1088,14 @@ frontend:
 
 | 遗留 | 状态 | 触发条件 |
 |---|---|---|
-| 团队模式启用 | 代码就绪（V5.1） | 多用户部署：`auth_enabled=true` + `RAG_ADMIN_USER/RAG_ADMIN_PASSWORD`，管理员在设置页建用户；RBAC 深度 C 扩展（文档级/角色矩阵） |
+| 团队模式启用 | 代码就绪且**当前部署已启用**（V5.1） | RBAC 深度 C 扩展（文档级/角色矩阵）：12.3 续 |
 | RBAC 拦截 | 已接线（V5.1：Authorizer + kb owner/scope） | 文档级权限/多角色矩阵（12.3 深度 C 续） |
 | 13.10 P3 包（OCR/表格/混合分块/多 embedding/多 LLM） | 规格已立 | 用户决策 + 13.1 度量协议验证 |
 | 契约同步自动化（openapi→TS） | 手写中 | 接口变更频繁或前端规模扩大时 |
 | 事件钩子（文档变更→缓存失效） | 仅 KbStore 钩子 | 增量索引/多端同步需求出现时 |
 | CI 基线门禁 | 人工对比 | 接 CI 时纳入 |
 | 会话持久化/流式输出 | 未做（D 组评估结论） | 产品明确要求时单独立项 |
-| 发布打包（DMG/EXE） | 未做 | 正式发布前（含 Python 运行时捆绑决策） |
+| 发布打包 | 前端壳可打包（`electron-builder --mac dmg`）；**Python 运行时捆绑未做** | 正式发布前做捆绑决策 |
 
 ### 14.5 对本文档的维护约定
 

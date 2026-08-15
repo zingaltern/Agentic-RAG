@@ -69,3 +69,30 @@ def test_trace_id_header_present(client):
     assert resp.headers.get("X-Trace-Id") == "trace-abc-123"
     resp2 = client.get("/api/health")
     assert resp2.headers.get("X-Trace-Id"), "未传 X-Trace-Id 时也应生成并回传"
+
+
+# -- S3/S4：CORS 收紧与安全响应头（V5.1） --------------------------------------------------
+
+def test_s3_cors_methods_and_headers_tightened(client):
+    resp = client.options(
+        "/api/query",
+        headers={"Origin": "http://localhost:5173",
+                 "Access-Control-Request-Method": "PATCH",
+                 "Access-Control-Request-Headers": "X-Custom-Header"},
+    )
+    allow_methods = resp.headers.get("access-control-allow-methods", "")
+    allow_headers = resp.headers.get("access-control-allow-headers", "")
+    assert "PATCH" not in allow_methods, "非白名单方法必须被 CORS 拒绝"
+    assert "GET" in allow_methods and "POST" in allow_methods
+    assert "X-Custom-Header" not in allow_headers
+    assert "Content-Type" in allow_headers and "Authorization" in allow_headers
+
+
+def test_s4_security_response_headers_present(client):
+    resp = client.get("/api/health")
+    assert resp.headers.get("x-content-type-options") == "nosniff"
+    assert resp.headers.get("x-frame-options") == "DENY"
+    assert resp.headers.get("referrer-policy") == "no-referrer"
+    csp = resp.headers.get("content-security-policy", "")
+    assert "default-src 'self'" in csp
+    assert "unsafe-eval" not in csp, "CSP 不允许 unsafe-eval"

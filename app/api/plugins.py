@@ -73,7 +73,9 @@ def switch(payload: SwitchRequest, request: Request,
             setattr(getattr(new_config, payload.module), key, value)
 
     try:
-        new_deps = wire(new_config, kbs=deps.kbs)
+        # 热切换仅换 provider：复用现有存储（kbs/users/documents/jobs），避免回落到默认路径
+        new_deps = wire(new_config, kbs=deps.kbs, users=deps.users,
+                        documents=deps.documents, jobs=deps.jobs)
     except Exception as exc:  # noqa: BLE001
         logger.warning("热切换装配失败（已回滚，deps 不变）：%s", exc)
         raise InternalError(f"热切换装配失败（已回滚）: {exc}") from exc

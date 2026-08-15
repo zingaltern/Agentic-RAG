@@ -150,7 +150,8 @@ def test_wire_injects_embedding_and_llm(tmp_path, isolated_stores):
     config.kbs.persist_file = str(tmp_path / "kb.json")
     deps = wire(config, embedding=StubEmbedding(dimension=128), llm=_LLM(),
                 reranker=_Reranker(), kbs=isolated_stores["kbs"],
-                users=isolated_stores["users"], documents=isolated_stores["documents"])
+                users=isolated_stores["users"], documents=isolated_stores["documents"],
+                jobs=isolated_stores["jobs"])
     from app.adapters.evaluator.semantic_v2 import SemanticV2Evaluator
     from app.adapters.detector.semantic_verifier import SemanticVerifierDetector
     from app.adapters.rewriter.llm_rewriter import LLMRewriter
@@ -178,7 +179,7 @@ def test_wire_fallback_providers_switchable(tmp_path, isolated_stores):
     config.detector.provider = "citation"
     deps = wire(config, embedding=StubEmbedding(dimension=128), llm=_LLM(),
                 kbs=isolated_stores["kbs"], users=isolated_stores["users"],
-                documents=isolated_stores["documents"])
+                documents=isolated_stores["documents"], jobs=isolated_stores["jobs"])
     assert deps.reranker is not None and deps.evaluator is not None
     assert deps.rewriter is not None and deps.detector is not None
     assert deps.orchestration is not None

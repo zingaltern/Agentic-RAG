@@ -7,6 +7,7 @@
 const { spawn, spawnSync } = require('child_process')
 const net = require('net')
 const http = require('http')
+const https = require('https')
 const fs = require('fs')
 const path = require('path')
 
@@ -33,21 +34,56 @@ async function findFreePort(start = DEFAULT_PORT, maxTries = MAX_PORT_TRIES) {
   return null
 }
 
+/** /api/health 响应解析：ok / degraded（模型预热中）即视为已就绪。 */
+function resolveHealth(res, resolve) {
+  let body = ''
+  res.on('data', (d) => (body += d))
+  res.on('end', () => {
+    try {
+      const json = JSON.parse(body)
+      const status = json && json.data && json.data.status
+      resolve(Boolean(json && json.code === 0 && (status === 'ok' || status === 'degraded')))
+    } catch {
+      resolve(false)
+    }
+  })
+}
+
 /** 单次 /api/health 探活：ok / degraded（模型预热中）即视为已就绪，加快窗口出现。 */
 function probeHealth(port, host = '127.0.0.1', timeoutMs = PROBE_TIMEOUT_MS) {
   return new Promise((resolve) => {
     const req = http.get({ host, port, path: '/api/health', timeout: timeoutMs }, (res) => {
-      let body = ''
-      res.on('data', (d) => (body += d))
-      res.on('end', () => {
-        try {
-          const json = JSON.parse(body)
-          const status = json && json.data && json.data.status
-          resolve(Boolean(json && json.code === 0 && (status === 'ok' || status === 'degraded')))
-        } catch {
-          resolve(false)
-        }
-      })
+      resolveHealth(res, resolve)
+    })
+    req.on('error', () => resolve(false))
+    req.on('timeout', () => { req.destroy(); resolve(false) })
+  })
+}
+
+/** 解析外部后端地址为 {protocol, host, port}；非法地址返回 null。 */
+function parseExternalUrl(url) {
+  try {
+    const u = new URL(url)
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return null
+    if (!u.hostname) return null
+    return {
+      protocol: u.protocol,
+      host: u.hostname,
+      port: u.port || (u.protocol === 'https:' ? '443' : '80'),
+    }
+  } catch {
+    return null
+  }
+}
+
+/** 按完整 URL 探活（http/https 均支持），供外部后端模式在加载页面前预检。 */
+function probeHealthUrl(url, timeoutMs = PROBE_TIMEOUT_MS) {
+  return new Promise((resolve) => {
+    const parts = parseExternalUrl(url)
+    if (!parts) { resolve(false); return }
+    const mod = parts.protocol === 'https:' ? https : http
+    const req = mod.get({ host: parts.host, port: parts.port, path: '/api/health', timeout: timeoutMs }, (res) => {
+      resolveHealth(res, resolve)
     })
     req.on('error', () => resolve(false))
     req.on('timeout', () => { req.destroy(); resolve(false) })
@@ -64,7 +100,19 @@ async function waitReady(port, timeoutMs = READY_TIMEOUT_MS, intervalMs = 500) {
   return false
 }
 
-/** 以 .venv 拉起 uvicorn（cwd=项目根，仅 127.0.0.1 监听）；日志输出到 logFile（便于诊断）。 */
+/** 外部后端就绪轮询（按完整 URL）。 */
+async function waitReadyUrl(url, timeoutMs = READY_TIMEOUT_MS, intervalMs = 500) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (await probeHealthUrl(url)) return true
+    await new Promise((r) => setTimeout(r, intervalMs))
+  }
+  return false
+}
+
+/** 以 .venv 拉起 uvicorn（cwd=项目根，仅 127.0.0.1 监听）；日志输出到 logFile（便于诊断）。
+
+S7（V5.1）：日志文件以 0o600 权限创建（审计日志含用户查询/回答摘要，仅本机当前用户可读）。 */
 function spawnBackend(pythonBin, cwd, port, logFile = null) {
   const child = spawn(
     pythonBin,
@@ -77,7 +125,9 @@ function spawnBackend(pythonBin, cwd, port, logFile = null) {
   )
   if (logFile) {
     fs.mkdirSync(path.dirname(logFile), { recursive: true })
-    const sink = fs.createWriteStream(logFile, { flags: 'a' })
+    const fd = fs.openSync(logFile, 'a', 0o600)   // S7：权限收紧（rw-------）
+    fs.fchmodSync(fd, 0o600)
+    const sink = fs.createWriteStream(logFile, { flags: 'a', fd })
     child.stdout.pipe(sink)
     child.stderr.pipe(sink)
   }
@@ -161,13 +211,15 @@ module.exports = {
   isPortInUse,
   findFreePort,
   probeHealth,
+  probeHealthUrl,
+  parseExternalUrl,
   waitReady,
+  waitReadyUrl,
   spawnBackend,
   killBackend,
   readExternalBase,
   writeExternalBase,
   readProjectDir,
   writeProjectDir,
-  spawnBackend,
   tailBackendLog,
 }

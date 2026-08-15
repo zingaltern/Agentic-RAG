@@ -48,7 +48,7 @@
 
 ## 3. 收工自检（Agent 完成前必须全绿）
 
-- [x] `make test` 全绿（66 passed），新增用例覆盖本次模块（contracts/config/domain/parser/chunker/ui/logging）
+- [ ] `make test` 全绿（现网口径 293 passed，含覆盖率门禁 ≥80%），新增用例覆盖本次模块
 - [x] `make run` 可启动，`GET /ui` 返回 200（StaticFiles 目录重定向 `/ui`→`/ui/`，浏览器/curl -L 均 200）
 - [x] 已用真实文档跑通对应场景（6 格式 parser 用 pymupdf/docx/openpyxl/pptx 真实生成样本单测）
 - [x] 无密钥泄漏、无 `.env`/`data/` 入库；`git status` 内容符合预期（app/web/configs/tests 新文件 + 两份文档修订）
@@ -71,5 +71,6 @@
 | W2 | VectorEngine+VectorStore+Retriever+上传 Job | demo-ingest 通过；UI 上传走通 |
 | W3 | Orchestration+Detector+`/api/query`+DeepSeek | 问答返回引用与迭代数 |
 | W4 | 全量测试、集成、README、可选 docker | pytest 绿、docker-compose 可用 |
+| W5~W8 | Phase2 全交付（详见 `DEVELOPMENT.md` 13.9）+ V5.1 团队模式 | 均已交付；涉及指标的功能改动须 `make eval` 前后对比（13.1） |
 
 （正文完）

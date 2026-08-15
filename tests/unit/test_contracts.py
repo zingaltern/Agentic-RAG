@@ -89,7 +89,9 @@ def test_pure_function_signatures():
     from app.adapters.chunker import split_chunks
 
     pf = inspect.signature(parse_file)
-    assert list(pf.parameters) == ["file_stream", "filename"]
+    assert list(pf.parameters)[:2] == ["file_stream", "filename"]
+    for p in list(pf.parameters.values())[2:]:
+        assert p.default is not inspect.Parameter.empty  # 其余为可选配置参数（S2 zip 上限等）
     sc = inspect.signature(split_chunks)
     assert list(sc.parameters)[:1] == ["doc"]
     for p in list(sc.parameters.values())[1:]:

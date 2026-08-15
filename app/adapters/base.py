@@ -8,6 +8,7 @@ LocalModelAdapter：本地模型"懒加载 + 探活 + 异常包装"的统一实�
 """
 from __future__ import annotations
 
+import threading
 from typing import Any
 
 from app.core.errors import EmbeddingError, SystemConfigError
@@ -21,6 +22,7 @@ class LocalModelAdapter:
         self.batch_size = batch_size
         self._model_factory = model_factory
         self._model: Any = None
+        self._load_lock = threading.Lock()   # C1（V5.1）：懒加载互斥，并发首请求只加载一次
 
     # -- 设备与加载 ------------------------------------------------------------
 
@@ -45,18 +47,21 @@ class LocalModelAdapter:
     def _ensure_model(self) -> None:
         if self._model is not None:
             return
-        try:
-            if self._model_factory is not None:
-                self._model = self._model_factory()
-            else:
-                self._model = self._load_model()
-            self._post_load()
-        except SystemConfigError:
-            self._model = None
-            raise
-        except Exception as exc:
-            self._model = None
-            raise EmbeddingError(f"模型加载失败（{self.model_name}）: {exc}") from exc
+        with self._load_lock:            # C1：双重检查，加载期间其他线程等待复用结果
+            if self._model is not None:
+                return
+            try:
+                if self._model_factory is not None:
+                    self._model = self._model_factory()
+                else:
+                    self._model = self._load_model()
+                self._post_load()
+            except SystemConfigError:
+                self._model = None
+                raise
+            except Exception as exc:
+                self._model = None        # 失败恢复 None 语义：下次调用可重试
+                raise EmbeddingError(f"模型加载失败（{self.model_name}）: {exc}") from exc
 
     # -- 探活 ------------------------------------------------------------------
 

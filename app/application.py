@@ -22,6 +22,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.api import documents, health, jobs, kbs, plugins, query, users
 from app.api.auth import TokenAuth, require_auth, router as auth_router
+from app.api.auth import _LoginGuard
 from app.api.utils import fail
 from app.core.config import DEFAULT_SETTINGS_PATH, SystemConfig, load_config
 from app.core.errors import AppError, InternalError, ValidationError
@@ -67,6 +68,14 @@ def create_app(settings_path: str = DEFAULT_SETTINGS_PATH,
     app.state.config = config
     app.state.token_auth = TokenAuth(config.auth.secret)
     app.state.authorizer = Authorizer()
+    app.state.login_guard = _LoginGuard()
+    app.state.query_semaphore = threading.BoundedSemaphore(config.orchestration.max_concurrent_queries)  # C3
+    from app.core.rate_limit import SlidingWindowRateLimiter
+
+    app.state.rate_limiters = {          # C4：进程内滑动窗口限速（多 worker 各进程独立计数）
+        "query": SlidingWindowRateLimiter(config.api.query_rate_per_min),
+        "upload": SlidingWindowRateLimiter(config.api.upload_rate_per_min),
+    }
 
     # V5.1 首管理员引导：auth_enabled=true 且用户表为空时，用环境变量创建 admin
     if config.api.auth_enabled and deps.users is not None and deps.users.is_empty():
@@ -84,8 +93,8 @@ def create_app(settings_path: str = DEFAULT_SETTINGS_PATH,
             CORSMiddleware,
             allow_origins=config.api.cors_origins,
             allow_credentials=True,
-            allow_methods=["*"],
-            allow_headers=["*"],
+            allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+            allow_headers=["Content-Type", "Authorization", "X-Trace-Id"],
         )
 
     @app.middleware("http")
@@ -107,6 +116,15 @@ def create_app(settings_path: str = DEFAULT_SETTINGS_PATH,
                 }},
             )
         response.headers["X-Trace-Id"] = trace_id
+        # S4（V5.1）：安全响应头（CSP 允许内联样式——Element Plus 动态样式；构建产物无 eval）
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("Referrer-Policy", "no-referrer")
+        response.headers.setdefault(
+            "Content-Security-Policy",
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data:; font-src 'self' data:; connect-src 'self'",
+        )
         return response
 
     from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -119,15 +137,23 @@ def create_app(settings_path: str = DEFAULT_SETTINGS_PATH,
 
     @app.exception_handler(AppError)
     async def app_error_handler(request: Request, exc: AppError) -> JSONResponse:
-        return JSONResponse(status_code=200, content=fail(exc.code, exc.message))
+        return JSONResponse(status_code=200, content=fail(exc.code, exc.message, exc.data))
 
     @app.exception_handler(RequestValidationError)
     async def validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
-        # 参数校验失败 → 40001（6.7 错误码表）
+        # 参数校验失败 → 40001（6.7 错误码表）；pydantic 英文原文人话化，不暴露内部细节
         first = exc.errors()[0] if exc.errors() else {}
         loc = ".".join(str(p) for p in first.get("loc", []))
+        msg = first.get("msg", "")
+        for en, zh in (("String should have at least 1 character", "不能为空"),
+                       ("String should have at most", "内容过长"),
+                       ("Input should be a valid integer", "需为数字"),
+                       ("Input should be a valid boolean", "需为布尔值")):
+            if en in msg:
+                msg = zh
+                break
         return JSONResponse(status_code=200, content=fail(
-            ValidationError.code, f"参数校验失败: {loc} {first.get('msg', '')}"))
+            ValidationError.code, f"参数校验失败: {loc} {msg}"))
 
     @app.exception_handler(Exception)
     async def unhandled_error_handler(request: Request, exc: Exception) -> JSONResponse:

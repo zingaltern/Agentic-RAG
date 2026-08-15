@@ -51,6 +51,8 @@ class ApiConfig(BaseModel):
     port: int = 8000
     auth_enabled: bool = False       # S1（13.11.1）：true 时启用密码登录 + Token 认证
     cors_origins: list[str] = []     # 13.8：dev 跨域白名单（如 ["http://localhost:5173"]）
+    query_rate_per_min: int = 20     # C4（V5.1）：/api/query 每 IP 每分钟上限，超限返回 43002
+    upload_rate_per_min: int = 10    # C4：/api/documents/upload 每 IP 每分钟上限
 
 
 class AuthConfig(BaseModel):
@@ -141,6 +143,8 @@ class OrchestrationConfig(BaseModel):
     max_reflection_iterations: int = 3
     search_timeout_seconds: int = 10
     request_timeout_seconds: int = 30
+    max_concurrent_queries: int = 4        # C3（V5.1）：并发查询信号量上限，耗尽返回 43001
+    semaphore_acquire_timeout_seconds: float = 5.0   # C3：获取信号量等待上限
 
 
 class IngestionConfig(BaseModel):
@@ -148,6 +152,10 @@ class IngestionConfig(BaseModel):
     allowed_extensions: list[str] = ["pdf", "docx", "xlsx", "pptx", "md", "txt"]
     embed_batch_size: int = 64
     desensitize_enabled: bool = False   # S5：敏感数据（身份证/手机号/银行卡）脱敏开关
+    max_queue_size: int = 64            # C5（V5.1）：Worker 队列上限，满时拒绝并返回 43003
+    # S2（V5.1）：zip 系格式解压防御上限（防止 zip 炸弹炸内存/CPU）
+    zip_max_total_mb: int = 200
+    zip_max_entries: int = 1000
 
 
 class LoggingConfig(BaseModel):

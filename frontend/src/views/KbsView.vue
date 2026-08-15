@@ -10,6 +10,7 @@ const dialog = ref(false)
 const form = ref({ name: '', description: '', scope: 'shared' })
 const saving = ref(false)
 const isAdmin = () => store.currentUser && store.currentUser.role === 'admin'
+const isPersonalMode = () => store.currentUser && store.currentUser.user_id === 'local'
 
 onMounted(loadKbs)
 async function loadKbs() {
@@ -21,9 +22,12 @@ async function createKb() {
   if (!form.value.name.trim()) { store.pushError('请输入知识库名称'); return }
   saving.value = true
   try {
+    // 普通用户无权建共享库（服务端强制 private，这里前端对齐语义，避免发送误导性的 shared）
+    const payload = { ...form.value }
+    if (!(isAdmin() && !isPersonalMode())) payload.scope = 'private'
     const res = await api('/api/kbs', {
       method: 'POST',
-      body: JSON.stringify(form.value),
+      body: JSON.stringify(payload),
     })
     if (res.code === 0) {
       store.pushInfo(`已创建：${res.data.kb_id}`)
@@ -61,10 +65,9 @@ async function removeKb(kbId) {
         </el-button>
       </div>
       <el-table :data="kbs" size="small" border>
-        <el-table-column prop="kb_id" label="标识（kb_id）" min-width="120" />
         <el-table-column prop="name" label="名称" min-width="140" />
         <el-table-column prop="description" label="描述" min-width="180" />
-        <el-table-column label="归属" width="140">
+        <el-table-column v-if="!isPersonalMode()" label="归属" width="140">
           <template #default="{ row }">
             <el-tag v-if="row.scope === 'shared'" type="info" size="small">共享</el-tag>
             <el-tag v-else type="warning" size="small">私有 · {{ row.owner }}</el-tag>
@@ -72,7 +75,7 @@ async function removeKb(kbId) {
         </el-table-column>
         <el-table-column label="操作" width="120">
           <template #default="{ row }">
-            <el-tooltip v-if="row.kb_id === 'default'" content="默认库不可删除" placement="top">
+            <el-tooltip v-if="isAdmin() && row.kb_id === 'default'" content="默认库不可删除" placement="top">
               <span><el-button type="danger" size="small" disabled>删除</el-button></span>
             </el-tooltip>
             <el-popconfirm
@@ -104,13 +107,12 @@ async function removeKb(kbId) {
         <el-form-item label="描述">
           <el-input v-model="form.description" type="textarea" :rows="2" />
         </el-form-item>
-        <el-form-item v-if="isAdmin()" label="归属">
+        <el-form-item v-if="isAdmin() && !isPersonalMode()" label="归属">
           <el-select v-model="form.scope">
-            <el-option label="共享（全员可读，仅管理员可写）" value="shared" />
-            <el-option label="私有（仅本人可见可管理）" value="private" />
+            <el-option label="共享" value="shared" />
+            <el-option label="私有" value="private" />
           </el-select>
         </el-form-item>
-        <div v-else class="muted">普通用户仅可创建私有库（服务端强制）</div>
       </el-form>
       <template #footer>
         <el-button @click="dialog = false">取消</el-button>

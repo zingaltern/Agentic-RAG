@@ -34,7 +34,9 @@ class Authorizer:
         return kb.owner == user.user_id
 
     def can_delete_kb(self, user, kb) -> bool:
-        return self.is_admin(user)
+        if self.is_admin(user):
+            return True
+        return kb.scope == "private" and kb.owner == user.user_id
 
     def list_accessible_kbs(self, user, all_kbs) -> list:
         return [kb for kb in all_kbs if self.can_read_kb(user, kb)]

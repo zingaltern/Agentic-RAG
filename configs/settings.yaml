@@ -5,7 +5,9 @@ env: dev
 api:
   host: 127.0.0.1                 # S2（13.11.1）：默认仅本机；0.0.0.0 需显式配置暴露
   port: 8000
-  auth_enabled: false
+  auth_enabled: true
+  query_rate_per_min: 20              # C4（V5.1）：/api/query 每 IP 每分钟上限
+  upload_rate_per_min: 10           # C4：/api/documents/upload 每 IP 每分钟上限
   cors_origins: ["http://localhost:5173"]   # 13.8：dev 模式 vite proxy 之外的跨域白名单
 
 frontend:                          # 13.8：SPA 前端工程
@@ -72,36 +74,23 @@ orchestration:
   max_reflection_iterations: 3
   search_timeout_seconds: 10
   request_timeout_seconds: 30
+  max_concurrent_queries: 4        # C3（V5.1）：并发查询上限，耗尽返回 43001
+  semaphore_acquire_timeout_seconds: 5.0
 
 ingestion:
   max_file_size_mb: 50
   allowed_extensions: [pdf, docx, xlsx, pptx, md, txt]
   embed_batch_size: 64
+  max_queue_size: 64              # C5（V5.1）：入库队列上限，满时返回 43003
+  zip_max_total_mb: 200           # S2（V5.1）：zip 解压总大小上限（防炸弹）
+  zip_max_entries: 1000           # S2：zip 条目数上限
 
 logging:
   level: info
   json: true
 
-# ============================================================================
-# 第二阶段（DEVELOPMENT.md 第 13 章）目标 schema —— 仅供规划参考，暂不启用！
-# 在 W5~W8 对应实现落地前【不要激活】这些键：未识别键会被静默忽略，留隐患。
-# ============================================================================
-# reranker:
-#   model_name: BAAI/bge-reranker-v2-m3        # W5：provider 切 bge_reranker
-#   rerank_top_k: 5
-# evaluator:
-#   provider: rule                # rule | semantic_v2（W5）
-#   semantic_v2_threshold: 0.45
-# rewriter:
-#   provider: rule                # rule | llm（W5）
-# detector:
-#   provider: citation            # citation | semantic（W5）
-#   semantic_similarity_threshold: 0.6
-# api:
-#   cors_origins: ["http://localhost:5173"]
-# kb:
-#   default_kb: default
-#   persist_file: ./data/kb.json
-# frontend:
-#   dev_port: 5173
-#   dist_dir: ./frontend/dist
+documents:
+  persist_file: ./data/documents.json
+
+kbs:
+  persist_file: ./data/kb.json

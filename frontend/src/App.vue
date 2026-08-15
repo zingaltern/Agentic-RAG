@@ -10,14 +10,21 @@ const store = useAppStore()
 
 onMounted(async () => {
   // V5.1：启动时探测登录态。40101=团队模式未登录（显示登录页）；
-  // 40001=个人模式（auth_enabled=false，视为已登录管理员，行为与旧版一致）。
-  const res = await api('/api/auth/me')
+  // 40001=个人模式（auth_enabled=false，视为已登录管理员，行为与旧版一致）；
+  // 其他错误码（如 50001 服务异常）不误判个人模式，保持未登录态。
+  // silent：个人模式的 40001 属正常状态，禁止弹全局错误条。
+  const res = await api('/api/auth/me', { silent: true })
   if (res.code === 0) {
     store.setAuth(res.data.user)
   } else if (res.code === 40101) {
     store.clearAuth()
-  } else {
+  } else if (res.code === 40001) {
     store.setAuth({ user_id: 'local', username: 'local', name: '个人模式', role: 'admin' })
+  } else if (res.code === 50001) {
+    // 网络/服务不可达：不清登录态（避免刷新时误退出），但显式提示
+    store.pushError('无法连接后端服务，请确认服务已启动')
+  } else {
+    store.clearAuth()
   }
 })
 </script>

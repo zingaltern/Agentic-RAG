@@ -19,11 +19,18 @@ def health(deps: Dependencies = Depends(get_deps)) -> dict:
     checks: dict[str, str] = {}
 
     if deps.embedding is not None:
-        ready = getattr(deps.embedding, "ready", lambda: True)
-        try:
-            checks["embedding"] = "ok" if ready() else "not_loaded"
-        except Exception:
-            checks["embedding"] = "down"
+        # 只读探活：不触发模型加载（加载在启动期后台预热，避免阻塞 health 秒回）
+        if hasattr(deps.embedding, "is_loaded"):
+            try:
+                checks["embedding"] = "ok" if deps.embedding.is_loaded else "not_loaded"
+            except Exception:
+                checks["embedding"] = "down"
+        else:
+            # 旧 stub/自定义实现无 is_loaded：回退 ready()（可能触发加载，仅兼容场景）
+            try:
+                checks["embedding"] = "ok" if deps.embedding.ready() else "not_loaded"
+            except Exception:
+                checks["embedding"] = "down"
     else:
         checks["embedding"] = "not_loaded"
 

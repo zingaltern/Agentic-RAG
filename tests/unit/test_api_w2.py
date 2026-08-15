@@ -17,12 +17,13 @@ SAMPLE = Path(__file__).resolve().parent.parent / "eval" / "sample_data" / "员�
 @pytest.fixture()
 def w2_client(tmp_path, isolated_stores) -> TestClient:
     config = load_config()
+    config.api.auth_enabled = False   # 与仓库 settings.yaml 解耦：这些用例按个人模式契约编写
     config.vector_store.persist_dir = str(tmp_path / "chroma")
     config.documents.persist_file = str(tmp_path / "documents.json")
     config.kbs.persist_file = str(tmp_path / "kb.json")
     app = create_app(config=config, components=True, prewarm=False, embedding=StubEmbedding(dimension=512),
                      kbs=isolated_stores["kbs"], users=isolated_stores["users"],
-                     documents=isolated_stores["documents"])
+                     documents=isolated_stores["documents"], jobs=isolated_stores["jobs"])
     with TestClient(app) as c:
         yield c
 
@@ -87,13 +88,14 @@ def test_upload_unsupported_extension(w2_client):
 
 def test_upload_too_large(tmp_path, isolated_stores):
     config = load_config()
+    config.api.auth_enabled = False   # 与仓库 settings.yaml 解耦：个人模式契约
     config.vector_store.persist_dir = str(tmp_path / "chroma")
     config.documents.persist_file = str(tmp_path / "documents.json")
     config.kbs.persist_file = str(tmp_path / "kb.json")
     config.ingestion.max_file_size_mb = 0   # 任何非空文件都超限
     app = create_app(config=config, components=True, prewarm=False, embedding=StubEmbedding(dimension=512),
                      kbs=isolated_stores["kbs"], users=isolated_stores["users"],
-                     documents=isolated_stores["documents"])
+                     documents=isolated_stores["documents"], jobs=isolated_stores["jobs"])
     with TestClient(app) as c:
         resp = c.post("/api/documents/upload", files={"file": ("big.md", b"x" * 10, "text/markdown")})
         assert resp.json()["code"] == 40001

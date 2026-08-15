@@ -3,12 +3,16 @@ import { nextTick, onMounted, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { ChatDotRound, ChatLineRound, Cpu, Delete, MagicStick, Promotion } from '@element-plus/icons-vue'
 import { api } from '../api'
+import { friendlyError } from '../api/index.js'
 import { useAppStore } from '../stores/app'
 
 const store = useAppStore()
 const kbs = ref([])
 const kbId = ref('default')
 const debug = ref(false)
+const emptyKb = ref(false)          // 当前知识库无文档 → 空态给引导（先上传再提问）
+let msgSeq = 0                       // 消息稳定 key：避免 :key="i" 索引复用导致 DOM 状态错乱
+const mkMsg = (msg) => ({ id: ++msgSeq, ...msg })
 const { chat } = storeToRefs(store)   // 会话状态提升到 store：切换页面不丢失
 const bodyRef = ref(null)
 let composing = false      // 中文输入法组合期：Enter 用于确认候选，不发送
@@ -18,20 +22,32 @@ async function loadKbs() {
   const res = await api('/api/kbs')
   if (res.code === 0) {
     kbs.value = res.data.kbs || []
+    const prev = kbId.value
     if (!kbs.value.some((k) => k.kb_id === kbId.value)) kbId.value = 'default'
+    // 仅当 kbId 未变化（watch 未触发）时手动刷新空库状态，避免双请求
+    if (kbId.value === prev) await refreshKbDocs()
   }
 }
+async function refreshKbDocs() {
+  const res = await api(`/api/documents?page=1&size=1&kb_id=${kbId.value}`)
+  emptyKb.value = res.code === 0 && (res.data.total || 0) === 0
+}
+watch(kbId, refreshKbDocs)
 
 async function ask() {
   if (chat.value.loading) return            // A2：请求进行中禁止并发提交（Enter 路径）
   const q = chat.value.query.trim()
   if (!q) { store.pushError('请输入问题'); return }
-  // 会话记忆：携带最近 6 轮（不含当前问题），供后端理解指代
-  const history = chat.value.messages.slice(-6).map((m) => ({
-    role: m.role,
-    content: m.role === 'user' ? m.text : (m.text || ''),
-  }))
-  chat.value.messages.push({ role: 'user', text: q, time: new Date() })
+  // 会话记忆：携带最近 6 轮（不含当前问题）；仅用户提问与成功回答进历史，
+  // 错误气泡（result.code !== 0）不进历史，避免污染模型上下文
+  const history = chat.value.messages
+    .slice(-6)
+    .filter((m) => m.role === 'user' || (m.result && m.result.code === 0))
+    .map((m) => ({
+      role: m.role,
+      content: m.role === 'user' ? m.text : (m.text || ''),
+    }))
+  chat.value.messages.push(mkMsg({ role: 'user', text: q, time: new Date() }))
   chat.value.query = ''
   chat.value.loading = true
   try {
@@ -39,23 +55,22 @@ async function ask() {
       method: 'POST',
       body: JSON.stringify({ query: q, kb_id: kbId.value, debug: debug.value, history }),
     })
-    store.setTraceId(res.trace_id)
     // A4：api() 不再 throw（网络失败返回 code:50001），此处统一渲染错误气泡
-    chat.value.messages.push({
+    chat.value.messages.push(mkMsg({
       role: 'assistant',
       text: res.code !== 0
-        ? (res.message || `请求失败（${res.code}）`)
+        ? friendlyError(res.code, res.message)
         : ((res.data && res.data.answer) || ''),
       result: { ...(res.data || {}), code: res.code },
       time: new Date(),
-    })
+    }))
   } catch (e) {
-    chat.value.messages.push({
+    chat.value.messages.push(mkMsg({
       role: 'assistant',
-      text: `请求失败：${e && e.message ? e.message : e}`,
+      text: friendlyError(-1, String(e && e.message || e)),
       result: { code: -1, message: String(e && e.message || e) },
       time: new Date(),
-    })
+    }))
   } finally {
     chat.value.loading = false
   }
@@ -108,7 +123,7 @@ watch(
         <span class="title-icon"><el-icon><ChatLineRound /></el-icon></span>问答控制台
       </h2>
       <el-select v-model="kbId" style="width: 240px">
-        <el-option v-for="k in kbs" :key="k.kb_id" :label="`${k.name}（${k.kb_id}）`" :value="k.kb_id" />
+        <el-option v-for="k in kbs" :key="k.kb_id" :label="k.name" :value="k.kb_id" />
       </el-select>
       <el-checkbox v-model="debug">展示反思过程</el-checkbox>
       <el-button @click="clearChat" :disabled="!chat.messages.length">
@@ -120,10 +135,14 @@ watch(
       <div v-if="!chat.messages.length" class="chat-empty">
         <el-icon class="chat-empty-icon"><ChatDotRound /></el-icon>
         <p>基于知识库的智能问答</p>
-        <p class="muted">输入问题开始提问，回答将带引用来源与溯源评分</p>
+        <p v-if="emptyKb" class="muted">
+          当前知识库暂无文档——请先到
+          <router-link to="/documents" class="empty-link">文档管理</router-link>上传文档后再提问
+        </p>
+        <p v-else class="muted">输入问题开始提问，回答将带引用来源与溯源评分</p>
       </div>
 
-      <template v-for="(m, i) in chat.messages" :key="i">
+      <template v-for="(m) in chat.messages" :key="m.id">
         <div v-if="m.role === 'user'" class="msg-row msg-user">
           <div class="msg-main">
             <div class="bubble bubble-user">{{ m.text }}</div>
@@ -137,9 +156,7 @@ watch(
           <div class="msg-main">
             <div class="bubble bubble-ai">
               <template v-if="m.result && m.result.code !== 0">
-                <div class="answer-box" style="margin: 0">
-                  <span class="muted">[错误码 {{ m.result.code }}]</span> {{ m.text || '（无兜底文案）' }}
-                </div>
+                <div class="answer-box" style="margin: 0">{{ m.text }}</div>
               </template>
               <template v-else>
                 <div class="answer-text">
@@ -150,9 +167,7 @@ watch(
                 </div>
                 <div v-if="m.result" class="meta-row">
                   <el-tag :type="badgeType(m.result)" size="small">{{ badgeText(m.result) }}</el-tag>
-                  <span class="meta-text">引用 {{ (m.result.citations && m.result.citations.used) || [] }}
-                    · 已证率 {{ ((m.result.citations && m.result.citations.confirmed) ?? 0).toFixed(2) }}
-                    · 迭代 {{ m.result.iterations }}</span>
+                  <span class="meta-text">引用 {{ (m.result.citations && m.result.citations.used) || [] }}</span>
                 </div>
                 <el-collapse v-if="m.result && m.result.sources && m.result.sources.length" class="sources">
                   <el-collapse-item :title="`引用来源（${m.result.sources.length}）· 已证率 ${(((m.result.citations && m.result.citations.confirmed) ?? 0)).toFixed(2)}`" :name="1">
@@ -232,6 +247,8 @@ watch(
 .chat-empty { margin: auto; text-align: center; color: #9aa6b8; }
 .chat-empty-icon { font-size: 46px; color: #c6d2e6; }
 .chat-empty p { margin: 8px 0 0; font-size: 14px; color: #5b6b82; }
+.empty-link { color: #ff7a45; text-decoration: none; font-weight: 600; }
+.empty-link:hover { text-decoration: underline; }
 
 .msg-row { display: flex; gap: 10px; align-items: flex-start; animation: msg-in .3s ease; }
 .msg-user { justify-content: flex-end; }

@@ -23,7 +23,7 @@ def deps(tmp_path, isolated_stores):
     config.kbs.persist_file = str(tmp_path / "kb.json")
     return wire(config, embedding=StubEmbedding(dimension=512),
                 kbs=isolated_stores["kbs"], users=isolated_stores["users"],
-                documents=isolated_stores["documents"])
+                documents=isolated_stores["documents"], jobs=isolated_stores["jobs"])
 
 
 def test_ingest_success_job_and_documents(deps):

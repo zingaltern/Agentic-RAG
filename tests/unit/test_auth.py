@@ -11,6 +11,7 @@ from app.application import create_app
 from app.core.config import load_config
 from app.core.errors import AuthError
 from app.services.kb_store import KbStore
+from app.services.jobs_store import JobStore
 from app.services.rbac import Authorizer, Decision, RbacPolicy
 from tests.unit.fakes import StubEmbedding
 
@@ -28,7 +29,8 @@ def _app(tmp_path, auth_enabled: bool = True, admin_user: str | None = "admin",
     app = create_app(config=config, components=True, prewarm=False, embedding=StubEmbedding(dimension=128),
                      kbs=stores.get("kbs") or KbStore(persist_file=str(tmp_path / "kb.json")),
                      users=stores.get("users"),
-                     documents=stores.get("documents"))
+                     documents=stores.get("documents"),
+                     jobs=stores.get("jobs") or JobStore(persist_file=str(tmp_path / "jobs.json")))
     return app
 
 
@@ -91,6 +93,29 @@ def test_login_wrong_password_40101(tmp_path, isolated_stores):
     with TestClient(_app(tmp_path, isolated_stores=isolated_stores)) as client:
         body = client.post("/api/auth/login", json={"username": "admin", "password": "wrong"}).json()
         assert body["code"] == 40101
+        # 通用文案：不泄露用户名是否存在
+        assert "用户名或密码错误" in body["message"]
+
+
+def test_login_throttle_locks_after_5_failures(tmp_path, isolated_stores):
+    """防爆破：连续 5 次失败锁定，锁定期间即使密码正确也拒绝；成功登录重置计数。"""
+    app = _app(tmp_path, isolated_stores=isolated_stores)
+    with TestClient(app) as client:
+        for _ in range(5):
+            body = client.post("/api/auth/login",
+                               json={"username": "admin", "password": "bad"}).json()
+            assert body["code"] == 40101
+        locked = client.post("/api/auth/login",
+                             json={"username": "admin", "password": "admin123"}).json()
+        assert locked["code"] == 40101
+        assert "锁定" in locked["message"]
+        # 新请求上下文不受影响（TestClient 隔离 client host 时会带新 IP）→ 用同一 app 验证重置路径
+        guard = app.state.login_guard
+        key = "testclient"
+        guard.report_success(key)
+        ok_body = client.post("/api/auth/login",
+                              json={"username": "admin", "password": "admin123"}).json()
+        assert ok_body["code"] == 0
 
 
 def test_change_password(tmp_path, isolated_stores):
@@ -98,19 +123,20 @@ def test_change_password(tmp_path, isolated_stores):
     with TestClient(app) as client:
         token = _login(client, "admin", "admin123")
         r = client.post("/api/auth/change-password",
-                        json={"old_password": "admin123", "new_password": "newpass"},
+                        json={"old_password": "admin123", "new_password": "newpass8"},
                         headers=_auth_headers(token)).json()
         assert r["code"] == 0
-        assert _login(client, "admin", "newpass")
+        assert _login(client, "admin", "newpass8")
         bad = client.post("/api/auth/change-password",
                           json={"old_password": "wrong", "new_password": "x"},
                           headers=_auth_headers(token)).json()
         assert bad["code"] == 40001
 
 
-def test_me_without_token_40001(tmp_path, isolated_stores):
+def test_me_without_token_40101_when_auth_enabled(tmp_path, isolated_stores):
+    """团队模式（认证开启）未登录 /me → 40101（前端据此显示登录页）；个人模式 → 40001。"""
     with TestClient(_app(tmp_path, isolated_stores=isolated_stores)) as client:
-        assert client.get("/api/auth/me").json()["code"] == 40001
+        assert client.get("/api/auth/me").json()["code"] == 40101
 
 
 def test_protected_route_without_token_40101(tmp_path, isolated_stores):
@@ -133,6 +159,8 @@ def test_auth_disabled_personal_mode(tmp_path, isolated_stores):
         assert client.get("/api/kbs").json()["code"] == 0
         assert client.post("/api/query", json={"query": "年假"}).json()["code"] in (0, 21001, 30001, 50001)
         assert client.get("/api/auth/me").json()["code"] == 40001
+        # 个人模式视为管理员：用户管理可用（回归：40101 曾误报"请先登录"）
+        assert client.get("/api/users").json()["code"] == 0
 
 
 def test_health_whitelist_without_token(tmp_path, isolated_stores):
@@ -172,6 +200,8 @@ def test_authorizer_matrix():
     assert az.can_write_kb(user1, shared) is False
     assert az.can_delete_kb(user1, shared) is False
     assert az.can_read_kb(user1, priv1) is True and az.can_write_kb(user1, priv1) is True
+    assert az.can_delete_kb(user1, priv1) is True, "owner 可删自己的私有库"
+    assert az.can_delete_kb(user2, priv1) is False, "非 owner 不可删他人私有库"
     assert az.can_read_kb(user2, priv1) is False and az.can_write_kb(user2, priv1) is False
     accessible = az.list_accessible_kbs(user1, [shared, priv1, priv2])
     assert {k.kb_id for k in accessible} == {"shared_kb", "priv1"}
@@ -217,9 +247,9 @@ def test_user_cannot_write_shared_kb(tmp_path, isolated_stores):
             time.sleep(0.05)
         assert job["data"]["status"] == "success"
         # 建普通用户
-        assert client.post("/api/users", json={"username": "user1", "password": "pass123"},
+        assert client.post("/api/users", json={"username": "user1", "password": "pass1234"},
                            headers=_auth_headers(admin)).json()["code"] == 0
-        user1 = _login(client, "user1", "pass123")
+        user1 = _login(client, "user1", "pass1234")
         # 共享库可读：kbs 列表可见、可提问
         kbs = client.get("/api/kbs", headers=_auth_headers(user1)).json()
         assert any(k["kb_id"] == kb_id for k in kbs["data"]["kbs"])
@@ -246,10 +276,10 @@ def test_user_private_kb_isolation(tmp_path, isolated_stores):
     with TestClient(app) as client:
         admin = _login(client, "admin", "admin123")
         for u in ("user1", "user2"):
-            assert client.post("/api/users", json={"username": u, "password": "pass123"},
+            assert client.post("/api/users", json={"username": u, "password": "pass1234"},
                                headers=_auth_headers(admin)).json()["code"] == 0
-        user1 = _login(client, "user1", "pass123")
-        user2 = _login(client, "user2", "pass123")
+        user1 = _login(client, "user1", "pass1234")
+        user2 = _login(client, "user2", "pass1234")
         # 普通用户建库 → 服务端强制 private
         created = client.post("/api/kbs", json={"name": "MyKB", "scope": "shared"},
                               headers=_auth_headers(user1)).json()
@@ -266,25 +296,32 @@ def test_user_private_kb_isolation(tmp_path, isolated_stores):
         # admin 可见可管理（管理视角）
         kbs_admin = client.get("/api/kbs", headers=_auth_headers(admin)).json()
         assert any(k["kb_id"] == priv_id for k in kbs_admin["data"]["kbs"])
+        # 非 owner 删除私有库被拒；owner 可删自己的私有库
+        assert client.delete(f"/api/kbs/{priv_id}",
+                             headers=_auth_headers(user2)).json()["code"] == 40101
+        assert client.delete(f"/api/kbs/{priv_id}",
+                             headers=_auth_headers(user1)).json()["code"] == 0
 
 
 def test_user_management_admin_only(tmp_path, isolated_stores):
     app = _app(tmp_path, isolated_stores=isolated_stores)
     with TestClient(app) as client:
         admin = _login(client, "admin", "admin123")
-        assert client.post("/api/users", json={"username": "user1", "password": "pass123"},
+        assert client.post("/api/users", json={"username": "user1", "password": "pass1234"},
                            headers=_auth_headers(admin)).json()["code"] == 0
-        user1 = _login(client, "user1", "pass123")
+        user1 = _login(client, "user1", "pass1234")
         # 普通用户不能管理用户
         assert client.get("/api/users", headers=_auth_headers(user1)).json()["code"] == 40101
-        assert client.post("/api/users", json={"username": "x", "password": "pass123"},
+        assert client.post("/api/users", json={"username": "x", "password": "pass1234"},
                            headers=_auth_headers(user1)).json()["code"] == 40101
         # 改角色/重置密码/删除
         listing = client.get("/api/users", headers=_auth_headers(admin)).json()
         uid = next(u["user_id"] for u in listing["data"]["users"] if u["username"] == "user1")
         assert client.post(f"/api/users/{uid}/role", json={"role": "admin"},
                            headers=_auth_headers(admin)).json()["code"] == 0
-        assert client.post(f"/api/users/{uid}/reset-password", json={"new_password": "new123"},
+        # S1：角色变更吊销 admin 旧 token（user1 被升为 admin，admin 自身 role 未变不受影响——
+        # 此处重置 user1 密码使用 admin 的 token，admin token 未变更所以仍有效）
+        assert client.post(f"/api/users/{uid}/reset-password", json={"new_password": "newpass12"},
                            headers=_auth_headers(admin)).json()["code"] == 0
         # 禁止删自己
         me = client.get("/api/auth/me", headers=_auth_headers(admin)).json()["data"]["user"]
@@ -292,13 +329,49 @@ def test_user_management_admin_only(tmp_path, isolated_stores):
                              headers=_auth_headers(admin)).json()["code"] == 40001
 
 
+def test_users_import_csv_batch(tmp_path, isolated_stores):
+    """CSV 批量导入：合法整批写入；任一问题整批拒绝并返回逐行明细；仅 admin 可用。"""
+    app = _app(tmp_path, isolated_stores=isolated_stores)
+    with TestClient(app) as client:
+        admin = _login(client, "admin", "admin123")
+        ok_csv = ("用户名,姓名,初始密码,角色\n"
+                  "zw1,张伟,zw123456,user\n"
+                  "ls2,李四,ls123456,admin\n")
+        r = client.post("/api/users/import",
+                        files={"file": ("users.csv", ok_csv.encode("utf-8-sig"), "text/csv")},
+                        headers=_auth_headers(admin)).json()
+        assert r["code"] == 0 and r["data"]["created"] == 2
+        assert client.post("/api/auth/login", json={"username": "zw1", "password": "zw123456"}).json()["code"] == 0
+
+        # 无表头也能识别（首行即数据）；已存在用户名 → 整批拒绝 + 行号明细
+        bad_csv = ("dup1,杜普,dup123456,user\n"
+                   "zw1,重复,zw123456,user\n"
+                   "bad,坏密码,short,user\n")
+        r2 = client.post("/api/users/import",
+                         files={"file": ("b.csv", bad_csv.encode("utf-8"), "text/csv")},
+                         headers=_auth_headers(admin)).json()
+        assert r2["code"] == 40001
+        assert any(e["row"] == 2 and "已存在" in e["message"] for e in r2["data"]["errors"])
+        assert any(e["row"] == 3 and "密码" in e["message"] for e in r2["data"]["errors"])
+        assert client.get("/api/users", headers=_auth_headers(admin)).json()["data"]["total"] == 3, \
+            "失败批次不得写入任何用户"
+
+        # 仅 admin 可用
+        assert client.post("/api/users", json={"username": "user1", "password": "pass1234"},
+                           headers=_auth_headers(admin)).json()["code"] == 0
+        user1 = _login(client, "user1", "pass1234")
+        assert client.post("/api/users/import",
+                           files={"file": ("c.csv", "a,阿,aaaaaaaa,user\n".encode("utf-8"), "text/csv")},
+                           headers=_auth_headers(user1)).json()["code"] == 40101
+
+
 def test_plugins_switch_admin_only(tmp_path, isolated_stores):
     app = _app(tmp_path, isolated_stores=isolated_stores)
     with TestClient(app) as client:
         admin = _login(client, "admin", "admin123")
-        assert client.post("/api/users", json={"username": "user1", "password": "pass123"},
+        assert client.post("/api/users", json={"username": "user1", "password": "pass1234"},
                            headers=_auth_headers(admin)).json()["code"] == 0
-        user1 = _login(client, "user1", "pass123")
+        user1 = _login(client, "user1", "pass1234")
         payload = {"module": "reranker", "strategy": "identity"}
         assert client.post("/api/plugins/switch", json=payload,
                            headers=_auth_headers(user1)).json()["code"] == 40101
@@ -318,3 +391,69 @@ def test_kb_json_v2_migration(tmp_path, isolated_stores):
     persisted = __import__("json").loads(path.read_text(encoding="utf-8"))
     assert persisted[0].get("owner") == "admin", "迁移后必须落盘一次"
     assert store.get("default").scope == "shared"
+
+
+# -- S1：改密/角色变更吊销旧 Token ------------------------------------------------------
+
+def test_s1_change_password_revokes_old_token(tmp_path, isolated_stores):
+    app = _app(tmp_path, isolated_stores=isolated_stores)
+    with TestClient(app) as client:
+        token = _login(client, "admin", "admin123")
+        r = client.post("/api/auth/change-password",
+                        json={"old_password": "admin123", "new_password": "newpass8"},
+                        headers=_auth_headers(token)).json()
+        assert r["code"] == 0
+        # 旧 token 访问受保护路由 → 40101
+        assert client.get("/api/users", headers=_auth_headers(token)).json()["code"] == 40101
+        # 旧 token 访问白名单 /api/auth/me → 不挂载（40101 未登录，而非用户信息）
+        me = client.get("/api/auth/me", headers=_auth_headers(token)).json()
+        assert me["code"] == 40101
+        # 新 token 正常
+        new_token = _login(client, "admin", "newpass8")
+        me2 = client.get("/api/auth/me", headers=_auth_headers(new_token)).json()
+        assert me2["code"] == 0 and me2["data"]["user"]["role"] == "admin"
+
+
+def test_s1_role_change_revokes_users_token(tmp_path, isolated_stores):
+    app = _app(tmp_path, isolated_stores=isolated_stores)
+    with TestClient(app) as client:
+        admin = _login(client, "admin", "admin123")
+        assert client.post("/api/users", json={"username": "user1", "password": "pass1234"},
+                           headers=_auth_headers(admin)).json()["code"] == 0
+        user1 = _login(client, "user1", "pass1234")
+        assert client.get("/api/kbs", headers=_auth_headers(user1)).json()["code"] == 0
+        listing = client.get("/api/users", headers=_auth_headers(admin)).json()
+        uid = next(u["user_id"] for u in listing["data"]["users"] if u["username"] == "user1")
+        assert client.post(f"/api/users/{uid}/role", json={"role": "admin"},
+                           headers=_auth_headers(admin)).json()["code"] == 0
+        # user1 旧 token（role=user 签发）被吊销
+        assert client.get("/api/kbs", headers=_auth_headers(user1)).json()["code"] == 40101
+
+
+# -- S5：密码策略 ----------------------------------------------------------------------
+
+def test_s5_password_strength_validation(tmp_path, isolated_stores):
+    from app.services.user_store import validate_password_strength
+
+    assert validate_password_strength("short1") == "密码长度至少 8 位"
+    assert validate_password_strength("abcdefgh") == "密码必须同时包含字母和数字"
+    assert validate_password_strength("12345678") == "密码必须同时包含字母和数字"
+    assert validate_password_strength("pass1234") is None
+
+
+def test_s5_weak_password_rejected_at_api(tmp_path, isolated_stores):
+    app = _app(tmp_path, isolated_stores=isolated_stores)
+    with TestClient(app) as client:
+        admin = _login(client, "admin", "admin123")
+        weak = client.post("/api/users", json={"username": "u1", "password": "short1"},
+                           headers=_auth_headers(admin)).json()
+        assert weak["code"] == 40001, "长度不足由 min_length=8 拒绝"
+        alpha = client.post("/api/users", json={"username": "u2", "password": "abcdefgh"},
+                            headers=_auth_headers(admin)).json()
+        assert alpha["code"] == 40001 and "字母和数字" in alpha["message"], "复杂度校验走中文人话化消息"
+        digit = client.post("/api/users", json={"username": "u3", "password": "12345678"},
+                            headers=_auth_headers(admin)).json()
+        assert digit["code"] == 40001 and "字母和数字" in digit["message"]
+        ok = client.post("/api/users", json={"username": "u3", "password": "pass1234"},
+                         headers=_auth_headers(admin)).json()
+        assert ok["code"] == 0
