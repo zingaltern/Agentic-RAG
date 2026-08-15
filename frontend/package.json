@@ -32,6 +32,7 @@
       "electron/**"
     ],
     "mac": {
+      "icon": "resources/icon.icns",
       "target": [
         "dmg"
       ]

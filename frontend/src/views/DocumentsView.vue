@@ -161,26 +161,30 @@ async function removeDoc(documentId) {
   <div>
     <div class="card">
       <h2 class="card-title"><span class="title-icon"><el-icon><Document /></el-icon></span>文档管理</h2>
-      <div class="row">
-        <span>目标知识库：</span>
-        <el-select v-model="kbId" style="width: 240px">
-          <el-option v-for="k in kbs" :key="k.kb_id" :label="k.name" :value="k.kb_id" />
-        </el-select>
-        <el-upload v-if="!readOnly"
-          :auto-upload="false"
-          :show-file-list="false"
-          :on-change="onPick"
-          :accept="SUPPORTED_ACCEPT"
-          multiple
-        >
-          <el-button type="primary" :loading="uploading">
-            <el-icon style="margin-right: 5px"><UploadFilled /></el-icon>选择文件上传
-          </el-button>
-        </el-upload>
-        <span class="muted" style="margin-left: 10px; font-size: 12px">
-          支持：{{ SUPPORTED_TYPES }}（单个 ≤ 50MB）
-        </span>
-        <el-button @click="refreshDocs"><el-icon style="margin-right: 5px"><Refresh /></el-icon>刷新列表</el-button>
+      <div class="row docs-toolbar">
+        <div class="kb-block">
+          <span>目标知识库：</span>
+          <el-select v-model="kbId" style="width: 240px">
+            <el-option v-for="k in kbs" :key="k.kb_id" :label="k.name" :value="k.kb_id" />
+          </el-select>
+          <div class="muted support-hint">
+            支持：{{ SUPPORTED_TYPES }}（单个 ≤ 50MB）
+          </div>
+        </div>
+        <div class="actions">
+          <el-upload v-if="!readOnly"
+            :auto-upload="false"
+            :show-file-list="false"
+            :on-change="onPick"
+            :accept="SUPPORTED_ACCEPT"
+            multiple
+          >
+            <el-button type="primary" :loading="uploading">
+              <el-icon style="margin-right: 5px"><UploadFilled /></el-icon>选择文件上传
+            </el-button>
+          </el-upload>
+          <el-button @click="refreshDocs"><el-icon style="margin-right: 5px"><Refresh /></el-icon>刷新列表</el-button>
+        </div>
       </div>
       <div v-if="progress" class="progress-wrap">
         <el-progress
@@ -232,4 +236,9 @@ async function removeDoc(documentId) {
 
 <style scoped>
 .progress-wrap { margin-top: 14px; max-width: 480px; }
+.docs-toolbar { display: flex; align-items: flex-start; gap: 24px; flex-wrap: wrap; }
+.kb-block { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; }
+.kb-block > span { line-height: 32px; }
+.actions { display: flex; align-items: center; gap: 10px; margin-left: auto; align-self: flex-end; }
+.support-hint { font-size: 12px; margin-top: 4px; }
 </style>
