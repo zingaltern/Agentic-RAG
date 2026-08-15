@@ -14,6 +14,7 @@ Phase2 修订（第 13 章）：
 from __future__ import annotations
 
 import re
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -95,6 +96,8 @@ class OrchestrationService:
         self.detector = detector
         self.llm = llm
         self.vector_store = vector_store
+        self._parent_cache: dict[str, tuple[int, int, dict[str, ScoredChunk]]] = {}
+        self._parent_cache_lock = threading.Lock()   # 并发查询互斥（缓存读写）
 
     # -- 工具 ----------------------------------------------------------------
 
@@ -138,12 +141,29 @@ class OrchestrationService:
         return out or [(query, "hybrid")]
 
     def _parent_map(self, collection: str | None = None) -> dict[str, ScoredChunk]:
-        """父块索引（子块回溯父块全文用；W2 只存父块，命中即父块，此步兼容预留）。"""
+        """父块索引（子块回溯父块全文用；W2 只存父块，命中即父块，此步兼容预留）。
+
+        按 collection+count+epoch 缓存：单次问答与多次连续问答复用同一索引，
+        向量库有变更（count/epoch 变化）时自动失效重建，避免每次全量拉块。
+        """
         getter = getattr(self.vector_store, "get_all_chunks", None)
         if getter is None:
             return {}
         collection = collection or self.config.vector_store.collection
-        return {c.chunk_id: ScoredChunk(chunk=c, score=0.0, notion="parent") for c in getter(collection)}
+        count = self.vector_store.count(collection)
+        epoch = getattr(self.vector_store, "mutation_epoch", lambda c: 0)(collection)
+        # 快路径：无锁读缓存（读多写少；miss 时由锁内重建兜底，避免并发查询持锁等待全量拉取）
+        cached = self._parent_cache.get(collection)
+        if cached is not None and cached[0] == count and cached[1] == epoch:
+            return cached[2]
+        with self._parent_cache_lock:   # 锁内双重检查后单次构建
+            cached = self._parent_cache.get(collection)
+            if cached is not None and cached[0] == count and cached[1] == epoch:
+                return cached[2]
+            index = {c.chunk_id: ScoredChunk(chunk=c, score=0.0, notion="parent")
+                     for c in getter(collection)}
+            self._parent_cache[collection] = (count, epoch, index)
+            return index
 
     def _backtrack_parent_chunks(self, chunks: list[ScoredChunk],
                                  collection: str | None = None) -> list[ScoredChunk]:

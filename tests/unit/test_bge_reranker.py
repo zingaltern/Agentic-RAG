@@ -5,7 +5,7 @@ import pytest
 
 from app.adapters.reranker.bge_reranker import BGEReranker
 from app.core.domain import Chunk, ScoredChunk
-from app.core.errors import EmbeddingError
+from app.core.errors import EmbeddingError, RerankError
 
 
 class StubCrossEncoder:
@@ -58,7 +58,7 @@ def test_rerank_predict_failure():
             raise RuntimeError("predict boom")
 
     reranker = BGEReranker(model_factory=lambda: _Bad())
-    with pytest.raises(EmbeddingError, match="重排打分失败"):
+    with pytest.raises(RerankError, match="重排打分失败"):
         reranker.rerank("查询", [_scored("甲")])
 
 

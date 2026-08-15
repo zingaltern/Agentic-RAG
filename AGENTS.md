@@ -60,7 +60,7 @@ make desktop        # Electron 桌面（内置拉起后端）【W8 落地】
 
 ## 测试要求
 
-- 完成任何功能后必须 `make test` 全绿（293 项，2026-08-15 实测，含覆盖率门禁 ≥80%）；新模块补齐对应单测（对照 DEVELOPMENT 第 8.1 矩阵）。
+- 完成任何功能后必须 `make test` 全绿（358 项，2026-08-16 实测，含覆盖率门禁 ≥80%）；新模块补齐对应单测（对照 DEVELOPMENT 第 8.1 矩阵）。
 - 评测回归：开发集 `tests/eval/qa_pairs/{default,docs}/` 107 条经 `app.cli.rageval` 出报告（13.1 度量协议，改检索/改写/检测等影响指标的功能必须前后对比）；
   独立基准集 `tests/eval_suite/`（120 条冻结）规范见该目录 README，不随开发周期增删。
 

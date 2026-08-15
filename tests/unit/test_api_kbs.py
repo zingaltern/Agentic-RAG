@@ -60,6 +60,18 @@ def test_create_kb_empty_name_400(kb_client):
     assert body2["code"] == 40001
 
 
+def test_create_kb_named_kb_does_not_reuse_default_collection(kb_client):
+    """C1：名为 kb 的库不得与默认库共享 Chroma 集合（collection 唯一性校验）。"""
+    body = kb_client.post("/api/kbs", json={"name": "kb"}).json()
+    assert body["code"] == 0
+    data = body["data"]
+    assert data["kb_id"] == "kb" or data["collection"] != "kb"
+    assert data["collection"] != "kb", "collection 必须避开默认库保留集合 'kb'"
+    default = kb_client.get("/api/kbs").json()["data"]["kbs"][0]
+    assert default["collection"] == "kb"
+    assert data["collection"] != default["collection"]
+
+
 @pytest.mark.integration
 def test_delete_kb_cascades(kb_client):
     created = kb_client.post("/api/kbs", json={"name": "docs"}).json()["data"]
@@ -82,6 +94,41 @@ def test_delete_default_rejected(kb_client):
     body = kb_client.delete("/api/kbs/default").json()
     assert body["code"] == 40001
     assert kb_client.get("/api/kbs").json()["data"]["total"] >= 1
+
+
+def test_delete_kb_cleans_document_index(tmp_path, isolated_stores):
+    """C7：删库清理文档索引与幂等表；重建同名库上传同文件必须真实入库（非 duplicate）。"""
+    import time
+
+    config = load_config()
+    config.api.auth_enabled = False
+    config.vector_store.persist_dir = str(tmp_path / "chroma")
+    config.documents.persist_file = str(tmp_path / "documents.json")
+    app = create_app(config=config, components=True, prewarm=False,
+                     embedding=StubEmbedding(dimension=128),
+                     kbs=isolated_stores["kbs"], users=isolated_stores["users"],
+                     documents=isolated_stores["documents"], jobs=isolated_stores["jobs"])
+    with TestClient(app) as c:
+        created = c.post("/api/kbs", json={"name": "docs"}).json()["data"]
+        assert created["kb_id"] == "docs"
+        raw = "# 差旅政策\n出差补贴每天 100 元。".encode("utf-8")
+        up = c.post("/api/documents/upload", files={"file": ("差旅.md", raw, "text/markdown")},
+                    data={"kb_id": "docs"}).json()
+        assert up["code"] == 0
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            job = c.get(f"/api/jobs/{up['data']['job_id']}").json()["data"]
+            if job["status"] in ("success", "failed"):
+                break
+            time.sleep(0.05)
+        assert job["status"] == "success"
+        assert c.delete("/api/kbs/docs").json()["code"] == 0
+        # 重建同名库：同文件上传必须真实入库
+        assert c.post("/api/kbs", json={"name": "docs"}).json()["code"] == 0
+        up2 = c.post("/api/documents/upload", files={"file": ("差旅.md", raw, "text/markdown")},
+                     data={"kb_id": "docs"}).json()
+        assert up2["code"] == 0
+        assert up2["data"].get("duplicate") is not True, "删库后重建不得幂等误判为 duplicate"
 
 
 def test_delete_unknown_kb_404(kb_client):

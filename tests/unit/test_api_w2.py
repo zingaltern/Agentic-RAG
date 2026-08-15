@@ -69,6 +69,45 @@ def test_upload_poll_success_and_documents_lifecycle(w2_client):
     assert w2_client.get(f"/api/documents/{doc_id}").json()["code"] == 40401
 
 
+def _upload_one(w2_client, name: str, raw: bytes = None) -> dict:
+    resp = w2_client.post(
+        "/api/documents/upload",
+        files={"file": (name, raw if raw is not None else SAMPLE.read_bytes(), "text/markdown")},
+    )
+    job = _wait_job(w2_client, resp.json()["data"]["job_id"])
+    assert job["data"]["status"] == "success"
+    return job["data"]
+
+
+def test_batch_delete_lifecycle(w2_client):
+    doc_a = _upload_one(w2_client, "批量A.md")
+    doc_b = _upload_one(w2_client, "批量B.md", SAMPLE.read_bytes() + "\n# 附录B\n内容不同。".encode())
+    assert w2_client.get("/api/documents").json()["data"]["total"] == 2
+
+    batch = w2_client.post("/api/documents/batch-delete", json={
+        "document_ids": [doc_a["document_id"], doc_b["document_id"], "ghost_doc"],
+    }).json()
+    assert batch["code"] == 0
+    assert [d["document_id"] for d in batch["data"]["deleted"]] == [
+        doc_a["document_id"], doc_b["document_id"]]
+    assert batch["data"]["deleted"][0]["deleted_chunks"] == doc_a["chunk_count"]
+    assert batch["data"]["deleted"][1]["deleted_chunks"] == doc_b["chunk_count"]
+    assert batch["data"]["failed"] == [{"document_id": "ghost_doc", "reason_code": 40401}]
+
+    assert w2_client.get("/api/documents").json()["data"]["total"] == 0
+    assert w2_client.get(f"/api/documents/{doc_a['document_id']}").json()["code"] == 40401
+    assert w2_client.get(f"/api/documents/{doc_b['document_id']}").json()["code"] == 40401
+
+
+def test_batch_delete_empty_and_oversize_rejected(w2_client):
+    empty = w2_client.post("/api/documents/batch-delete", json={"document_ids": []}).json()
+    assert empty["code"] == 40001
+    oversize = w2_client.post("/api/documents/batch-delete", json={
+        "document_ids": [f"doc_{i}" for i in range(201)],
+    }).json()
+    assert oversize["code"] == 40001
+
+
 def test_upload_duplicate_idempotent(w2_client):
     raw = SAMPLE.read_bytes()
     first = w2_client.post("/api/documents/upload", files={"file": ("员工手册.md", raw, "text/markdown")}).json()

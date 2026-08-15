@@ -69,4 +69,4 @@
 | P2-7 死代码（部分） | 删除 `queryUrl`、`pollTimer` 死变量 |
 | P2-10 README 过时 | W5~W8 状态同步为"已落地" |
 
-验证：单测全量 `pytest -m "not integration"` 232 项通过；前端 `npm run build` 成功。
+验证：单测全量 `pytest -m "not integration"` 313 项通过；前端 `npm run build` 成功。

@@ -30,7 +30,7 @@ async function createKb() {
       body: JSON.stringify(payload),
     })
     if (res.code === 0) {
-      store.pushInfo(`已创建：${res.data.kb_id}`)
+      store.pushInfo(`知识库「${res.data.name}」已创建`)
       dialog.value = false
       form.value = { name: '', description: '', scope: 'shared' }
       loadKbs()
@@ -44,11 +44,13 @@ function readOnlyKb(row) {
   return row.scope === 'shared' && !isAdmin()
 }
 
-async function removeKb(kbId) {
-  const res = await api(`/api/kbs/${kbId}`, { method: 'DELETE' })
+async function removeKb(row) {
+  const res = await api(`/api/kbs/${row.kb_id}`, { method: 'DELETE', silent: true })
   if (res.code === 0) {
-    store.pushInfo(`已删除知识库：${kbId}（集合级联清空）`)
+    store.pushInfo(`已删除「${row.name}」`)
     loadKbs()
+  } else {
+    store.pushError(`删除失败：${res.message || '请重试'}`)
   }
 }
 </script>
@@ -70,7 +72,7 @@ async function removeKb(kbId) {
         <el-table-column v-if="!isPersonalMode()" label="归属" width="140">
           <template #default="{ row }">
             <el-tag v-if="row.scope === 'shared'" type="info" size="small">共享</el-tag>
-            <el-tag v-else type="warning" size="small">私有 · {{ row.owner }}</el-tag>
+            <el-tag v-else type="warning" size="small">私有 · {{ row.owner_name || row.owner }}</el-tag>
           </template>
         </el-table-column>
         <el-table-column label="操作" width="120">
@@ -80,10 +82,10 @@ async function removeKb(kbId) {
             </el-tooltip>
             <el-popconfirm
               v-else-if="!readOnlyKb(row)"
-              title="删除知识库将级联清空全部向量，不可恢复。确认删除？"
+              :title="`确认删除「${row.name}」？删除后不可恢复`"
               confirm-button-text="删除"
               cancel-button-text="取消"
-              @confirm="removeKb(row.kb_id)"
+              @confirm="removeKb(row)"
             >
               <template #reference>
                 <el-button type="danger" size="small">
@@ -95,7 +97,7 @@ async function removeKb(kbId) {
         </el-table-column>
       </el-table>
       <div class="muted" style="margin-top: 10px">
-        每个知识库对应一个向量集合（collection），由名称自动生成并分配集合名，无需手动配置。
+        每个知识库相互隔离，可分别上传文档并独立提问。
       </div>
     </div>
 

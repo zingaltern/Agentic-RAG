@@ -190,13 +190,16 @@ class DetectionResult:
 |---|---|
 | 0 | 成功 |
 | 40001 | 参数校验失败 |
-| 40101 | 鉴权失败（`api.auth_enabled=true` 时） |
-| 40401 | 文档/Job/知识库不存在 |
+| 40002 | 入库被拒：文档疑似包含提示注入指令（P-C，`injection.mode=reject` 时命中） |
+| 40003 | 入库被拒：文档未通过内容审核（P-C，`moderation.mode=reject` 时命中） |
+| 40101 | 鉴权失败（`api.auth_enabled=true` 时）；**V5.1：不可访问/越权的知识库、Job 查询统一 40101**（Query/Upload/Delete/Kbs 各路由一致，不再混用 40001/40401） |
+| 40401 | 文档/Job/知识库不存在（S5：Job 越权查询对外统一表现为 40401「不存在」以不泄露存在性） |
 | 40440 | 路由未匹配（SPA catch-all 对未知 `/api/*` 返回，替代吞成 HTML） |
 | 40500 | 方法不允许（框架级 405 统一包装） |
 | 30001 | LLM（DeepSeek）调用失败/超时 |
 | 30002 | 向量化失败 |
 | 30003 | 解析失败（损坏文件/格式不支持） |
+| 30004 | 重排打分失败（bge_reranker，语义区别于向量化失败 30002） |
 | 21001 | 兜底：反思达到上限仍未找到可靠答案 |
 | 21002 | 全局请求超时 |
 | 43001 | 系统繁忙（并发查询信号量耗尽/超时，V5.1） |
@@ -1034,7 +1037,7 @@ V1.0 发布标准已达成：pytest 全绿（`-m "not integration"`，293 项，
 #### 13.11.3 拓展性规范（预留扩展点，禁止封闭实现）
 
 - **热切换延续**：✅ 已实现——`/api/plugins/switch` 运行期换 provider（校验/重建/原子替换/回滚），P3 新增 provider 继续遵守。
-- **事件/增量预留**：✅ 部分——KbStore `on_kb_changed` 钩子已留；上传→索引/文档变更→缓存失效的显式事件钩子尚未接入（BM25 缓存当前按文档数隐式失效）。
+- **事件/增量预留**：✅ 部分——KbStore `on_kb_changed` 钩子已留；文档变更→缓存失效已由 `mutation_epoch`（add_chunks/delete_document 递增）覆盖，BM25/父块缓存按 epoch 显式失效（2026-08-16 核实）；通用事件总线留待增量索引需求。
 - **API 版本化**：⚠️ 未启用——当前无破坏性变更；一旦出现，新端点挂 `/api/v1` + 兼容层。
 - **多租户扩展点**：✅ `user→kb` 鉴权映射做成接口（`app/services/rbac.py`，默认全放；注入 `user_kb_map` 即收窄）。
 - **指标可插拔**：⚠️ 指标在 rageval 内实现（MRR/NDCG 未注册化）；未来扩展时按注册式改造。
@@ -1090,9 +1093,10 @@ V1.0 发布标准已达成：pytest 全绿（`-m "not integration"`，293 项，
 |---|---|---|
 | 团队模式启用 | 代码就绪且**当前部署已启用**（V5.1） | RBAC 深度 C 扩展（文档级/角色矩阵）：12.3 续 |
 | RBAC 拦截 | 已接线（V5.1：Authorizer + kb owner/scope） | 文档级权限/多角色矩阵（12.3 深度 C 续） |
+| 元数据富化（section/date） | ✅ 已交付（2026-08-16，T5）：md/txt/docx/pdf 章节标题提取→Chunk.metadata.section；pdf/docx date；支持 `filters={"metadata":{"section":...}}` | 已完结 |
 | 13.10 P3 包（OCR/表格/混合分块/多 embedding/多 LLM） | 规格已立 | 用户决策 + 13.1 度量协议验证 |
 | 契约同步自动化（openapi→TS） | 手写中 | 接口变更频繁或前端规模扩大时 |
-| 事件钩子（文档变更→缓存失效） | 仅 KbStore 钩子 | 增量索引/多端同步需求出现时 |
+| 事件钩子（文档变更→缓存失效） | ✅ 已覆盖（2026-08-16）：`mutation_epoch` 在 add_chunks/delete_document 递增，BM25 缓存（hybrid_rrf）与父块缓存（orchestration）均按 epoch 失效；通用事件总线留待增量索引需求 | 增量索引/多端同步需求出现时 |
 | CI 基线门禁 | 人工对比 | 接 CI 时纳入 |
 | 会话持久化/流式输出 | 未做（D 组评估结论） | 产品明确要求时单独立项 |
 | 发布打包 | 前端壳可打包（`electron-builder --mac dmg`）；**Python 运行时捆绑未做** | 正式发布前做捆绑决策 |
@@ -1102,6 +1106,51 @@ V1.0 发布标准已达成：pytest 全绿（`-m "not integration"`，293 项，
 - 任何实现变更后，更新第 4.2（schema）、3.10（provider 状态）、13.11（安全/规范状态）与 14.3（指标）对应小节；
 - 每完成一个里程碑执行 `make eval` 存档并与上一份基线对比（13.1 硬要求）；
 - 新增适配器/接口时必须先改 `core/interfaces.py` + `core/domain.py`（附录 A 第 1 条）。
+
+---
+
+## 第 15 章 已知边界与演进路线（2026-08-16 立档）
+
+### 15.1 当前定位（如实声明）
+
+本项目当前为 **Iterative / Self-Correcting RAG**（检索侧自我修正循环），而非完整 Agentic：
+
+- 编排循环（`app/services/orchestration.py` `run()`）：多路检索 → 精排 → 评估 →（通过则生成 / 未通过则改写或换路再检索）。
+- **无**规划器、**无**工具调用注册表、**无**"自主决定何时检索/调外部 API"。
+- "Agentic"命名偏包装，对外口径须按本节省描述澄清。
+
+### 15.2 输入格式边界
+
+| 格式 | 状态 |
+|---|---|
+| PDF / Word(.docx) / Excel(.xlsx) / PPT(.pptx) / Markdown / 文本 | ✅ 已支持（`parser/` 注册表分发，5.1） |
+| HTML / 邮件(.eml/.msg) | ✅ 已支持（标准库实现，零新增依赖） |
+| 图片 OCR（扫描件 PDF / png/jpg） | ⏳ 预留接口 `_parse_ocr`（默认抛错），需接引擎（paddleocr/pytesseract）+ 配置开关（13.10 P3） |
+
+### 15.3 安全现状三层
+
+| 层 | 现状 |
+|---|---|
+| 解析安全 | ✅ 魔数校验 + zip 炸弹防御（`parser/__init__.py`，S2） |
+| 提示注入 | ✅ 生成阶段 SYSTEM_PROMPT 约束（S4）+ **入库侧扫描 `adapters/injection_scanner.py`（P-C）**：默认 audit（命中记日志 + metadata 标记），可配 reject（40002 拒收）；误杀白名单可配 |
+| 内容审核 | ✅ `adapters/content_moderation/`（P-C）：内置可编辑词表 `configs/moderation_keywords.csv`（缺失/损坏兜底内置最小词表），`moderation.enabled=false` 默认关；reject（40003 拒收）/ flag（仅标记 metadata） |
+
+### 15.4 演进路线（分期）
+
+| 期 | 内容 | 状态 |
+|---|---|---|
+| P-A | 数据清洗层 `adapters/cleaner/`（归一/去噪/段落 simhash 去重/质量过滤），`cleaner.enabled=false` 默认关 | ✅ 已交付（15.5） |
+| P-B | 解析增强：PDF 表格保真（find_tables → Markdown）、PARSERS 注册表、HTML/EML 格式、OCR 预留接口 | ✅ 已交付（15.5） |
+| P-C | 入库安全：提示注入扫描（默认审计标记、可选拦截）+ 内容审核层（内置可编辑词表，默认关） | ✅ 已交付（开发指令 01） |
+| P-D | 真 Agentic：**结构化 Agent**（工具注册表 + 规划器，复用现有组件为工具），单独立项，需 `make eval` 基线验证不回退 | 📋 规划 |
+
+### 15.5 决策记录
+
+- **清洗/处理层架构**：设 `adapters/cleaner/` 适配器层（与 retriever/reranker/detector 同级），编排仍留在 `ingestion.py` pipeline，不引入独立"数据处理层"（避免过度设计）。
+- **OCR 引擎**：本轮仅预留接口不接引擎（13.10 P3 规格：默认关、懒加载）；引擎决策另行评估。
+- **Agentic 方向**：结构化 Agent（非 ReAct 文本循环）。
+- **内容审核规则**：内置可编辑中文词表 csv + 配置开关（默认关）。
+- 清洗/新格式均默认关闭或向后兼容：`cleaner.enabled=false` 时 `ingestion.py` 行为与旧版完全一致。
 
 ---
 

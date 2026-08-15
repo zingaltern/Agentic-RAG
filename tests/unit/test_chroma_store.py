@@ -92,6 +92,31 @@ def test_drop_collection(store, emb):
     assert store.count("kb") == 0
 
 
+def test_drop_collection_timeout_returns_false_without_blocking(store, monkeypatch):
+    """C8：超时路径必须返回 False 且 shutdown(wait=False)——不得在 __exit__ 继续等待挂死任务。"""
+    import concurrent.futures as cf
+
+    class _FakeFuture:
+        def result(self, timeout=None):
+            raise cf.TimeoutError("模拟挂死")
+
+    class _FakeExecutor:
+        def __init__(self, max_workers=1):
+            self.wait_on_shutdown = None
+
+        def submit(self, fn, *args, **kwargs):
+            return _FakeFuture()
+
+        def shutdown(self, wait=True):
+            self.wait_on_shutdown = wait
+
+    fake = _FakeExecutor()
+    monkeypatch.setattr(cf, "ThreadPoolExecutor", lambda **kw: fake)
+    ok = store.drop_collection("kb")
+    assert ok is False
+    assert fake.wait_on_shutdown is False, "超时后 shutdown 必须 wait=False，否则仍会阻塞"
+
+
 def test_none_metadata_stripped(store, emb):
     """Chroma 不允许 metadata=None，入库前剔除。"""
     chunks = [_chunk("c1", "内容", page=None, author=None, kind="pdf")]
@@ -125,3 +150,14 @@ def test_get_document_id_by_hash(store, emb):
 def test_search_empty_collection(store, emb):
     hits = store.search(emb.embed_query("什么也没有"), k=3)
     assert hits == []
+
+
+def test_mutation_epoch_bumps_on_change(store, emb):
+    """T5/4.4：语料变更纪元——add_chunks/delete_document 递增，供 BM25/父块缓存失效检测。"""
+    assert store.mutation_epoch("kb") == 0
+    chunks = [_chunk("c1", "年假申请流程", source="a.md")]
+    store.add_chunks(zip(chunks, emb.embed_documents(["年假申请流程"])))
+    epoch_after_add = store.mutation_epoch("kb")
+    assert epoch_after_add >= 1, "入库后 epoch 必须递增"
+    store.delete_document("doc_x")
+    assert store.mutation_epoch("kb") > epoch_after_add, "删除后 epoch 必须递增（缓存失效）"

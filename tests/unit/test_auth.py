@@ -292,7 +292,7 @@ def test_user_private_kb_isolation(tmp_path, isolated_stores):
         kbs2 = client.get("/api/kbs", headers=_auth_headers(user2)).json()
         assert not any(k["kb_id"] == priv_id for k in kbs2["data"]["kbs"])
         assert client.post("/api/query", json={"query": "年假", "kb_id": priv_id},
-                           headers=_auth_headers(user2)).json()["code"] in (40001, 40401)
+                           headers=_auth_headers(user2)).json()["code"] == 40101
         # admin 可见可管理（管理视角）
         kbs_admin = client.get("/api/kbs", headers=_auth_headers(admin)).json()
         assert any(k["kb_id"] == priv_id for k in kbs_admin["data"]["kbs"])
@@ -327,6 +327,71 @@ def test_user_management_admin_only(tmp_path, isolated_stores):
         me = client.get("/api/auth/me", headers=_auth_headers(admin)).json()["data"]["user"]
         assert client.delete(f"/api/users/{me['user_id']}",
                              headers=_auth_headers(admin)).json()["code"] == 40001
+
+
+def _wait_job_status(client, job_id: str, headers: dict | None = None,
+                     timeout: float = 15) -> str:
+    import time
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        body = client.get(f"/api/jobs/{job_id}", headers=headers or {}).json()
+        if body["code"] == 0 and body["data"]["status"] in ("success", "failed"):
+            return body["data"]["status"]
+        time.sleep(0.05)
+    return "timeout"
+
+
+def test_jobs_scope_enforced_for_private_kb(tmp_path, isolated_stores):
+    """S5：私有库的 job 对非 owner 不可见（40401 不泄露存在性）；owner/admin 可见。"""
+    app = _app(tmp_path, auth_enabled=True, isolated_stores=isolated_stores)
+    with TestClient(app) as client:
+        admin = _login(client, "admin", "admin123")
+        for username in ("u1", "u2"):
+            assert client.post("/api/users", json={"username": username, "password": f"{username}pass123",
+                                                   "role": "user"},
+                               headers=_auth_headers(admin)).json()["code"] == 0
+        token_u1 = _login(client, "u1", "u1pass123")
+        token_u2 = _login(client, "u2", "u2pass123")
+        kb = client.post("/api/kbs", json={"name": "private-docs", "scope": "private"},
+                         headers=_auth_headers(token_u1)).json()["data"]
+        kb_id = kb["kb_id"]
+        up = client.post("/api/documents/upload",
+                         files={"file": ("a.md", "# x\n私有内容".encode("utf-8"), "text/markdown")},
+                         data={"kb_id": kb_id}, headers=_auth_headers(token_u1)).json()
+        assert up["code"] == 0
+        job_id = up["data"]["job_id"]
+        assert _wait_job_status(client, job_id, headers=_auth_headers(token_u1)) == "success"
+        assert client.get(f"/api/jobs/{job_id}", headers=_auth_headers(admin)).json()["code"] == 0
+        assert client.get(f"/api/jobs/{job_id}", headers=_auth_headers(token_u1)).json()["code"] == 0
+        body = client.get(f"/api/jobs/{job_id}", headers=_auth_headers(token_u2)).json()
+        assert body["code"] == 40401, "越权查询 job 必须 40401（不泄露存在性）"
+
+
+def test_delete_user_cascades_private_kbs(tmp_path, isolated_stores):
+    """S6：删除用户必须级联清理其私有库（kb 映射 + 文档索引）。"""
+    app = _app(tmp_path, auth_enabled=True, isolated_stores=isolated_stores)
+    with TestClient(app) as client:
+        admin = _login(client, "admin", "admin123")
+        assert client.post("/api/users", json={"username": "u1", "password": "u1pass123", "role": "user"},
+                           headers=_auth_headers(admin)).json()["code"] == 0
+        token_u1 = _login(client, "u1", "u1pass123")
+        kb = client.post("/api/kbs", json={"name": "priv", "scope": "private"},
+                         headers=_auth_headers(token_u1)).json()["data"]
+        kb_id = kb["kb_id"]
+        up = client.post("/api/documents/upload",
+                         files={"file": ("a.md", "# x\n私有内容".encode("utf-8"), "text/markdown")},
+                         data={"kb_id": kb_id}, headers=_auth_headers(token_u1)).json()
+        assert up["code"] == 0
+        assert _wait_job_status(client, up["data"]["job_id"],
+                                headers=_auth_headers(token_u1)) == "success"
+        listing = client.get("/api/users", headers=_auth_headers(admin)).json()
+        u1_id = next(u["user_id"] for u in listing["data"]["users"] if u["username"] == "u1")
+        assert client.delete(f"/api/users/{u1_id}", headers=_auth_headers(admin)).json()["code"] == 0
+        kbs_after = client.get("/api/kbs", headers=_auth_headers(admin)).json()["data"]["kbs"]
+        assert not any(k["kb_id"] == kb_id for k in kbs_after), "私有库必须随用户删除级联清理"
+        docs_after = client.get("/api/documents", headers=_auth_headers(admin)).json()["data"]
+        assert all(d["kb_id"] != kb_id for d in docs_after["items"]), "文档索引必须清理"
 
 
 def test_users_import_csv_batch(tmp_path, isolated_stores):

@@ -1,0 +1,56 @@
+# CI 基线门禁（4.5）：PR/推送跑单测（覆盖率门禁 >=80%）+ 前端构建 + 可选评测对比
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: 单测 + 覆盖率门禁（fail_under=80）
+        run: make test
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: 前端构建
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+  eval:
+    runs-on: ubuntu-latest
+    continue-on-error: true   # 评测对比失败留痕，不阻断 PR
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: 安装依赖 + 评测（进程内，首次下载嵌入/重排模型）
+        run: |
+          pip install -e ".[dev]"
+          HF_ENDPOINT=https://hf-mirror.com make eval
+      - name: 上传评测报告
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-report
+          path: reports/

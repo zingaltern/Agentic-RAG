@@ -54,7 +54,7 @@ def test_load_real_settings_defaults():
     assert cfg.llm.provider == "deepseek"
     assert cfg.llm.model == "deepseek-chat"
     assert cfg.orchestration.max_reflection_iterations == 3
-    assert cfg.ingestion.allowed_extensions == ["pdf", "docx", "xlsx", "pptx", "md", "txt"]
+    assert cfg.ingestion.allowed_extensions == ["pdf", "docx", "xlsx", "pptx", "md", "txt", "html", "htm", "eml", "msg"]
 
 
 def test_chunker_section_defaults():

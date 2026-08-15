@@ -7,11 +7,14 @@ import pytest
 
 from app.core.errors import (
     AuthError,
+    ContentModerationError,
+    InjectionError,
     EmbeddingError,
     InternalError,
     LLMUnavailableError,
     NotFoundError,
     ParseError,
+    RerankError,
     ReflectionLimitError,
     RequestTimeoutError,
     SystemConfigError,
@@ -21,6 +24,7 @@ from app.core.interfaces import (
     Evaluator,
     HallucinationDetector,
     LLM,
+    Cleaner,
     QueryRewriter,
     Reranker,
     Retriever,
@@ -30,7 +34,7 @@ from app.core.interfaces import (
 from app.core.registry import PluginRegistry
 
 ABC_INTERFACES = (VectorEngine, VectorStore, Retriever, Reranker,
-                  Evaluator, QueryRewriter, HallucinationDetector, LLM)
+                  Evaluator, QueryRewriter, Cleaner, HallucinationDetector, LLM)
 
 
 def test_interfaces_are_abc():
@@ -76,6 +80,10 @@ def test_detector_contract():
     assert _params(HallucinationDetector.detect) == ["answer", "context"]
 
 
+def test_cleaner_contract():
+    assert _params(Cleaner.clean) == ["text"]
+
+
 def test_llm_contract():
     params = inspect.signature(LLM.chat).parameters
     assert list(params) == ["self", "messages", "temperature", "max_tokens"]
@@ -103,11 +111,14 @@ def test_error_code_table():
     table = {
         0: "成功",
         40001: ValidationError,
+        40002: InjectionError,           # P-C：提示注入拒收
+        40003: ContentModerationError,   # P-C：内容审核拒收
         40101: AuthError,
         40401: NotFoundError,
         30001: LLMUnavailableError,
         30002: EmbeddingError,
         30003: ParseError,
+        30004: RerankError,
         21001: ReflectionLimitError,
         21002: RequestTimeoutError,
         50001: InternalError,

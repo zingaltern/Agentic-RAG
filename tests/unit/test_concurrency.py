@@ -135,6 +135,44 @@ def test_c2_filter_cache_keys_isolated():
     assert store.build_calls == 2, "同键命中缓存不再构建"
 
 
+class _EpochStore(_CountingStore):
+    """支持 mutation_epoch 的存储：add/delete 递增纪元（count 可能不变）。"""
+
+    def __init__(self, chunks):
+        super().__init__(chunks)
+        self._epoch = 0
+
+    def mutation_epoch(self, collection="kb"):
+        return self._epoch
+
+    def add_chunks(self, chunks, collection="kb"):
+        self.chunks.extend(chunks)
+        self._epoch += 1
+
+    def delete_chunk(self, chunk_id):
+        self.chunks = [c for c in self.chunks if c.chunk_id != chunk_id]
+        self._epoch += 1
+
+
+def test_c2_epoch_invalidation_rebuilds_after_delete_plus_add():
+    """C2：删 N 块 + 增 N 块（count 不变）→ epoch 变化强制重建缓存，已删文档不得残留可检索。"""
+    store = _EpochStore([_chunk("c1", "年假申请流程"), _chunk("c2", "IT 账号开通"), _chunk("c3", "差旅报销")])
+    retriever = HybridRRFRetriever(embedding=_StubEmbedding2(), vector_store=store,
+                                   top_k=5, candidates=10, rr_fused_k=60)
+    retriever.retrieve("年假", k=5, collection="kb")
+    assert store.build_calls == 1
+    store.delete_chunk("c1")                                   # 删 1 块
+    store.add_chunks([_chunk("c4", "产品支持 MySQL 数据源")])   # 增 1 块 → count 回到 3
+    assert store.count("kb") == 3, "count 不变，正是陈旧缓存的触发条件"
+    retriever.retrieve("年假", k=5, collection="kb")
+    assert store.build_calls == 2, "count 相同但 epoch 变化 → 缓存必须重建"
+    import json as _json
+
+    key = _json.dumps(["kb", []], ensure_ascii=False, sort_keys=True)
+    _, _, _, corpus = retriever._bm25_cache[key]
+    assert all(c.chunk_id != "c1" for c in corpus), "已删除块不得残留在 BM25 语料中"
+
+
 # -- C3：并发信号量 43001 --------------------------------------------------------------
 
 def _app_no_components(tmp_path):
@@ -215,6 +253,28 @@ def test_c4_rate_limit_config_parses():
     assert config.api.query_rate_per_min == 20
     assert config.api.upload_rate_per_min == 10
     assert config.orchestration.max_concurrent_queries == 4
+
+
+def test_c6_zero_value_configs_rejected():
+    """C6：0/负数配置必须抛 SystemConfigError（0 会让 queue.Queue 无界/限速永久拒绝）。"""
+    from app.core.errors import SystemConfigError
+
+    config = load_config()
+    config.api.query_rate_per_min = 0
+    with pytest.raises(SystemConfigError):
+        config.model_validate(config.model_dump())
+    config.api.query_rate_per_min = 20
+    config.api.upload_rate_per_min = 0
+    with pytest.raises(SystemConfigError):
+        config.model_validate(config.model_dump())
+    config.api.upload_rate_per_min = 10
+    config.ingestion.max_queue_size = 0
+    with pytest.raises(SystemConfigError):
+        config.model_validate(config.model_dump())
+    config.ingestion.max_queue_size = 64
+    config.orchestration.max_concurrent_queries = 0
+    with pytest.raises(SystemConfigError):
+        config.model_validate(config.model_dump())
 
 
 # -- C5：有界入库队列 -----------------------------------------------------------------
