@@ -1,22 +1,123 @@
+/* ============ Agentic RAG · 暖色主题（奶油白 + 珊瑚橙） ============ */
 * { box-sizing: border-box; }
 html, body, #app { height: 100%; margin: 0; }
 body {
   font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
-  background: #f5f6f8; color: #1f2937;
+  background: #faf6f0; color: #2d2a26;
+  -webkit-font-smoothing: antialiased;
 }
 .layout { height: 100%; }
-.aside { background: #fff; border-right: 1px solid #e5e7eb; display: flex; flex-direction: column; }
-.logo { font-size: 18px; font-weight: 600; padding: 18px 16px; color: #2563eb; }
-.menu { border-right: none; flex: 1; }
-.footer-note { padding: 12px 16px; font-size: 12px; color: #9ca3af; }
-.main { overflow: auto; }
-.card { background: #fff; border: 1px solid #e5e7eb; border-radius: 10px; padding: 16px 20px; margin-bottom: 16px; }
-.card h2 { font-size: 15px; margin: 0 0 12px; }
-.row { display: flex; gap: 8px; align-items: center; margin: 8px 0; flex-wrap: wrap; }
-.muted { color: #9ca3af; font-size: 12px; }
-.answer-text { white-space: pre-wrap; line-height: 1.7; }
-.answer-box { background: #f0f7ff; border: 1px solid #bfdbfe; border-radius: 8px; padding: 12px 14px; margin: 10px 0; }
-.cite { color: #2563eb; font-weight: 600; }
-.error-bar { position: fixed; top: 12px; right: 12px; width: 360px; z-index: 3000; }
-.error-bar-item { margin-bottom: 8px; }
-.trace-line { font-size: 12px; color: #9ca3af; word-break: break-all; }
+
+/* ---------- Element Plus 主题变量（全局主色 → 珊瑚橙） ---------- */
+:root {
+  --el-color-primary: #ff7a45;
+  --el-color-primary-light-3: #ff9a70;
+  --el-color-primary-light-5: #ffb897;
+  --el-color-primary-light-7: #ffd3be;
+  --el-color-primary-light-8: #ffe1d2;
+  --el-color-primary-light-9: #fff0e8;
+  --el-color-primary-dark-2: #e66a3a;
+  --el-color-danger: #e05c4a;
+  --el-color-danger-light-3: #ea8779;
+  --el-color-danger-light-5: #f2ada3;
+  --el-color-danger-light-7: #f9d3cd;
+  --el-color-danger-light-9: #fdf0ed;
+  --el-color-danger-dark-2: #c74f3f;
+  --el-border-radius-base: 10px;
+  --el-border-radius-small: 8px;
+  --el-text-color-primary: #2d2a26;
+  --el-text-color-regular: #4a453f;
+}
+
+/* ---------- 侧边栏（奶油白浮起 + 分隔，Notion 式层次） ---------- */
+.aside {
+  background: #fffdfa;
+  border-right: 1px solid #f0e6da;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 6px 0 24px rgba(150, 105, 60, .06);
+  z-index: 10;
+}
+.logo {
+  display: flex; align-items: center; gap: 10px;
+  font-size: 18px; font-weight: 700; letter-spacing: .3px;
+  padding: 22px 18px 18px; color: #2d2a26;
+}
+.logo .logo-icon {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 36px; height: 36px; border-radius: 12px;
+  background: linear-gradient(135deg, #ff9a70, #ff7a45);
+  color: #fff; font-size: 18px;
+  box-shadow: 0 6px 14px rgba(255, 122, 69, .35);
+}
+.logo .logo-name { font-size: 16px; line-height: 1.2; }
+.logo .logo-sub { font-size: 10px; color: #b3a694; font-weight: 400; letter-spacing: 1px; }
+.menu { border-right: none; flex: 1; padding: 8px 12px; }
+.menu .el-menu { background: transparent; border-right: none; }
+.menu .el-menu-item {
+  color: #8c857e; border-radius: 12px; margin: 5px 0;
+  height: 46px; line-height: 46px;
+  transition: all .2s ease;
+}
+.menu .el-menu-item:hover { background: #fbf1e7; color: #ff7a45; }
+.menu .el-menu-item.is-active {
+  background: linear-gradient(135deg, #fff0e8, #ffe3d2);
+  color: #ff6b33; font-weight: 600;
+  box-shadow: inset 0 0 0 1px rgba(255, 122, 69, .18);
+}
+.footer-note {
+  padding: 14px 18px; font-size: 12px; color: #b3a694;
+  border-top: 1px solid #f5ecdf;
+}
+.footer-note a { color: #ff7a45; text-decoration: none; }
+.footer-note a:hover { text-decoration: underline; }
+
+/* ---------- 主区 ---------- */
+.main { overflow: auto; padding: 22px 24px; background: #faf6f0; }
+.card {
+  background: #fff; border: 1px solid #f3eadc; border-radius: 20px;
+  padding: 20px 24px; margin-bottom: 18px;
+  box-shadow: 0 8px 24px rgba(150, 105, 60, .07);
+  transition: box-shadow .25s ease, transform .25s ease;
+}
+.card:hover { box-shadow: 0 14px 34px rgba(150, 105, 60, .12); transform: translateY(-2px); }
+.card-title {
+  display: flex; align-items: center; gap: 9px;
+  font-size: 15px; font-weight: 700; margin: 0 0 14px; color: #2d2a26;
+}
+.card-title .title-icon {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px; border-radius: 9px; color: #fff;
+  background: linear-gradient(135deg, #ff9a70, #ff7a45);
+  font-size: 15px; flex: none;
+  box-shadow: 0 4px 10px rgba(255, 122, 69, .28);
+}
+.row { display: flex; gap: 10px; align-items: center; margin: 10px 0; flex-wrap: wrap; }
+.muted { color: #a89c8c; font-size: 12px; }
+.answer-text { white-space: pre-wrap; line-height: 1.75; }
+.answer-box {
+  background: linear-gradient(180deg, #fff7f0, #fff3e8);
+  border: 1px solid #ffe0c9; border-radius: 14px; padding: 14px 16px; margin: 12px 0;
+}
+.cite { color: #ff7a45; font-weight: 600; }
+
+/* ---------- 表格 ---------- */
+.el-table { --el-table-border-color: #f3eadc; border-radius: 14px; overflow: hidden; }
+.el-table th.el-table__cell { background: #fbf5ee !important; color: #6b5f50; font-weight: 600; }
+
+/* ---------- 控件：胶囊按钮 + 大圆角输入 ---------- */
+.el-button { border-radius: 999px; font-weight: 500; }
+.el-button--primary { box-shadow: 0 4px 12px rgba(255, 122, 69, .28); }
+.el-button--primary:hover { box-shadow: 0 6px 18px rgba(255, 122, 69, .38); }
+.el-input__wrapper, .el-textarea__inner { border-radius: 12px; }
+.el-select__wrapper { border-radius: 12px; }
+.el-dialog { border-radius: 20px; }
+.el-collapse-item__header { border-radius: 10px; }
+
+/* ---------- 滚动条 ---------- */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb { background: #e6d8c6; border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: #d8c6af; }
+::-webkit-scrollbar-track { background: transparent; }
+
+.trace-line { font-size: 12px; color: #a89c8c; word-break: break-all; }

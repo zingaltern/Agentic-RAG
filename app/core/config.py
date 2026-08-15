@@ -37,7 +37,9 @@ ALLOWED_PROVIDERS: dict[str, set[str]] = {
 _ENV_ALIASES: dict[str, tuple[str, ...]] = {
     "DEEPSEEK_API_KEY": ("llm", "api_key"),   # 3.8：key 只走环境变量
     "LOG_LEVEL": ("logging", "level"),        # 4.1 示例 RAG_LOG_LEVEL
-    "API_KEY": ("api", "api_key"),            # S1（13.11.1）：RAG_API_KEY 注入，禁止写盘
+    "ADMIN_USER": ("auth", "admin_user"),     # V5.1：首管理员引导（auth_enabled=true 且用户表为空时）
+    "ADMIN_PASSWORD": ("auth", "admin_password"),
+    "AUTH_SECRET": ("auth", "secret"),        # V5.1：Token 签名密钥（否则运行时生成 data/secret.key）
 }
 
 DEFAULT_SETTINGS_PATH = "configs/settings.yaml"
@@ -47,10 +49,17 @@ DOTENV_PATH = ".env"
 class ApiConfig(BaseModel):
     host: str = "127.0.0.1"          # S2（13.11.1）：默认仅本机监听，0.0.0.0 需显式配置
     port: int = 8000
-    auth_enabled: bool = False       # S1（13.11.1）：true 时启用 X-API-Key 认证
+    auth_enabled: bool = False       # S1（13.11.1）：true 时启用密码登录 + Token 认证
     cors_origins: list[str] = []     # 13.8：dev 跨域白名单（如 ["http://localhost:5173"]）
-    # api_key 只允许环境变量注入（RAG_API_KEY），禁止写入文件/配置（S1）
-    api_key: str | None = None
+
+
+class AuthConfig(BaseModel):
+    """V5.1 团队模式：Token 有效期与首管理员引导（密钥只走环境变量/运行时生成）。"""
+
+    token_ttl_days: int = 7
+    admin_user: str | None = None
+    admin_password: str | None = None
+    secret: str | None = None        # RAG_AUTH_SECRET；未配置则运行时生成 data/secret.key（0o600）
 
 
 class FrontendConfig(BaseModel):
@@ -138,6 +147,7 @@ class IngestionConfig(BaseModel):
     max_file_size_mb: int = 50
     allowed_extensions: list[str] = ["pdf", "docx", "xlsx", "pptx", "md", "txt"]
     embed_batch_size: int = 64
+    desensitize_enabled: bool = False   # S5：敏感数据（身份证/手机号/银行卡）脱敏开关
 
 
 class LoggingConfig(BaseModel):
@@ -145,6 +155,18 @@ class LoggingConfig(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
     level: str = "info"
     json_enabled: bool = Field(default=True, validation_alias="json")
+
+
+class DocumentsConfig(BaseModel):
+    """文档元数据持久化（重启不丢；测试可注入临时路径）。"""
+
+    persist_file: str = "data/documents.json"
+
+
+class KbsConfig(BaseModel):
+    """知识库元数据持久化（测试可注入临时路径）。"""
+
+    persist_file: str = "data/kb.json"
 
 
 class SystemConfig(BaseSettings):
@@ -163,6 +185,7 @@ class SystemConfig(BaseSettings):
 
     env: str = "dev"
     api: ApiConfig = ApiConfig()
+    auth: AuthConfig = AuthConfig()
     frontend: FrontendConfig = FrontendConfig()
     embedding: EmbeddingConfig = EmbeddingConfig()
     chunker: ChunkerConfig = ChunkerConfig()
@@ -176,6 +199,8 @@ class SystemConfig(BaseSettings):
     orchestration: OrchestrationConfig = OrchestrationConfig()
     ingestion: IngestionConfig = IngestionConfig()
     logging: LoggingConfig = LoggingConfig()
+    documents: DocumentsConfig = DocumentsConfig()
+    kbs: KbsConfig = KbsConfig()
 
     @model_validator(mode="after")
     def _validate_providers(self) -> "SystemConfig":

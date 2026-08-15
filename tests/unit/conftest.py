@@ -28,11 +28,16 @@ def _hermetic_env(monkeypatch):
 
 
 @pytest.fixture(scope="session")
-def client() -> TestClient:
+def client(tmp_path_factory) -> TestClient:
     """契约/UI 冒烟用应用（components=False：不加载嵌入模型，健康检查为 not_loaded）。"""
     from app.application import create_app
+    from app.core.config import load_config
 
-    app = create_app(components=False)
+    config = load_config()
+    persist = tmp_path_factory.mktemp("persist")
+    config.documents.persist_file = str(persist / "documents.json")
+    config.kbs.persist_file = str(persist / "kb.json")
+    app = create_app(config=config, components=False)
     with TestClient(app) as c:
         yield c
 
@@ -43,3 +48,17 @@ def stub_embedding():
     from tests.unit.fakes import StubEmbedding
 
     return StubEmbedding(dimension=512)
+
+
+@pytest.fixture()
+def isolated_stores(tmp_path):
+    """V5.1：持久化存储隔离夹具（避免真实 data/*.json 污染测试）。"""
+    from app.services.documents_store import DocumentsStore
+    from app.services.kb_store import KbStore
+    from app.services.user_store import UserStore
+
+    return {
+        "kbs": KbStore(persist_file=str(tmp_path / "kb.json")),
+        "users": UserStore(persist_file=str(tmp_path / "users.json")),
+        "documents": DocumentsStore(persist_file=str(tmp_path / "documents.json")),
+    }

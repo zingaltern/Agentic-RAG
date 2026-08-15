@@ -11,20 +11,69 @@
 
 const { app, BrowserWindow, dialog, ipcMain } = require('electron')
 const path = require('path')
+const fs = require('fs')
 const bootstrap = require('./bootstrap.cjs')
 
-const PROJECT_ROOT = path.join(__dirname, '..', '..')        // 项目根（cwd 用）
-const PYTHON_BIN = path.join(PROJECT_ROOT, '.venv', 'bin', 'python')
+// 打包模式（.app/.dmg，Python 运行时暂不捆绑，§13.7）：项目根经 RAG_PROJECT_DIR 指定；
+// dev 模式：项目根 = 仓库根（electron 目录上两级）。
+function resolveProjectPaths() {
+  if (app.isPackaged) {
+    const dir = process.env.RAG_PROJECT_DIR
+    if (!dir) return null
+    const root = path.resolve(dir)
+    return { root, python: path.join(root, '.venv', 'bin', 'python') }
+  }
+  const root = path.join(__dirname, '..', '..')
+  return { root, python: path.join(root, '.venv', 'bin', 'python') }
+}
 
 let win = null
 let backend = null
+let activeUrl = null
+let activeUserDataDir = ''
 
 function shutdown() {
   bootstrap.killBackend(backend)
   backend = null
 }
 
+function registerIpc() {
+  ipcMain.on('set-external-base', (_e, url) => bootstrap.writeExternalBase(activeUserDataDir, url))
+  ipcMain.handle('get-external-base', () => bootstrap.readExternalBase(activeUserDataDir))
+}
+registerIpc()
+
+function createSplash() {
+  const splash = new BrowserWindow({
+    width: 380,
+    height: 220,
+    frame: false,
+    resizable: false,
+    show: true,
+    alwaysOnTop: true,
+    center: true,
+    webPreferences: { sandbox: true },
+  })
+  splash.loadURL(
+    'data:text/html;charset=utf-8,' +
+      encodeURIComponent(`<!doctype html><html lang="zh"><head><meta charset="utf-8">
+<style>
+  html,body{margin:0;height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;background:linear-gradient(135deg,#fff7f0,#ffe9da);font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;color:#7a4a2a}
+  .dot{width:9px;height:9px;border-radius:50%;background:#ff7a45;margin:0 4px;animation:blink 1.2s infinite}
+  .dot:nth-child(2){animation-delay:.2s}.dot:nth-child(3){animation-delay:.4s}
+  @keyframes blink{0%,80%,100%{opacity:.25}40%{opacity:1}}
+  p{margin:14px 0 0;font-size:13px;color:#a3764f}
+</style></head><body>
+<div style="display:flex"><span class="dot"></span><span class="dot"></span><span class="dot"></span></div>
+<p>正在启动知识库服务…</p>
+</body></html>`),
+  )
+  return splash
+}
+
 async function openWindow(url, userDataDir) {
+  activeUrl = url
+  activeUserDataDir = userDataDir
   win = new BrowserWindow({
     width: 1280,
     height: 860,
@@ -39,9 +88,11 @@ async function openWindow(url, userDataDir) {
   })
   win.once('ready-to-show', () => win.show())
   await win.loadURL(url)                        // S8：仅 loopback/自托管地址
-  win.on('closed', () => { win = null; shutdown() })
-  ipcMain.on('set-external-base', (_e, url) => bootstrap.writeExternalBase(userDataDir, url))
-  ipcMain.handle('get-external-base', () => bootstrap.readExternalBase(userDataDir))
+  win.on('closed', () => {
+    win = null
+    // macOS 惯例：关窗保留 Dock 图标与后端进程，activate 时重建窗口
+    if (process.platform !== 'darwin') shutdown()
+  })
 }
 
 async function start() {
@@ -54,6 +105,42 @@ async function start() {
     return
   }
 
+  const envPaths = resolveProjectPaths()
+  let paths = envPaths
+  if (paths === null) {
+    // 打包模式一选择：优先环境变量 → 上次记住的目录 → 首次引导（文件夹选择器）
+    let saved = null
+    try {
+      saved = bootstrap.readProjectDir(userDataDir)
+    } catch {
+      saved = null
+    }
+    if (!saved) {
+      const picked = await dialog.showOpenDialog({
+        title: '选择 Agentic-RAG 项目目录（含 .venv 的仓库根）',
+        properties: ['openDirectory'],
+        defaultPath: app.getPath('home'),
+      })
+      if (picked.canceled || !picked.filePaths.length) {
+        app.quit()
+        return
+      }
+      saved = picked.filePaths[0]
+      if (!fs.existsSync(path.join(saved, '.venv', 'bin', 'python'))) {
+        dialog.showErrorBox('目录无效', `所选目录未包含 ${path.join(saved, '.venv', 'bin', 'python')}\n\n请选择项目根再试，或在设置页配置「外部后端」。`)
+        app.quit()
+        return
+      }
+      try {
+        bootstrap.writeProjectDir(userDataDir, saved)
+      } catch {
+        /* 记住失败不阻塞本次启动 */
+      }
+    }
+    paths = { root: saved, python: path.join(saved, '.venv', 'bin', 'python') }
+  }
+  const { root: PROJECT_ROOT, python: PYTHON_BIN } = paths
+
   // ① 端口探测 + 拉起
   const port = await bootstrap.findFreePort()
   if (port === null) {
@@ -61,21 +148,27 @@ async function start() {
     app.quit()
     return
   }
-  backend = bootstrap.spawnBackend(PYTHON_BIN, PROJECT_ROOT, port)
+  const backendLog = path.join(userDataDir, 'backend.log')
+  backend = bootstrap.spawnBackend(PYTHON_BIN, PROJECT_ROOT, port, backendLog)
+  const showBackendFailure = (title, detail) => {
+    const tail = bootstrap.tailBackendLog(backendLog)
+    dialog.showErrorBox(title, `${detail}\n\n——— 后端日志（最近）———\n${tail}`)
+  }
+  let exited = false
   backend.on('error', (err) => {
-    dialog.showErrorBox('后端启动失败', String(err))
+    if (!exited) { exited = true; showBackendFailure('后端启动失败', String(err)) }
     app.quit()
   })
   backend.on('exit', (code) => {
-    if (win && code !== 0) {
-      dialog.showErrorBox('后端进程退出', `uvicorn 异常退出（code=${code}）`)
-    }
+    if (code !== 0 && !exited) { exited = true; showBackendFailure('后端进程退出', `uvicorn 异常退出（code=${code}）`) }
   })
 
-  // ② 就绪轮询（带 splash 语义：窗口未显示，就绪后才 loadURL）
+  // ② 就绪轮询（splash 提示期间等待；就绪后关闭 splash 并 loadURL）
+  const splash = createSplash()
   const ready = await bootstrap.waitReady(port)
+  if (!splash.isDestroyed()) splash.close()
   if (!ready) {
-    dialog.showErrorBox('后端未就绪', `30s 内 /api/health 未返回 ok（端口 ${port}）`)
+    showBackendFailure('后端未就绪', `${bootstrap.READY_TIMEOUT_MS / 1000}s 内 /api/health 未返回 ok（端口 ${port}）`)
     shutdown()
     app.quit()
     return
@@ -84,5 +177,13 @@ async function start() {
 }
 
 app.whenReady().then(start)
-app.on('window-all-closed', () => { shutdown(); app.quit() })
+app.on('window-all-closed', () => {
+  // macOS 惯例：关闭全部窗口不退出应用（保留 Dock 图标），Cmd+Q 才退出
+  if (process.platform !== 'darwin') { shutdown(); app.quit() }
+})
+app.on('activate', () => {
+  if (process.platform === 'darwin' && BrowserWindow.getAllWindows().length === 0 && activeUrl) {
+    openWindow(activeUrl, activeUserDataDir)
+  }
+})
 app.on('before-quit', () => shutdown())

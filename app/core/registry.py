@@ -71,6 +71,7 @@ class Dependencies:
     documents: "DocumentsStore | None" = None
     pipeline: "IngestionPipeline | None" = None
     kbs: "KbStore | None" = None
+    users: "UserStore | None" = None
 
 
 def _instantiate(module: str, provider: str, cfg: dict) -> Any:
@@ -94,7 +95,9 @@ def wire(config: "SystemConfig", components: bool = True, *,
          evaluator: "Evaluator | None" = None,
          rewriter: "QueryRewriter | None" = None,
          detector: "HallucinationDetector | None" = None,
-         kbs: "KbStore | None" = None) -> Dependencies:
+         kbs: "KbStore | None" = None,
+         users: "UserStore | None" = None,
+         documents: "DocumentsStore | None" = None) -> Dependencies:
     """按 config 装配默认实现。
 
     - components=False：仅返回 config（契约/UI 冒烟测试用，不加载模型）。
@@ -144,10 +147,13 @@ def wire(config: "SystemConfig", components: bool = True, *,
     from app.services.jobs_store import JobStore
     from app.services.kb_store import DEFAULT_COLLECTION, KbStore
     from app.services.orchestration import OrchestrationService
+    from app.services.user_store import UserStore
+    from app.services.user_store import UserStore
 
     deps.jobs = JobStore()
-    deps.documents = DocumentsStore()
-    deps.kbs = kbs or KbStore()
+    deps.documents = documents if documents is not None else DocumentsStore()
+    deps.kbs = kbs if kbs is not None else KbStore()
+    deps.users = users if users is not None else UserStore()
     deps.pipeline = IngestionPipeline(
         config=config, embedding=embedding, vector_store=vector_store,
         jobs=deps.jobs, documents=deps.documents,

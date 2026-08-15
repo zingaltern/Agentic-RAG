@@ -2,6 +2,8 @@
 
 基于 FastAPI + BGE(中文嵌入) + Chroma + BM25/RRF 混合检索 + DeepSeek(LLM) 的企业知识库问答系统，带 Agentic 反思循环与幻觉检测。
 
+> **面向第一次使用的用户**：请先阅读 [产品说明书（PRODUCT_MANUAL.md）](PRODUCT_MANUAL.md)——从怎么启动、怎么上传文档到"认证与连接"该不该填，都有图文讲解。
+
 ## 快速开始
 
 ```bash
@@ -86,19 +88,31 @@ make desktop   # 依赖：.venv（make bootstrap）、frontend 依赖（make fro
 - **外部后端模式**：设置页「外部后端」填写 `127.0.0.1:port` → 保存后重启应用，不再自动拉起本地服务。
 - **打包**：`cd frontend && npx electron-builder --mac dmg`（配置在 frontend/package.json 的 build 段）。
   Python 运行时捆绑为后续演进（本次仅打包前端壳；部署机需 Python 3.11 + `.venv` 与模型缓存）。
+  打包后的 `.app` 需要项目根定位后端子进程：双击前设置
+  `launchctl setenv RAG_PROJECT_DIR /path/to/Agentic-RAG`（或终端
+  `RAG_PROJECT_DIR=/path/to/Agentic-RAG open -a AgenticRAG`），未配置时应用会弹出引导提示。
 - **安全基线（S8）**：`contextIsolation: true`、`nodeIntegration: false`、`sandbox: true`、
   仅加载 loopback/自托管地址；真实密钥只经环境变量运行时注入（RAG_DEEPSEEK_API_KEY 等）。
 
-## 认证（S1，13.11.1）
+## 认证与权限（V5.1，S1/13.11.1）
 
-- `configs/settings.yaml` 的 `api.auth_enabled: true` + 环境变量 `RAG_API_KEY`（禁止写盘/入库）启用 API Key 认证。
-- 启用后：`/api/query`、文档、kbs 等业务请求须带 `X-API-Key` 头，未带/错误 → `40101`；
-  `/api/health`、`/api/plugins/*`、`/ui` 白名单放行；响应保持 `{code,message,data}` 契约。
-- 前端：设置总览页填写并本地持久化 API Key；401 时全局提示条引导。
-- **RBAC 预留**（13.11.3）：`app/services/rbac.py` 提供 `resolve_user_kb(user_id, kb_id)` 接口
-  （默认全放，可注入 `user_kb_map` 收窄）；对接 §12.3 深度 C 时替换策略即可，路由层不改。
-- 审计（S6）：query/upload 事件含 `user_id`（`X-User-Id` 透传，缺省 anonymous）、kb_id 与回答摘要，
-  不含 key 与完整敏感文本；`trace_id` 全链路贯穿（前端设置页/问答区可查）。
+**① 个人模式（默认）**：`auth_enabled=false` 时无登录页、无鉴权，所有操作可用，行为与单用户版一致。
+
+**② 团队模式三步**（小团队共享，管理员/普通用户两级）：
+1. `configs/settings.yaml` 设 `api.auth_enabled: true`；
+2. 配置环境变量 `RAG_ADMIN_USER` / `RAG_ADMIN_PASSWORD`（首管理员引导，禁止写盘/入库）后重启；
+   也可省略（日志提示后）由部署方经 CLI 创建首管理员；
+3. 管理员在 Web「设置总览 → 用户管理」建用户（用户名/初始密码/角色），登录即用。
+
+- 登录：`POST /api/auth/login` → `{token, user}`，前端本地持久化（`Authorization: Bearer <token>`）；
+  `GET /api/auth/me`、`POST /api/auth/change-password`；未带/错误凭证 → `40101`；
+  `/api/health`、`/api/plugins/status`、`/ui`、`/api/auth` 白名单放行；响应保持 `{code,message,data}` 契约。
+- **权限（知识库级，V5.1）**：共享库（`scope=shared`，含 default）全员可读、仅管理员可写/删；
+  私有库（`scope=private`）仅 owner 与管理员可见可管理；普通用户建库服务端强制为私有。
+- **用户管理 API（仅 admin）**：`GET/POST /api/users`、`POST /api/users/{id}/reset-password|role`、`DELETE /api/users/{id}`（禁删自己）。
+- 审计（S6）：query/upload 事件含 `user_id`（认证态取真实用户，否则 anonymous）、kb_id 与回答摘要，
+  不含密码/Token/完整敏感文本；`trace_id` 全链路贯穿（前端设置页/问答区可查）。
+- CLI 评测（认证启用时）：`python -m app.cli.rageval --base-url http://127.0.0.1:8000 --login <user> <pass>` 或 `--token <token>`。
 
 ## API 速览
 
@@ -131,14 +145,16 @@ A/B 库内容互不可见；`/api/kbs` 建库（name 自动 slug 化生成 kb_id
 
 ## 第二阶段（Phase 2）规划速览
 
-开发中，规格见 `DEVELOPMENT.md` 第 13 章，分 W5~W8：
+开发完成，规格见 `DEVELOPMENT.md` 第 13 章：
 
 | 周 | 内容 | 状态 |
 |---|---|---|
-| W5 | 真重排（bge-reranker）+ 语义评估/LLM 改写/真闭环 + 幻觉检测 v2 | 待开发 |
-| W6 | 多知识库（一库一 collection，`/api/kbs`）+ 评测集 100+ | 待开发 |
-| W7 | Web 前端：前后端分离，`frontend/` Vue3+Vite SPA | 待开发 |
-| W8 | Electron 桌面壳（内置拉起后端）+ 收尾 | 待开发 |
+| W5 | 真重排（bge-reranker）+ 语义评估/LLM 改写/真闭环 + 幻觉检测 v2 | 已落地 |
+| W6 | 多知识库（一库一 collection，`/api/kbs`）+ 评测集 | 已落地 |
+| W7 | Web 前端：前后端分离，`frontend/` Vue3+Vite SPA | 已落地 |
+| W8 | Electron 桌面壳（内置拉起后端）+ 收尾 | 已落地 |
+
+当前阶段面向收尾与加固：桌面打包、认证/权限（`api.auth_enabled` + `RAG_API_KEY`）、文档索引持久化等。
 
 Web 前端开发期用 `cd frontend && npm run dev`（proxy 到 :8000）；桌面端 W8 落地后 `make desktop`。
 

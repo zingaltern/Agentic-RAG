@@ -15,11 +15,15 @@ SAMPLE = Path(__file__).resolve().parent.parent / "eval" / "sample_data" / "员�
 
 
 @pytest.fixture()
-def deps(tmp_path):
+def deps(tmp_path, isolated_stores):
     """装配：真实 Chroma（临时目录）+ 桩嵌入，不触发模型下载。"""
     config = load_config()
     config.vector_store.persist_dir = str(tmp_path / "chroma")
-    return wire(config, embedding=StubEmbedding(dimension=512))
+    config.documents.persist_file = str(tmp_path / "documents.json")
+    config.kbs.persist_file = str(tmp_path / "kb.json")
+    return wire(config, embedding=StubEmbedding(dimension=512),
+                kbs=isolated_stores["kbs"], users=isolated_stores["users"],
+                documents=isolated_stores["documents"])
 
 
 def test_ingest_success_job_and_documents(deps):

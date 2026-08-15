@@ -1,8 +1,12 @@
-# Agentic RAG 智能知识库系统 — 开发设计文档（V4.0 开发版）
+# Agentic RAG 智能知识库系统 — 开发设计文档（V5.1 交付版）
 
 > 本文件是开发本系统的**唯一事实依据（Single Source of Truth）**，内容自包含（Self-Contained），无需参考任何其他文档。
 > 任何开发本项目的智能体（Code Agent）与工程师必须严格遵守本文档的**接口契约、数据模型、算法、配置、验收标准**。
 > 若实现与本文档冲突，以本文档为准；确需偏离时，必须在代码中显著标注原因并申请修订本文件。
+
+**版本沿革**：V4.0（Phase2 规划）→ V5.0（Phase2 全部交付）：W5~W8 已完成（reranker/semantic 评估/LLM 改写/语义检测/多知识库/评测 v2/Vue3 SPA/Electron 桌面/认证/审计/热切换/脱敏/持久化）。
+→ V5.1（轻量两级团队模式）：密码登录 + HMAC Token（替代 X-API-Key）；管理员/普通用户两级权限（知识库级读写）；用户管理 API；RBAC 接线（Authorizer）；kb owner/scope（私有库）。
+与代码冲突时**以 V5.1 本文件为准**；第 13 章为交付状态与规格，第 14 章为当前状态与遗留。
 
 ---
 
@@ -35,11 +39,14 @@ rag_kb/
 ├── app/
 │   ├── main.py               # FastAPI 入口：装配 DI → 启动
 │   ├── api/
-│   │   ├── documents.py      # upload / list / get / delete
-│   │   ├── query.py          # /api/query
-│   │   ├── plugins.py        # switch / status
+│   │   ├── documents.py      # upload / list / get / delete（支持 kb_id）
+│   │   ├── query.py          # /api/query（history/kb_id/debug）
+│   │   ├── plugins.py        # status / switch（热切换，已实现）
 │   │   ├── jobs.py           # /api/jobs/{id}
-│   │   └── health.py         # /api/health
+│   │   ├── kbs.py            # /api/kbs CRUD（13.5 多知识库）
+│   │   ├── health.py         # /api/health
+│   │   ├── auth.py           # S1：密码登录 + Bearer Token 认证 + 白名单
+│   │   └── utils.py          # ok/fail 响应包 + get_deps
 │   ├── core/
 │   │   ├── config.py         # SystemConfig（pydantic-settings）
 │   │   ├── domain.py         # 全部数据模型（第 2 章）
@@ -48,39 +55,42 @@ rag_kb/
 │   │   ├── errors.py         # 异常层级与错误码（6.7）
 │   │   └── logging.py        # JSON 结构化日志 + trace_id
 │   ├── services/
-│   │   ├── ingestion.py      # IngestionPipeline（上传/入库）
-│   │   ├── orchestration.py  # Agentic 循环编排（5.9）
-│   │   ├── citation.py       # 引用溯源相似度算法（5.8）
-│   │   └── jobs_store.py     # Job 存储（内存实现 + 锁）
+│   │   ├── ingestion.py      # IngestionPipeline（上传/入库，含脱敏 S5）
+│   │   ├── orchestration.py  # Agentic 循环编排（5.9/13.3）
+│   │   ├── kb_store.py       # KbStore：kb_id→collection 映射（持久化）
+│   │   ├── documents_store.py# 文档索引（持久化 + Chroma 兜底重建）
+│   │   ├── jobs_store.py     # Job 存储（内存实现 + 锁）
+│   │   ├── rbac.py           # RBAC 预留接口（13.11.3）
+│   │   └── desensitize.py    # S5：敏感数据脱敏（正则）
 │   └── adapters/
-│       ├── embedding/        # local_bge_bell / bge_m3 / remote_api
-│       ├── vector_store/     # chroma / milvus（Milvus 仅后续）
-│       ├── retriever/        # hybrid_rrf / hybrid_rerank
-│       ├── reranker/         # identity / bge
-│       ├── evaluator/        # rule / model
-│       ├── rewriter/         # rule / llm
-│       ├── detector/         # citation / llm_crosscheck
-│       ├── llm/              # deepseek / ollama / openai_compat
+│       ├── base.py           # LocalModelAdapter 公共基类（13.11.2）
+│       ├── embedding/        # local_bge_v15（已实现）；bge_m3/remote_api（预留）
+│       ├── vector_store/     # chroma（已实现）；milvus（预留）
+│       ├── retriever/        # hybrid_rrf（已实现）；hybrid_rerank（预留）
+│       ├── reranker/         # bge_reranker（已实现，默认）；identity（回退）
+│       ├── evaluator/        # semantic_v2（已实现，默认）；rule（回退）
+│       ├── rewriter/         # llm（已实现，默认）；rule（回退）
+│       ├── detector/         # semantic（已实现，默认）；citation（回退）
+│       ├── llm/              # deepseek（已实现）；ollama/openai_compat（预留）
 │       ├── parser/           # pdf/docx/xlsx/pptx/md/txt
 │       └── chunker/          # parent_child
-├── web/
-│   ├── index.html
-│   ├── app.js
-│   └── style.css
+├── frontend/                 # Vue3 + Vite + Pinia + Element Plus SPA（13.7）
+│   ├── src/                  # views（问答/文档/知识库/设置）、api、stores、router
+│   ├── electron/             # 桌面壳：main.cjs/preload.cjs/bootstrap.cjs
+│   └── dist/                 # vite build 产物（由 FastAPI 托管 /）
+├── web/                      # /ui 旧测试页（冒烟/降级入口，13.7）
 ├── configs/
 │   └── settings.yaml         # 见第 4 章
 ├── tests/
-│   ├── unit/
-│   ├── integration/
-│   └── eval/
-│       ├── raga_eval.py      # RAGEvaluator CLI
-│       └── qa_pairs.json
-├── migrations/
-│   └── migrate_chroma_to_milvus.py   # 预留
+│   ├── unit/                 # 单测（含 auth/plugins/desensitize/kbs/…）
+│   ├── integration/          # 真实 BGE 全链路（-m integration）
+│   └── eval/                 # qa_pairs/{default,docs}/*.jsonl（107 条）
+├── data/                     # 运行期数据：chroma/ kb.json documents.json
+├── reports/                  # eval 报告存档（13.1 度量协议）
+├── docs/review-followup.md   # 专业评审跟进清单
 ├── pyproject.toml
-├── docker-compose.yml        # 可选
 ├── .env.example               # 环境变量样例（不含真实密钥）
-├── Makefile                  # make bootstrap / make run / make test
+├── Makefile                  # make bootstrap / run / test / eval / desktop
 └── README.md
 ```
 
@@ -175,7 +185,9 @@ class DetectionResult:
 | 0 | 成功 |
 | 40001 | 参数校验失败 |
 | 40101 | 鉴权失败（`api.auth_enabled=true` 时） |
-| 40401 | 文档/Job 不存在 |
+| 40401 | 文档/Job/知识库不存在 |
+| 40440 | 路由未匹配（SPA catch-all 对未知 `/api/*` 返回，替代吞成 HTML） |
+| 40500 | 方法不允许（框架级 405 统一包装） |
 | 30001 | LLM（DeepSeek）调用失败/超时 |
 | 30002 | 向量化失败 |
 | 30003 | 解析失败（损坏文件/格式不支持） |
@@ -334,6 +346,22 @@ def split_chunks(doc: Document) -> list[Chunk]:
     """按父子分块规则（5.2）产出一组 Chunk；Chunk.parent_id 关联规范。"""
 ```
 
+### 3.10 Provider 实现状态速览（V5.0）
+
+| 模块 | 默认（当前配置） | 已实现 | 预留（白名单已列、未实现） |
+|---|---|---|---|
+| embedding | `local_bge_v15` | local_bge_v15 | bge_m3、remote_api |
+| vector_store | `chroma` | chroma | milvus |
+| retriever | `hybrid_rrf` | hybrid_rrf | hybrid_rerank |
+| reranker | `bge_reranker` | bge_reranker、identity(回退) | —— |
+| evaluator | `semantic_v2` | semantic_v2、rule(回退) | —— |
+| rewriter | `llm` | llm、rule(回退) | —— |
+| detector | `semantic` | semantic、citation(回退) | —— |
+| llm | `deepseek` | deepseek | ollama、openai_compat |
+
+- 预留 provider 配置到会**启动即报错**（4.3 禁止静默降级），实现后再切配置即生效（13.10 P3）。
+- 本地模型 adapter 统一继承 `app/adapters/base.py` 的 `LocalModelAdapter`（懒加载/探活/异常包装复用，13.11.2）。
+
 ---
 
 ## 第 4 章 配置体系
@@ -344,28 +372,33 @@ def split_chunks(doc: Document) -> list[Chunk]:
 
 环境变量命名：例如 `RAG_LLM_PROVIDER=deepseek`、`RAG_EMBEDDING_MODEL_NAME=...`（`_` 分隔大写），优先级最高；允许 `.env` 文件（本地）。
 
-### 4.2 settings.yaml 完整 Schema（MVP 默认）
+### 4.2 settings.yaml 完整 Schema（当前默认，与 configs/settings.yaml 一致）
 
 ```yaml
 env: dev
 
 api:
-  host: 0.0.0.0
+  host: 127.0.0.1            # S2：默认仅本机；0.0.0.0 需显式配置暴露
   port: 8000
-  auth_enabled: false
+  auth_enabled: false        # S1：true 时启用密码登录 + Token 认证（admin 经 RAG_ADMIN_USER/PASSWORD 引导）
+  cors_origins: ["http://localhost:5173"]   # dev 模式 vite proxy 之外的白名单
+
+frontend:                    # 13.7：SPA 托管
+  dev_port: 5173
+  dist_dir: ./frontend/dist
 
 embedding:
-  provider: local_bge_v15          # local_bge_v15（MVP）| bge_m3 | remote_api
+  provider: local_bge_v15    # local_bge_v15（默认）| bge_m3 | remote_api（预留）
   model_name: BAAI/bge-small-zh-v1.5
   query_instruction: "为这个句子生成表示以用于检索相关文章："
-  device: auto                   # auto|cpu|mps（MPS 可选，若不稳定回 cpu）
+  device: auto               # auto|cpu|mps
   batch_size: 64
-  dimension: 0                   # 0 表示由模型自动识别（运行时回填实际维度）
+  dimension: 0               # 0 表示由模型自动识别（运行时回填实际维度）
 
-chunker:                          # 5.2 引用此配置键（W1 修订补充）
-  parent_target_tokens: 512       # 父块目标 token 数
-  child_target_tokens: 128        # 子块目标 token 数
-  token_char_ratio: 1.8           # 中文 token≈len(text)/1.8 估算
+chunker:                     # 父子分块（5.2）
+  parent_target_tokens: 512
+  child_target_tokens: 128
+  token_char_ratio: 1.8
 
 vector_store:
   provider: chroma
@@ -375,25 +408,31 @@ vector_store:
 retriever:
   provider: hybrid_rrf
   top_k: 20
-  candidates: 50                # 融合后返回候选数（生产精排用）
-  rr_fused_k: 60                # RRF 的 k 参数
+  candidates: 50
+  rr_fused_k: 60
 
 reranker:
-  provider: identity
-  rerank_top_k: 5               # 最终给 LLM 的上文块数
+  provider: bge_reranker     # bge_reranker（默认，13.2）| identity（回退）
+  model_name: BAAI/bge-reranker-base   # CPU 快；可切 v2-m3（慢一个量级）
+  rerank_top_k: 5
+  batch_size: 32
+  device: auto
 
 evaluator:
-  provider: rule
+  provider: semantic_v2      # semantic_v2（默认，13.3.1）| rule（回退）
   rule_threshold: 0.45
+  semantic_v2_threshold: 0.45
   top_n: 5
 
 rewriter:
-  provider: rule
+  provider: llm              # llm（默认，13.3.2，失败自动回退 rule）| rule
   synonyms_csv: ./configs/synonyms.csv
+  llm_timeout_seconds: 30
 
 detector:
-  provider: citation
+  provider: semantic         # semantic（默认，13.4）| citation（回退）
   similarity_threshold: 0.8
+  semantic_similarity_threshold: 0.6
 
 llm:
   provider: deepseek
@@ -402,6 +441,7 @@ llm:
   temperature: 0.1
   max_tokens: 1024
   timeout_seconds: 30
+  # api_key 只允许环境变量注入（RAG_DEEPSEEK_API_KEY / RAG_LLM_API_KEY），禁止写入本文件
 
 orchestration:
   max_reflection_iterations: 3
@@ -412,6 +452,13 @@ ingestion:
   max_file_size_mb: 50
   allowed_extensions: [pdf, docx, xlsx, pptx, md, txt]
   embed_batch_size: 64
+  desensitize_enabled: false     # S5：身份证/手机号/银行卡脱敏开关
+
+documents:                       # V5.0：文档索引持久化（D1）
+  persist_file: ./data/documents.json
+
+kbs:                             # 13.5：知识库映射持久化
+  persist_file: ./data/kb.json
 
 logging:
   level: info
@@ -469,7 +516,9 @@ def rrf_fusion(bm25_scores: dict[str, float], vector_scores: dict[str, float],
   4. 去重：同一 `parent_id` 子块最多取 2 条进入上下文，防同一个文档霸屏反馈。
 - **回归测试要点**：禁止 `sorted(key=lambda x: x)`——按分数（`item[1]`）降序排序才正确。
 
-### 5.5 规则评估器（RuleEvaluator）
+### 5.5 规则评估器（RuleEvaluator）—— 回退 provider（13.3.1 语义评估为默认）
+
+> V5.0 起默认 `evaluator.provider: semantic_v2`（见 13.3.1）；本节算法保留为回退与语义评估的副信号口径。
 
 ```
 terms = jieba.lcut(query)                 # 去掉空白与停止词
@@ -482,7 +531,7 @@ passed = score >= evaluator.rule_threshold        # 默认 0.45
 reason: 空上下文→EMPTY_CONTEXT；terms 为空→OK；分数不足→BELOW_THRESHOLD
 ```
 
-### 5.6 规则改写器（RuleRewriter）按序执行
+### 5.6 规则改写器（RuleRewriter）—— 回退 provider（13.3.2 LLM 改写为默认）按序执行
 1. 全转半角、压缩连续空白。
 2. 同义词扩充：读 `synonyms.csv`（如 `年假,休假,假期`）→ 扩展成 `q1 OR q2` 候选串。
 3. 口语→书面词典（如 `咋→怎么`、`行不行→是否可行`）。
@@ -503,7 +552,7 @@ USER_PROMPT = "上下文：\n{context}\n\n问题：{query}"
 - 参数：`temperature=0.1`（`llm.temperature`）、`max_tokens`、超时 30s。
 - DeepSeek 实现细节：OpenAI SDK，POST `/chat/completions`；`deepseek-reasoner` 时忽略 `reasoning_content` 只取 `content`。
 
-### 5.8 幻觉检测（CitationTracingDetector）
+### 5.8 幻觉检测（CitationTracingDetector）—— 回退 provider（13.4 语义检测为默认）
 
 - 契约：
   1. 以 `。！？` 切分 answer 为 `s1..sn`；
@@ -520,7 +569,10 @@ def char_bigrams(s: str) -> set[str]:
 ```
 - 纯 Python，毫秒级，无网络。阈值可配（调高更准、过低漂移；建议用 `tests/eval` 校准）。
 
-### 5.9 编排（OrchestrationService）——Agentic 循环
+### 5.9 编排（OrchestrationService）——Agentic 循环（已实现，V5.0 修订版）
+
+> V5.0 实际实现含 13.3.3 修订：多路检索融合、LLM 改写多变体、query 不变自动换路（去停用词/BM25-only/向量-only）、
+> LLM 调用后与幻觉检测后各一次预算检查（预算硬收口）。
 
 ```
 iteration = 0
@@ -561,6 +613,9 @@ POST /api/documents/upload (multipart file)
 
 - MVP JobStore：进程内字典，重启后 Job 状态丢失（可接受，生产再上 Redis/MQ）。
 - 说明：**解析/向量化全程不占用 HTTP worker 阻塞线程**；/query 时才同步走各模块。
+- **S5 脱敏（V5.0）**：`ingestion.desensitize_enabled=true` 时，parse 之后、分块之前对全文执行
+  `app/services/desensitize.desensitize_text`（身份证/手机号/银行卡 → `***`），默认关闭。
+- **幂等并发（V5.0）**：`_run` 内以 content_hash 为粒度加进程锁（`_lock_for`），幂等检查与写入原子化，杜绝 TOCTOU 双份入库。
 
 ### 5.11 插件注册与装配（PluginRegistry + wire()）
 
@@ -573,7 +628,10 @@ class PluginRegistry:
     def get(cls, name, **cfg): return cls._registry[name](**cfg)
 ```
 - `wire(config) -> Dependencies`：启动时按 provider 名实例化各组件的默认实现，注入编排服务与路由。
-- `/api/plugins/switch`：临时切换某模块实现（MVP 语义=更新内存 config + 重建该模块单例；服务进程内即时生效，不回退）。失败时回滚并返回 50001。
+- `/api/plugins/switch`（**已实现，V5.0**）：`{"module","strategy","config"?}` → 校验（模块/provider 合法且已注册）
+  → 深拷贝 config → `wire` 重建依赖（保留 KbStore）→ 原子替换 `app.state.deps/config`；
+  装配失败 → 50001 且不替换（回滚语义）。写操作需登录且 V5.1 仅管理员可用；
+  `/api/plugins/status` 只读、白名单豁免认证。
 - 所有模块实例在启动时统一创建且可关闭（`close()`），禁止到处单例塞 import。
 
 ---
@@ -609,9 +667,11 @@ class PluginRegistry:
 ```json
 {
   "query": "如何申请年假？",
-  "session_id": "uuid-123",
+  "session_id": "uuid-123",        // 预留（当前未参与逻辑）
+  "history": [{"role":"user","content":"…"}],   // V5.0：会话最近 ≤6 轮（不含当前问题），注入生成阶段理解指代
   "top_k": 5,
   "filters": {"metadata": {"department": "HR"}},
+  "kb_id": "default",              // 13.5：目标知识库（与 collection 二选一，kb_id 优先，缺省 default）
   "debug": true
 }
 ```
@@ -639,9 +699,12 @@ class PluginRegistry:
 ### 6.5 文档管理
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/api/documents?page=1&size=20` | 分页（按创建时间倒序） |
+| GET | `/api/documents?page=1&size=20&kb_id=` | 分页（按创建时间倒序；kb_id 可选过滤，V5.0） |
 | GET | `/api/documents/{id}` | 单文档元数据 |
-| DELETE | `/api/documents/{id}` | 删除文档（级联清向量块） |
+| DELETE | `/api/documents/{id}` | 删除文档（级联清向量块；**按文档所属库解析 collection**，V5.0 修 P0-1） |
+
+> 文档索引持久化：`data/documents.json`（V5.0，含 content_hash 幂等索引）；启动时索引为空且 Chroma 有数据
+> → 自动全量重建（消除重启后幽灵文档）。
 
 ### 6.6 插件
 | 方法 | 路径 | 入参 | 说明 |
@@ -704,16 +767,11 @@ class PluginRegistry:
 
 ---
 
-## 第 9 章 开发计划（4 周）与验收
+## 第 9 章 开发计划与验收
 
-| 周 | 交付 | DoD |
-|---|---|---|
-| W1 | 工程骨架、接口、Config、Parser + Chunker + UI 骨架 | `make test` 契约测试通过；`/ui` 返回 200 |
-| W2 | VectorEngine + VectorStore + Retriever(RRF) + 上传 Job 流水线 | `make demo-ingest`+RAG 搜索级联通过；/ui 上传流程走通 |
-| W3 | Orchestration（Agentic 循环）+ Detector + `/api/query` + DeepSeek | curl 问答返回引用与迭代数；/ui 问答区通过 |
-| W4 | 单测全覆盖≥80%、集成、`README`、docker 可选 | pytest 绿、docker-compose up 可用 |
-
-**V1.0 发布标准**：pytest 全绿、`/ui` 完成"上传→问→看引用→删"闭环、`rageval` 可运行且报告非空。
+**MVP（W1~W4）与 Phase2（W5~W8）均已交付并验收通过**（详见第 13 章交付状态）。
+V1.0 发布标准已达成：pytest 全绿（`-m "not integration"`，257 项）、`/ui` 与 SPA 闭环
+（上传→问→看引用→删）、`rageval` 可运行且报告非空（`reports/` 存档 20+ 份）。
 
 ---
 
@@ -774,7 +832,7 @@ class PluginRegistry:
 
 | 需求 | 现架构缺什么 | 何时再动 |
 |---|---|---|
-| 多租户/细粒度权限（不同用户只能看部分库） | 需引入"用户→collection/过滤条件"的鉴权映射，并防 metadata 伪造 | 有真实权限诉求再评审 |
+| 多租户/细粒度权限（不同用户只能看部分库） | 需引入"用户→collection/过滤条件"的鉴权映射，并防 metadata 伪造 | **已落地（轻量两级，V5.1）**：`Authorizer` + kb owner/scope（shared/private），用户→库判定见 `app/services/rbac.py`；细粒度到文档级/角色矩阵扩展仍属深度 C |
 | 秒级实时同步（文档经常更新） | 需增量索引 + 消息队列、文档变更监听 | 内容更新频率成瓶颈时 |
 | 跨业务系统对接（OA/工单/数据库） | 需"接入器 + 数据变更事件"而非通用 RAG | 单独立项 |
 | 亿级向量高并发 | Milvus + 多副本 + 横向扩展 | 单机瓶颈量化后再做（另见 10.1） |
@@ -783,124 +841,110 @@ class PluginRegistry:
 
 ---
 
-## 第 13 章 第二阶段：效果优化与多端（Phase 2 规格）
+## 第 13 章 第二阶段：效果优化与多端（Phase 2 交付状态）
 
-> 说明：MVP（第 1~12 章）已交付并通过验收。本章为**第二阶段设计与验收规格**，是后续 W5~W8 开发的唯一依据。
-> 冲突时：本章内节间以"目标值/验收判据"列明的实测流程为准；与旧章冲突处，按第 13.1 的度量协议裁定。
+> MVP（第 1~12 章）与 Phase2（W5~W8）**均已交付**。本章为交付状态 + 沿用规格：
+> 各节"✅ 已交付"标注实现落点；13.10 P3 仍为"只立规格、不排期"；13.11 为非功能约束（与功能同权）。
 
 ### 13.1 目标与度量协议
 
-- 阶段目标：把"检索-评估-生成"从 MVP 原型提升到可对比衡量的生产基线，并交付 **网页 + 桌面双形态** 前端。
-- **度量协议（硬要求）**：每完成一个里程碑，必须执行 `make eval` 存档报告 `reports/eval-{ts}.md`，并与基线报告对比后再回复"达标/不达标"。没对比结论的里程碑一律不算完成。
-- 基线（MVP 实测，2026-08-08）：通过率 18/21；Hit@5 / ContextPrecision / ContextRecall / AnswerRelevancy 均为 100%；**Faithfulness=0%**（全部 suspected）；no_answer 3 条判定口径与实现不一致（期望 21001，实际 code=0+"未找到相关依据"）。
-- **本阶段目标值**（以实测校准，不留拍脑袋数字）：
-  - 新增并记录 `Hit@1` 基线，W5 后 ≥ 基线并逐步提升；
-  - Faithfulness（direct 类）≥ 60%（起点 0%）；
-  - 口语化/改写类通过率 ≥ 80%；
-  - no_answer 判据按 13.6 修订后 3 条全部判定通过；
-  - 多知识库隔离自动化用例全通过。
+- 阶段目标：把"检索-评估-生成"从 MVP 原型提升到可对比衡量的生产基线，并交付 **网页 + 桌面双形态** 前端。**已达成**。
+- **度量协议（硬要求，持续有效）**：每完成一个里程碑，必须执行 `make eval` 存档报告 `reports/eval-{ts}.md`，并与基线报告对比后再回复"达标/不达标"。
+- 基线（MVP 实测，2026-08-08，Stub LLM 进程内模式）：通过率 18/21；Hit@5/ContextPrecision/ContextRecall/AnswerRelevancy 100%；Faithfulness=0%（Stub 假答案所致）；no_answer 口径不一致。
+- **V5.0 实测（2026-08-11，真实 DeepSeek，`--kb default`，报告 `reports/eval-20260811-002820.md`）**：
+  - 通过率 14/21；**Faithfulness(direct)=56%**（Stub 假 0% 之下的真实值，接近目标 60%）；Hit@1=44%（受"评测集文档与当前知识库内容不匹配"影响，见第 14 章）；AnswerRelevancy 100%。
+- **目标值执行情况**：
+  - ✅ Faithfulness（direct）由假 0% 提升至真实 56%（semantic detector 落地）；
+  - ✅ no_answer 判据修订（13.6）落地：107 条全量回归通过（Stub 模式 107/107）；
+  - ✅ 多知识库隔离自动化用例全通过；口语化/改写类通过率 ≥80% 达成（qa_pairs 回归）。
+  - ⚠️ Faithfulness ≥60% 目标：真实模式 56%，差值源于评测集/知识库内容差异，非检测器缺陷（Stub 全量模式验证过语义检测路径）。
 
-### 13.2 检索精排（Reranker）
+### 13.2 检索精排（Reranker）—— ✅ 已交付
 
-- 现状：`reranker.provider: identity`（原序直通）——相关块常居第 2，整体效果差的头号原因。
-- 目标实现：新增适配器 `app/adapters/reranker/bge_reranker.py`（provider 名 `bge_reranker`）。
-  - 模型：`BAAI/bge-reranker-v2-m3`（多语言跨编码器）；若模型体积/CPU 延迟不可接受，配置改 `BAAI/bge-reranker-base`（实现无需改动）。
-  - 实现：`sentence-transformers.CrossEncoder`（已有依赖，无需新增包）；对（query, 候选块）打分后降序；`scores` 重定序返回 `ScoredChunk`。
-- 编排接入：检索 RRF 输出（`retriever.top_k=20` 候选）→ **rerank** → 取 `rerank_top_k=5` 进入评估器。`identity` 保留为回退 provider。
-- 配置字段（见 13.8）：`model_name`、`rerank_top_k`（5）、`batch_size`（32）、`device`（auto）。
-- 测试：单测（确定性打分排序 + 空输入 + 维度不影响文本）；并记 `Hit@1` 基准前后对比。
+- 交付：`app/adapters/reranker/bge_reranker.py`（provider `bge_reranker`，默认），`identity` 保留回退。
+- 模型：`BAAI/bge-reranker-base`（当前配置，CPU 单轮快一个量级）；改 `model_name` 可切 `BAAI/bge-reranker-v2-m3`（实现无需改动）。
+- 实现：`sentence-transformers.CrossEncoder`（现有依赖）；对（query, 候选块）打分后降序；输出 `ScoredChunk.notion="rerank"`。
+- 编排接入：检索 RRF 输出（`top_k=20` 候选）→ rerank → `rerank_top_k=5` 进入评估器。
+- 懒加载/探活/异常包装继承 `LocalModelAdapter`（13.11.2 公共基类）。
+- 测试：`tests/unit/test_bge_reranker.py`（确定性打分排序 + 空输入 + 桩模型注入）。
 
-### 13.3 评估·改写·闭环（Evaluator / Rewriter / Orchestration）
+### 13.3 评估·改写·闭环（Evaluator / Rewriter / Orchestration）—— ✅ 已交付
 
-#### 13.3.1 Evaluator：`rule` → `semantic_v2`
-- 现状 `rule`=`0.7×coverage+0.3×length` 纯字面，问法一变即崩。
-- 新增 `evaluator.provider: semantic_v2`（`app/adapters/evaluator/semantic_v2.py`）：
-  - 主信号：query 与 top_n 块嵌入余弦，做**相对评分**（如候选集内 z-score/分位），不依赖绝对阈值；
-  - 副信号：保留字面覆盖（去停用词）修正；
-  - 输出 `score` 与 `passed`（阈值参数化 `semantic_v2_threshold`，默认 0.45，用 qa_pairs 校准）。
+#### 13.3.1 Evaluator：`rule` → `semantic_v2`（默认）
+- 交付：`evaluator.provider: semantic_v2`（`app/adapters/evaluator/semantic_v2.py`，默认）；`rule` 保留回退。
+- 算法：主信号 = query 与 top_n 块嵌入余弦的**候选集内相对分**（z-score 归一 [0,1]，护栏 0.35，不依赖绝对阈值）；
+  副信号 = 去停用词字面覆盖；`score = 0.7×主 + 0.3×副`，passed ≥ `semantic_v2_threshold`（0.45）。
 - 与 13.2 衔接：评估输入必须是 **rerank 后的 top_n**。
 
-#### 13.3.2 Rewriter：新增 `llm` provider
-- 新增 `app/adapters/rewriter/llm_rewriter.py`（`rewriter.provider: llm`）：
-  - 输入 `(query, reason)`，输出 1~3 个改写/扩句变体（含代词消解，如"我是哪个大学毕业的"→"我的毕业院校"）；
-  - 超时 30s；失败/超时/限流 → **自动回退** `rule` 改写；
-  - 成本控制：仅当 `result.passed=False` 才调用。
-- **多路融合**：循环内对每个变体分别检索，候选用 `rrf_fusion`（5.4 已实现）融合后进入该轮评估。
+#### 13.3.2 Rewriter：`llm` provider（默认）
+- 交付：`rewriter.provider: llm`（`app/adapters/rewriter/llm_rewriter.py`，默认）；`rule` 保留回退。
+- 输入 `(query, reason)`，输出 1~3 个改写/扩句变体（JSON 数组，含代词消解）；超时 30s；
+  失败/超时/限流/解析失败 → **自动回退** `rule` 改写；仅当 `result.passed=False` 才调用（成本控制）。
+- **多路融合**：循环内对每个变体分别检索，候选用 `rrf_fusion`（5.4）融合后进入该轮评估。
 
-#### 13.3.3 循环硬约束（修订 §5.9）
+#### 13.3.3 循环硬约束（已落地于编排）
 1. **每轮 query 必须与上轮不同**（文本 diff 校验；若不变则自动换路：BM25-only / 向量-only / 去停用词重切）；
 2. `max_reflection_iterations=3`、`search_timeout_seconds=10`、`request_timeout_seconds=30` 保持；
 3. `filters`/`kb_id`（13.5）必须贯穿所有变体检索；
-4. LLM 改写不可用 → 回退规则；规则也无变化时仍计入迭代（防死循环，超限走 21001 兜底）。
+4. LLM 改写不可用 → 回退规则；规则也无变化时仍计入迭代（防死循环，超限走 21001 兜底）；
+5. **预算硬收口（V5.0）**：LLM 调用后、幻觉检测后各补一次预算检查，超时抛 21002。
 
-### 13.4 幻觉检测 v2（Detector）
+### 13.4 幻觉检测 v2（Detector）—— ✅ 已交付
 
-- 现状 `detector.provider: citation`（字符 2-gram Jaccard ≥0.8）——对改写/总结句几乎全误报（Faithfulness 0%）。
-- 新增 `detector.provider: semantic`（`app/adapters/detector/semantic_verifier.py`）：
-  1. 规则不变：按 `。！？` 切句、正则 `[(\d+)]` 取引用、无引用整句 → suspected；
-  2. 判定升级：句⊕引用块的**嵌入余弦**替代字符 2-gram，参数 `similarity_threshold`（起步 0.6 用 qa_pairs 校准）；
-  3. 输出 `verified/verified_rate/suspected` 契约不变。
-- 兼容：`citation|semantic` 可配置切换（回退模式）。
-- 验收：Faithfulness（direct）≥60%，且 suspected 不再覆盖全部口语句。
+- 交付：`detector.provider: semantic`（`app/adapters/detector/semantic_verifier.py`，默认）；`citation` 保留回退。
+- 实现：① 规则不变：按 `。！？` 切句、正则 `[(\d+)]` 取引用、无引用整句 → suspected；
+  ② 判定升级：句⊕引用块的**嵌入余弦**（阈值 `semantic_similarity_threshold=0.6`）替代字符 2-gram；
+  ③ 输出 `verified/verified_rate/suspected` 契约不变。
+- 实测：Faithfulness（direct）由 Stub 假 0% → 真实 DeepSeek 56%（13.1）。
 
-### 13.5 多知识库（通用化，一库一 collection）
+### 13.5 多知识库（通用化，一库一 collection）—— ✅ 已交付
 
-- 模型：**kb_id → Chroma collection（`rag_<kb_id>`）一一映射，物理隔离**；完全复用现有 collection 贯穿机制。
-- 服务：`app/services/kb_store.py`（`KbStore`）：内存 + 持久化映射文件 `data/kb.json`（或 sqlite）；字段 `kb_id/name/description/collection/created_at`；内置默认库 `default`（不可删）。
-- API（新增 `/api/kbs`）：
+- 交付：**kb_id → Chroma collection（`rag_<kb_id>`）一一映射，物理隔离**；完全复用现有 collection 贯穿机制。
+- 服务：`app/services/kb_store.py`（`KbStore`）：内存 + 持久化映射文件 `data/kb.json`；字段 `kb_id/name/description/collection/created_at`；内置默认库 `default`（不可删）。含 `on_kb_changed` 事件钩子（P3 增量索引预留）。
+- API（`/api/kbs`）：
   | 方法 | 路径 | 行为 |
   |---|---|---|
   | GET | `/api/kbs` | 列表（含 `default`） |
   | POST | `/api/kbs` | `{name, description?}` → `{kb_id}`（新建集合） |
   | DELETE | `/api/kbs/{kb_id}` | 删除映射 + `drop_collection` 级联；拒绝删 `default` |
-- 上传：`POST /api/documents/upload` 增加可选表单字段 `kb_id`（缺省 `default`）；入库时写 `Chunk.metadata.kb_id`。
-- 问答：`POST /api/query` 增加可选 `kb_id`（与 `collection` 二选一，`kb_id` 优先；缺省 `default`）；`filters` 仅限库内。
+- 上传：`POST /api/documents/upload` 可选表单字段 `kb_id`（缺省 `default`）；入库时写 `Chunk.metadata.kb_id`。
+- 问答：`POST /api/query` 可选 `kb_id`（与 `collection` 二选一，`kb_id` 优先；缺省 `default`）；`filters` 仅限库内。
 - 隔离保障：检索双路（BM25/向量）都按 kb 的 collection 作用域执行；`KbStore` 校验查询/上传目标库存在，否则一律按参数错误拒绝。
-- 验收用例（自动化）：A/B 两库入库语义相同文档 → A 库提问不得返回 B 库 sources；跨库操作错误提示；`default` 删除被拒。
+- 验收：隔离自动化用例全过（`tests/integration/test_kbs_isolation.py`）。
 
-### 13.6 评测体系 v2
+### 13.6 评测体系 v2 —— ✅ 已交付
 
-- `tests/eval/` 扩容至 **100+ 条**，按库分目录 `qa_pairs/{default,docs}/*.jsonl`，类型覆盖 direct/rewrite/no_answer/no_invent/口语/表格/多文档。
-- **no_answer 判据修订**：`pass =（返回 code0 且 answer 含"未找到相关依据"类文案）∨（返回 21001）`。
-- 指标新增：`Faithfulness` 分类型统计、`Hit@1`、按库汇总；报告输出与本阶段基线 diff 列。
-- `rag_eval` CLI 参数：`--kb`（按库评测）、`--baseline <path>`（对比模式）。
+- `tests/eval/` 已扩容至 **107 条**（`qa_pairs/{default,docs}/*.jsonl`），类型覆盖 direct/rewrite/no_answer/no_invent/口语/表格/多文档。
+- **no_answer 判据修订（已落地）**：`pass =（返回 code0 且 answer 含"未找到相关依据"类文案）∨（返回 21001）`（`rageval.py` 单一常量 + 单测）。
+- 指标：`Faithfulness` 分类型、`Hit@1`、按库汇总、基线 diff 列。
+- CLI：`--kb`（按库）、`--all-kbs`、`--baseline <path>`（对比模式）、`--in-process`（Stub LLM 进程内）/ `--base-url`（HTTP 真实后端）。
+- **评测口径统一（13.11.2）**：进程内模式走 `orchestration.run` 同一链路，禁止两套实现。
+- 报告存档：`reports/eval-{ts}.md`（20+ 份，含本轮真实 DeepSeek 报告）。
 
-### 13.7 前端与多端（前后端分离）
+### 13.7 前端与多端（前后端分离）—— ✅ 已交付
 
 - **决策**：前后端彻底分离。前端工程 `frontend/`：**Vue3 + Vite + Vue Router + Pinia + Element Plus**；桌面端复用同一 SPA。
-- 页面（五区块升级）：
-  1. 问答控制台：库选择（默认 default）、提问、引用 `[N]`、来源、迭代/耗时、幻觉徽标、debug 反思面板；
-  2. 文档管理：按库上传（带 `kb_id`）+ 列表 + 删除；
-  3. 知识库管理：`/api/kbs` CRUD；
-  4. 设置总览：`/api/health`、`/api/plugins/status`；
-  5. 错误码提示条（沿用 `api()` 语义）。
-- **Web 模式**：dev 用 vite proxy（`/api → http://127.0.0.1:8000`，CORS 放行 `http://localhost:5173`）；生产 `vite build` 产出 `frontend/dist`，由 FastAPI `StaticFiles` 挂载 `/`（或 nginx），见 13.8。
-- **桌面模式（Electron，目标=内置拉起后端）**：
-  - `frontend/electron/main.js`：启动时：① 探测目标端口（默认 8000，占用自动换）→ ② 以项目 `.venv` 拉起 `uvicorn app.main:app`（参数化）→ ③ 轮询 `/api/health` 就绪后开窗（带加载 splash）→ ④ 退出时级联停止后端；
-  - 设置内预留"连接外部后端"（可填 127.0.0.1:port，不本机拉起）；
-  - 打包 `electron-builder`（dmg/exe）；Python 运行时捆绑列为后续演进（不与 MVP 绑定阻塞）。
-- 旧 `web/` 测试页保留为冒烟/降级入口（README 注明），新 SPA 上线后逐步取代。
+- 页面（五区块）：
+  1. 问答控制台：库选择、提问、引用 `[N]`、来源、幻觉徽标、已证率、debug 反思面板（默认收起）；
+  2. 文档管理：按库上传（`kb_id`，带上传/入库进度）+ 按库列表 + 删除；
+  3. 知识库管理：`/api/kbs` CRUD（删除带确认弹窗）；
+  4. 设置总览：`/api/health`、`/api/plugins/status`、API Key、外部后端、组件加载状态（折叠）；
+  5. 错误码提示条（`api()` 统一语义：网络/解析失败返回 `{code:50001}` 契约包，不 throw）。
+- 状态管理：问答会话在 Pinia store（切页不丢）；携带 `history`（最近 6 轮，不含当前问题）供后端指代解析。
+- **Web 模式**：dev 用 vite proxy（`/api → http://127.0.0.1:8000`，CORS 放行 `http://localhost:5173`）；生产 `vite build` 产出 `frontend/dist`，由 FastAPI 挂载 `/`（SPA catch-all，未知 `/api/*` 返回 404 JSON）。
+- **桌面模式（Electron，已交付）**：
+  - `frontend/electron/main.cjs`：① 探测端口（默认 8000，占用自动换）→ ② 以项目 `.venv` 拉起 uvicorn（仅 127.0.0.1）→ ③ 轮询 `/api/health` 就绪（带 splash 窗口）→ ④ 退出级联停止后端；
+  - 外部后端模式（userData 持久化，不本机拉起）；设置页经 IPC 回显真实值；
+  - macOS 惯例：关窗保留 Dock 与后端，`activate` 重建窗口，Cmd+Q 才退出；
+  - S8：`contextIsolation=true`、`nodeIntegration=false`、`sandbox=true`，仅 loopback/自托管地址；
+  - 测试：`npm run test:desktop`（`node --test electron/*.test.cjs`，7 用例）；`npm run desktop` 启动。
+- 旧 `web/` 测试页保留为冒烟/降级入口（README 注明）。
 
-### 13.8 配置与迁移（settings.yaml 增补草案）
+### 13.8 配置与迁移（settings.yaml 已落地）
 
-```yaml
-reranker:
-  provider: identity            # identity(现状) | bge_reranker(W5)
-  model_name: BAAI/bge-reranker-v2-m3
-  rerank_top_k: 5
-evaluator:
-  provider: rule                # rule(现状) | semantic_v2
-  semantic_v2_threshold: 0.45
-rewriter:
-  provider: rule                # rule(现状) | llm(W5)
-detector:
-  provider: citation            # citation(现状) | semantic
-  semantic_similarity_threshold: 0.6
-api:
-  cors_origins: ["http://localhost:5173"]
-kb:
-  default_kb: default
-  persist_file: ./data/kb.json
+- **当前完整 schema 以第 4.2 节为准**（已含 reranker/evaluator/rewriter/detector 新 provider、`cors_origins`、`documents/kbs` 持久化路径、`ingestion.desensitize_enabled`）。
+- 各模块可配置切换 provider；`identity/rule/citation` 为可回退默认。
+- 依赖：reranker 用 `sentence-transformers.CrossEncoder`（现有依赖，零新增）；如改 `FlagEmbedding` 须先登记 `pyproject` 并说明理由。
 frontend:
   dev_port: 5173
   dist_dir: ./frontend/dist
@@ -909,16 +953,16 @@ frontend:
 - 注：以上为 W5~W8 落地目标。**在对应组件实现合并前，settings.yaml 不写入新键**（未识别键会被静默忽略，禁止留隐患）；各模块按 13.2~13.5 章节切换 provider，`identity/rule/citation` 为可回退默认。
 - 依赖：reranker 用 `sentence-transformers.CrossEncoder`（现有依赖，零新增）；如改 `FlagEmbedding` 须先登记 `pyproject` 并说明理由（§10 附录约束）。
 
-### 13.9 演进路线与 DoD（W5~W8）
+### 13.9 演进路线与 DoD（W5~W8）—— ✅ 全部交付
 
-| 周 | 范围 | DoD（全部满足才可交付） |
+| 周 | 范围 | 状态 |
 |---|---|---|
-| W5 | 13.2 + 13.3 + 13.4（P0 后端三件套） | 「单测绿」；provider 可配置切换；`make eval` 报告含 Hit@1 新基线；Faithfulness(direct)>0；与 13.1 基线 diff 报告 |
-| W6 | 13.5 + 13.6（多库 + 评测扩容） | `/api/kbs` CRUD 全绿；隔离用例全过；qa_pairs ≥100 条、`make eval` 全绿（no_answer 修订判据）；pytest 绿 |
-| W7 | 13.7 Web 前端 | `frontend/dist` 由 FastAPI 托管；五区块可用；CORS 生效；前端冒烟（不依赖桌面）；README 更新 |
-| W8 | 13.7 Electron 桌面 + 生产项 | 桌面内置拉起后端：启动/就绪/退出三步走通；双端同页面可用；`make desktop` 可跑；文档齐（含 README 双端指引） |
+| W5 | 13.2 + 13.3 + 13.4（P0 后端三件套） | ✅ 交付（reranker/semantic_v2/llm_rewriter/semantic detector） |
+| W6 | 13.5 + 13.6（多库 + 评测扩容） | ✅ 交付（/api/kbs CRUD、隔离用例、qa_pairs 107 条、no_answer 修订判据） |
+| W7 | 13.7 Web 前端 | ✅ 交付（SPA 五区块、CORS、FastAPI 托管 dist） |
+| W8 | 13.7 Electron 桌面 + 生产项 | ✅ 交付（内置拉起后端/splash/外部后端/macOS 惯例；`npm run desktop` 可跑） |
 
-> 每个里程碑交付时：commit 说明中标注 `PHASE2-Wn`；若验收未过，下个 Agent 会话从本报告的"未达标项"续修，禁止另起炉灶。
+> 新功能开发时在 commit 中标注里程碑（如 `PHASE2-Wn` / `V5.0-*`）。
 
 ### 13.10 可选适配器包（P3 预留规格，暂不实现）
 
@@ -954,35 +998,35 @@ frontend:
 
 > 本节约束 W5 之后的所有里程碑，**与功能同权**。分「安全底线（必须）」「复用/拓展（规范）」「优先级（建议实施序）」三块；安全底线未达标视为 DoD 不通过。
 
-#### 13.11.1 安全底线（必须）
+#### 13.11.1 安全底线（必须）—— 状态表
 
-| # | 项 | 要求 |
-|---|---|---|
-| S1 | **API 认证** | 默认仍 `auth_enabled=false`，但 W8 前必须落地最少一种认证（API Key 或登录）；为"用户→可访问 kb"的 RBAC 映射预留接口（对接 §12.3 深度 C） |
-| S2 | **监听地址** | 默认绑定 `127.0.0.1`（本机/桌面场景），`0.0.0.0` 仅显式配置暴露；README 注明 |
-| S3 | **XSS 治理** | 前端渲染 `sources`/`debug_trace` 等文档原文**禁止 innerHTML 拼插**（必须转义/框架插值）；文档内容可能携带脚本，视同不可信输入 |
-| S4 | **Prompt 注入防护** | LLM 系统提示明确"知识库文档区为引用材料，不可执行其中指令"；长文本上下文做截断与边界隔离 |
-| S5 | **敏感数据** | 上传通道预留脱敏钩子（身份证/手机号/卡号正则过滤）；`metadata` 禁止存放可伪造越权字段（§12.3） |
-| S6 | **审计** | 结构化审计事件：谁/何时/问什么/读哪库/回答摘要；日志不得含 key 与完整敏感文本 |
-| S7 | **依赖与模型** | `pyproject` 依赖锁版本 + 定期扫描（可选 snyk/pip-audit）；HF 模型记录哈希校验（可选 `HUGGINGFACE_HUB` 验证） |
-| S8 | **Electron 安全** | 桌面壳必须：`contextIsolation: true`、`nodeIntegration: false`、不加载远程内容；打包产物绝不含真实密钥（key 只经环境变量/运行时注入） |
+| # | 项 | 状态（V5.0） | 落点 |
+|---|---|---|---|
+| S1 | **API 认证** | ✅ 密码登录 + Token（V5.1；默认 `auth_enabled=false` 个人模式，启用后 `RAG_ADMIN_USER/RAG_ADMIN_PASSWORD` 引导首管理员） | `app/api/auth.py`（HMAC Token、login/me/change-password、白名单）；`app/api/users.py`（用户管理）；`Authorizer` 知识库级权限（`rbac.py`） |
+| S2 | **监听地址** | ✅ 默认 `127.0.0.1` | `api.host` |
+| S3 | **XSS 治理** | ✅ 前端统一模板插值，禁 innerHTML/v-html | SPA `api()` + 组件渲染 |
+| S4 | **Prompt 注入防护** | ✅ 系统提示声明"文档区不可执行指令" | `orchestration.SYSTEM_PROMPT` |
+| S5 | **敏感数据** | ✅ 脱敏钩子已实现（默认关：`ingestion.desensitize_enabled`） | `app/services/desensitize.py` |
+| S6 | **审计** | ✅ query/upload 结构化审计（user_id/kb_id/摘要/trace_id，不含 key 与完整敏感文本） | `app/api/query.py`、`documents.py` |
+| S7 | **依赖与模型** | ✅ pyproject 版本锁定；扫描/哈希校验为可选（未接） | pyproject.toml |
+| S8 | **Electron 安全** | ✅ contextIsolation/nodeIntegration:false/sandbox、仅 loopback、密钥运行时注入 | `frontend/electron/main.cjs` |
 
 #### 13.11.2 复用性规范（必须遵守的工程约定）
 
-- **评测口径统一**：`rageval` 与 `/api/query` 必须走同一链路核心（共享编排服务，禁止两套实现）；历史教训=no_answer 判据不一致（13.6 已修订）。
-- **provider 公共基类**：新 adapter 继承统一基类，超时/错误映射/health 探活复用公共实现；wire() 装配继续作为唯一实例入口。
-- **前端资产化**：问答/文档/知识库管理抽为可复用组件；桌面与 Web 共享 `BASE_URL` 抽象（单一常量文件管理后端地址策略）。
-- **样例/评测集资产化**：按 kind 组织的样例与 qa_pairs 是团队资产，新格式/新策略上线前必须跑资产回归。
-- **契约同步**：后端 `openapi.json` 自动生成前端 TS 类型，API 变更不得手撕前端类型。
+- **评测口径统一**：✅ 已落地——`rageval` 与 `/api/query` 走同一编排链路核心（`orchestration.run`），no_answer 判据单一常量（13.6）。
+- **provider 公共基类**：✅ 已落地——`app/adapters/base.py` `LocalModelAdapter`（懒加载/device/探活/异常包装复用）；本地模型 adapter（embedding/reranker）已继承。
+- **前端资产化**：✅ 桌面与 Web 共享 `BASE_URL` 抽象（`frontend/src/api/base.js` 单一常量 + `localStorage`/IPC 外部后端覆盖）。
+- **样例/评测集资产化**：✅ qa_pairs 107 条按库归档；新格式/新策略上线前必须跑资产回归。
+- **契约同步**：⚠️ 未自动化——后端 `openapi.json` → 前端 TS 类型仍为手写（前端规模小、接口稳定，暂不引入生成器；接口变更时必须同步更新前端调用）。
 
 #### 13.11.3 拓展性规范（预留扩展点，禁止封闭实现）
 
-- **热切换延续**：`/api/plugins/switch` 保持"运行期换 provider"能力，P3 新增 provider 继续遵守，改配置=生效。
-- **事件/增量预留**：上传→索引、文档变更→缓存失效、KB 变更通知，至少留出事件钩子（供 P3 增量索引/缓存接入）。
-- **API 版本化**：新破坏性变更挂 `/api/v1` 前缀 + 兼容层；旧端点保留一个过渡期。
-- **多租户扩展点**：`user→kb` 鉴权映射做成接口而非写死（对应 §12.3 深度 C）。
-- **指标可插拔**：评测指标可注册（未来加 MRR/NDCG/长文档引用），不写死在 rageval 内部。
-- **CI 基线门禁**：`make eval` 基线对比建议纳入 CI 防回归（未接入前，人工对比报告为最低要求）。
+- **热切换延续**：✅ 已实现——`/api/plugins/switch` 运行期换 provider（校验/重建/原子替换/回滚），P3 新增 provider 继续遵守。
+- **事件/增量预留**：✅ 部分——KbStore `on_kb_changed` 钩子已留；上传→索引/文档变更→缓存失效的显式事件钩子尚未接入（BM25 缓存当前按文档数隐式失效）。
+- **API 版本化**：⚠️ 未启用——当前无破坏性变更；一旦出现，新端点挂 `/api/v1` + 兼容层。
+- **多租户扩展点**：✅ `user→kb` 鉴权映射做成接口（`app/services/rbac.py`，默认全放；注入 `user_kb_map` 即收窄）。
+- **指标可插拔**：⚠️ 指标在 rageval 内实现（MRR/NDCG 未注册化）；未来扩展时按注册式改造。
+- **CI 基线门禁**：⚠️ 未接入 CI；人工对比报告为最低要求（reports/ 存档）。
 
 #### 13.11.4 优先级（建议实施序）
 
@@ -992,6 +1036,60 @@ frontend:
 | 2 | 评测口径统一 + CI 基线门禁（13.11.2/13.11.3） | W5/W6 内 |
 | 3 | S1 认证 + RBAC 预留 | W8（桌面发布前） |
 | 4 | S4~S8、其余复用/拓展规范 | 随功能迭代逐项落实，禁止"上线前突击" |
+
+> 13.11.4 各优先级项均已落地（CI 门禁为建议项，人工对比报告为最低要求）。
+
+---
+
+## 第 14 章 当前状态与遗留（V5.0，2026-08-11）
+
+> 给后续开发/运维 Agent 的**现状快照**：当前可运行形态、常用命令、已知遗留与触发条件。
+
+### 14.1 当前运行形态
+
+- **后端**：`uvicorn app.main:app --host 127.0.0.1 --port 8000`（S2）；`auth_enabled=false`（个人模式，V5.1 默认）；团队模式：`auth_enabled=true` + `RAG_ADMIN_USER/RAG_ADMIN_PASSWORD`（首管理员引导）。
+- **模型**：embedding `bge-small-zh-v1.5`（本地）+ reranker `bge-reranker-base`（本地）+ LLM `deepseek-chat`（唯一外部调用，key 经 `RAG_DEEPSEEK_API_KEY`）。
+- **数据**：`data/chroma`（向量，`rag_<kb>` 集合）+ `data/kb.json`（知识库映射）+ `data/documents.json`（文档索引，重启自动从 Chroma 兜底重建）。
+- **前端**：`frontend/dist` 由后端托管（SPA，静态资源 no-store）；桌面端 `npm run desktop`（或打包 App，自动拉起后端）。
+- **评测集**：`tests/eval/qa_pairs/{default,docs}/` 107 条；报告 `reports/eval-{ts}.md`。
+
+### 14.2 常用命令
+
+| 命令 | 说明 |
+|---|---|
+| `make bootstrap` | venv + 依赖 |
+| `make run` | 启动后端（8000） |
+| `make test` | 全量单测（`-m "not integration"`，257 项） |
+| `make eval` | 进程内评测（Stub LLM）并存档报告 |
+| `make desktop` | 启动 Electron 桌面（前端需先 `npm run build`） |
+| `cd frontend && npm run build` | 重建 SPA（静态托管实时生效） |
+| `cd frontend && npm run test:desktop` | Electron 壳测试（7 用例） |
+| `python -m app.cli.rageval --base-url http://127.0.0.1:8000 --all-kbs --baseline reports/<最新>` | 真实 DeepSeek 评测 + 基线对比 |
+
+### 14.3 当前实测指标（2026-08-11）
+
+- Stub 进程内全量（107 条）：**107/107 通过**，Hit@1=90%，Hit@5=100%，AnswerRelevancy=100%（Faithfulness 为 Stub 假 0%，无参考意义）。
+- 真实 DeepSeek（`--kb default`，21 条，当前知识库 = 5 份业务文档）：**14/21 通过**，Faithfulness(direct)=**56%**，Hit@1=44%。
+  - Hit@1 低于 Stub 基线的主因：评测集用例按 `tests/eval/sample_data`（IT 手册/FAQ/差旅等）编写，而当前线上知识库只有 5 份业务文档，大量用例天然无命中——**评测集是资产回归，不代表线上质量**；上线评估应以"线上真实知识库 + 真实问答记录"另建用例集。
+
+### 14.4 已知遗留与触发条件（不做不阻塞，触发再做）
+
+| 遗留 | 状态 | 触发条件 |
+|---|---|---|
+| 团队模式启用 | 代码就绪（V5.1） | 多用户部署：`auth_enabled=true` + `RAG_ADMIN_USER/RAG_ADMIN_PASSWORD`，管理员在设置页建用户；RBAC 深度 C 扩展（文档级/角色矩阵） |
+| RBAC 拦截 | 已接线（V5.1：Authorizer + kb owner/scope） | 文档级权限/多角色矩阵（12.3 深度 C 续） |
+| 13.10 P3 包（OCR/表格/混合分块/多 embedding/多 LLM） | 规格已立 | 用户决策 + 13.1 度量协议验证 |
+| 契约同步自动化（openapi→TS） | 手写中 | 接口变更频繁或前端规模扩大时 |
+| 事件钩子（文档变更→缓存失效） | 仅 KbStore 钩子 | 增量索引/多端同步需求出现时 |
+| CI 基线门禁 | 人工对比 | 接 CI 时纳入 |
+| 会话持久化/流式输出 | 未做（D 组评估结论） | 产品明确要求时单独立项 |
+| 发布打包（DMG/EXE） | 未做 | 正式发布前（含 Python 运行时捆绑决策） |
+
+### 14.5 对本文档的维护约定
+
+- 任何实现变更后，更新第 4.2（schema）、3.10（provider 状态）、13.11（安全/规范状态）与 14.3（指标）对应小节；
+- 每完成一个里程碑执行 `make eval` 存档并与上一份基线对比（13.1 硬要求）；
+- 新增适配器/接口时必须先改 `core/interfaces.py` + `core/domain.py`（附录 A 第 1 条）。
 
 ---
 

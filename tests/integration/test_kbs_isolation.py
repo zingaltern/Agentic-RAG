@@ -34,11 +34,18 @@ def iso_client(tmp_path_factory):
 
     config = load_config()
     config.vector_store.persist_dir = str(tmp_path_factory.mktemp("chroma"))
-    app = create_app(config=config, components=True, llm=StubLLM(),
+    config.documents.persist_file = str(tmp_path_factory.mktemp("persist") / "documents.json")
+    config.kbs.persist_file = str(tmp_path_factory.mktemp("persist") / "kb.json")
+    from app.services.documents_store import DocumentsStore
+    from app.services.user_store import UserStore
+
+    app = create_app(config=config, components=True, prewarm=False, llm=StubLLM(),
                      embedding=StubEmbedding(dimension=128),
                      reranker=IdentityReranker(rerank_top_k=5),
                      evaluator=RuleEvaluator(rule_threshold=0.45, top_n=5),
-                     kbs=KbStore(persist_file=str(tmp_path_factory.mktemp("kb") / "kb.json")))
+                     kbs=KbStore(persist_file=str(tmp_path_factory.mktemp("kb") / "kb.json")),
+                     users=UserStore(persist_file=str(tmp_path_factory.mktemp("persist") / "users.json")),
+                     documents=DocumentsStore(persist_file=str(tmp_path_factory.mktemp("persist") / "documents.json")))
     with TestClient(app) as client:
         yield client
 

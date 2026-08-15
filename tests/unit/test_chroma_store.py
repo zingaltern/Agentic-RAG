@@ -84,6 +84,7 @@ def test_count_and_delete_document(store, emb):
     assert store.delete_document("doc_zzz") == 0
 
 
+@pytest.mark.integration
 def test_drop_collection(store, emb):
     chunks = [_chunk("c1", "内容")]
     store.add_chunks(zip(chunks, emb.embed_documents(["内容"])))

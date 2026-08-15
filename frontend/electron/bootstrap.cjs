@@ -12,8 +12,8 @@ const path = require('path')
 
 const DEFAULT_PORT = 8000
 const MAX_PORT_TRIES = 5
-const READY_TIMEOUT_MS = 30000
-const PROBE_TIMEOUT_MS = 2000
+const READY_TIMEOUT_MS = 60000
+const PROBE_TIMEOUT_MS = 20000
 
 function isPortInUse(port, host = '127.0.0.1') {
   return new Promise((resolve) => {
@@ -33,7 +33,7 @@ async function findFreePort(start = DEFAULT_PORT, maxTries = MAX_PORT_TRIES) {
   return null
 }
 
-/** 单次 /api/health 探活：status=ok 才算就绪。 */
+/** 单次 /api/health 探活：ok / degraded（模型预热中）即视为已就绪，加快窗口出现。 */
 function probeHealth(port, host = '127.0.0.1', timeoutMs = PROBE_TIMEOUT_MS) {
   return new Promise((resolve) => {
     const req = http.get({ host, port, path: '/api/health', timeout: timeoutMs }, (res) => {
@@ -42,7 +42,8 @@ function probeHealth(port, host = '127.0.0.1', timeoutMs = PROBE_TIMEOUT_MS) {
       res.on('end', () => {
         try {
           const json = JSON.parse(body)
-          resolve(Boolean(json && json.code === 0 && json.data && json.data.status === 'ok'))
+          const status = json && json.data && json.data.status
+          resolve(Boolean(json && json.code === 0 && (status === 'ok' || status === 'degraded')))
         } catch {
           resolve(false)
         }
@@ -63,8 +64,8 @@ async function waitReady(port, timeoutMs = READY_TIMEOUT_MS, intervalMs = 500) {
   return false
 }
 
-/** 以 .venv 拉起 uvicorn（cwd=项目根，仅 127.0.0.1 监听）。 */
-function spawnBackend(pythonBin, cwd, port) {
+/** 以 .venv 拉起 uvicorn（cwd=项目根，仅 127.0.0.1 监听）；日志输出到 logFile（便于诊断）。 */
+function spawnBackend(pythonBin, cwd, port, logFile = null) {
   const child = spawn(
     pythonBin,
     ['-m', 'uvicorn', 'app.main:app', '--host', '127.0.0.1', '--port', String(port)],
@@ -74,7 +75,25 @@ function spawnBackend(pythonBin, cwd, port) {
       stdio: 'pipe',
     },
   )
+  if (logFile) {
+    fs.mkdirSync(path.dirname(logFile), { recursive: true })
+    const sink = fs.createWriteStream(logFile, { flags: 'a' })
+    child.stdout.pipe(sink)
+    child.stderr.pipe(sink)
+  }
   return child
+}
+
+/** 读取后端日志尾部（诊断用，最多返回 lastLines 行）。 */
+function tailBackendLog(logFile, lastLines = 30) {
+  try {
+    if (!logFile || !fs.existsSync(logFile)) return '(后端日志尚不存在)'
+    const text = fs.readFileSync(logFile, 'utf-8')
+    const lines = text.trim().split('\n')
+    return lines.slice(-lastLines).join('\n') || '(日志为空)'
+  } catch (e) {
+    return `(读取日志失败: ${e.message})`
+  }
 }
 
 /** 级联终止后端子进程（Windows taskkill /T，其他 SIGTERM→SIGKILL 兜底）。 */
@@ -113,6 +132,28 @@ function writeExternalBase(userDataDir, url) {
   fs.writeFileSync(externalBaseFile(userDataDir), JSON.stringify({ url: url || '' }))
 }
 
+/** 打包模式项目根（userData 持久化 project_dir.json：首次引导选择后记住）。 */
+function projectDirFile(userDataDir) {
+  return path.join(userDataDir, 'project_dir.json')
+}
+function readProjectDir(userDataDir) {
+  try {
+    const p = projectDirFile(userDataDir)
+    if (!fs.existsSync(p)) return null
+    const parsed = JSON.parse(fs.readFileSync(p, 'utf-8'))
+    const dir = parsed && parsed.dir
+    if (!dir) return null
+    const py = path.join(dir, '.venv', 'bin', 'python')
+    return fs.existsSync(py) ? dir : null      // 目录失效则视为未配置
+  } catch {
+    return null
+  }
+}
+function writeProjectDir(userDataDir, dir) {
+  fs.mkdirSync(userDataDir, { recursive: true })
+  fs.writeFileSync(projectDirFile(userDataDir), JSON.stringify({ dir }))
+}
+
 module.exports = {
   DEFAULT_PORT,
   MAX_PORT_TRIES,
@@ -125,4 +166,8 @@ module.exports = {
   killBackend,
   readExternalBase,
   writeExternalBase,
+  readProjectDir,
+  writeProjectDir,
+  spawnBackend,
+  tailBackendLog,
 }

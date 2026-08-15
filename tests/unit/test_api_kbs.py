@@ -11,12 +11,14 @@ from tests.unit.fakes import StubEmbedding
 
 
 @pytest.fixture()
-def kb_client(tmp_path):
+def kb_client(tmp_path, isolated_stores):
     config = load_config()
     config.vector_store.persist_dir = str(tmp_path / "chroma")
-    app = create_app(config=config, components=True,
+    config.documents.persist_file = str(tmp_path / "documents.json")
+    app = create_app(config=config, components=True, prewarm=False,
                      embedding=StubEmbedding(dimension=128),
-                     kbs=KbStore(persist_file=str(tmp_path / "kb.json")))
+                     kbs=isolated_stores["kbs"], users=isolated_stores["users"],
+                     documents=isolated_stores["documents"])
     with TestClient(app) as c:
         yield c
 
@@ -57,6 +59,7 @@ def test_create_kb_empty_name_400(kb_client):
     assert body2["code"] == 40001
 
 
+@pytest.mark.integration
 def test_delete_kb_cascades(kb_client):
     created = kb_client.post("/api/kbs", json={"name": "docs"}).json()["data"]
     # 往该库入库后删除 → 物理集合级联清空

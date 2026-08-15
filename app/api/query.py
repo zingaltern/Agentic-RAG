@@ -1,15 +1,17 @@
-"""问答（DEVELOPMENT.md 6.4、13.5）。
+"""问答（DEVELOPMENT.md 6.4、13.5、V5.1）。
 
 - 全同步链路：OrchestrationService.run（内置全局/检索超时预算）。
 - 错误映射：反思超限 → 21001（兜底文案）；超时 → 21002；LLM 失败 → 30001（统一异常处理器转包）。
 - top_k 受 retriever.top_k 上限约束；filters/collection 透传并贯穿反思循环。
 - 13.5 多知识库：可选 kb_id（与 collection 二选一，kb_id 优先，缺省 default），库不存在 → 40001。
+- V5.1：读权限按 Authorizer.can_read_kb 校验。
 """
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 
+from app.api.auth import get_authorizer
 from app.api.utils import fail, get_deps, ok
 from app.core.errors import InternalError, ValidationError
 from app.core.registry import Dependencies
@@ -22,6 +24,7 @@ class QueryRequest(BaseModel):
 
     query: str = Field(..., min_length=1, max_length=2000)
     session_id: str | None = None
+    history: list[dict] | None = None   # 会话内最近若干轮 {role: user|assistant, content}，供生成阶段理解上下文
     top_k: int | None = Field(default=None, ge=1)
     filters: dict | None = None
     collection: str | None = None
@@ -58,9 +61,16 @@ def query(payload: QueryRequest, request: Request,
             raise ValidationError(f"知识库不存在: {payload.kb_id!r}")
         collection = info.collection
     elif payload.collection:
-        collection = payload.collection          # 旧客户端直传集合名（向后兼容）
+        info = next((k for k in deps.kbs.list() if k.collection == payload.collection), None)
+        if info is None:
+            raise ValidationError(f"知识库不存在: {payload.collection!r}")
+        collection = info.collection
     else:
+        info = deps.kbs.get("default")
         collection = deps.kbs.collection_of("default")
+    # V5.1：读权限校验（不可见库一律 40101 语义由 Authorizer 判定）
+    if not get_authorizer(request).can_read_kb(getattr(request.state, "user", None), info):
+        raise ValidationError(f"无权访问知识库: {info.kb_id!r}")
 
     result = deps.orchestration.run(
         query=payload.query,
@@ -68,6 +78,7 @@ def query(payload: QueryRequest, request: Request,
         collection=collection,
         top_k=payload.top_k,
         debug=payload.debug,
+        history=payload.history,
     )
     # S6 审计（13.11.1）：含 user_id/kb_id 与回答摘要，不含完整敏感文本与 key
     from app.api.auth import current_user

@@ -5,8 +5,9 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 
+from app.api.auth import get_authorizer
 from app.api.utils import get_deps, ok
-from app.core.errors import NotFoundError, ValidationError
+from app.core.errors import AuthError, NotFoundError, ValidationError
 from app.core.registry import Dependencies
 from app.services.ingestion import compute_content_hash
 
@@ -25,13 +26,28 @@ async def upload(file: UploadFile = File(...),
         raise InternalError("上传流水线尚未装配")
     if deps.kbs is None or not deps.kbs.exists(kb_id):
         raise ValidationError(f"知识库不存在: {kb_id!r}")
+    if request is not None:
+        from app.api.auth import get_authorizer
+
+        kb_info = deps.kbs.get(kb_id)
+        if not get_authorizer(request).can_write_kb(getattr(request.state, "user", None), kb_info):
+            raise AuthError("无权向该知识库上传文档（共享库仅管理员可写）")
     cfg = deps.config.ingestion
     filename = file.filename or "unnamed"
     ext = Path(filename).suffix.lower().lstrip(".")
     if ext not in cfg.allowed_extensions:
         raise ValidationError(f"不支持的文档格式: {filename}（允许：{cfg.allowed_extensions}）")
+    max_bytes = cfg.max_file_size_mb * 1024 * 1024
+    if request is not None:
+        declared = request.headers.get("content-length")
+        if declared:
+            try:
+                if int(declared) > max_bytes:
+                    raise ValidationError(f"文件超过 {cfg.max_file_size_mb}MB 限制: {filename}")
+            except ValueError:
+                pass
     raw = await file.read()
-    if len(raw) > cfg.max_file_size_mb * 1024 * 1024:
+    if len(raw) > max_bytes:
         raise ValidationError(f"文件超过 {cfg.max_file_size_mb}MB 限制: {filename}")
 
     content_hash = compute_content_hash(raw)
@@ -62,39 +78,79 @@ async def upload(file: UploadFile = File(...),
 
 
 @router.get("")
-def list_documents(page: int = 1, size: int = 20,
+def list_documents(page: int = 1, size: int = 20, kb_id: str | None = None,
+                   request: Request = None,
                    deps: Dependencies = Depends(get_deps)) -> dict:
-    """分页列表（按创建时间倒序，6.5）。"""
+    """分页列表（按创建时间倒序，6.5）；V5.1：仅返回当前用户可访问库的文档。"""
     if deps.documents is None:
         return ok({"items": [], "total": 0})
-    return ok({"items": deps.documents.list(page, size), "total": deps.documents.count()})
+    user = getattr(request.state, "user", None) if request else None
+    authorizer = get_authorizer(request) if request else None
+    accessible = set()
+    if authorizer is not None and deps.kbs is not None:
+        accessible = {k.kb_id for k in authorizer.list_accessible_kbs(user, deps.kbs.list())}
+    if kb_id is not None:
+        if deps.kbs is None or not deps.kbs.exists(kb_id):
+            raise ValidationError(f"知识库不存在: {kb_id!r}")
+        if accessible and kb_id not in accessible:
+            raise NotFoundError(f"文档不存在或无权访问: kb={kb_id}")
+    if accessible:
+        all_items = deps.documents.list(page=1, size=10000, kb_id=kb_id)
+        items = [e for e in all_items if e.get("kb_id") in accessible]
+        return ok({"items": items[(page - 1) * size:(page - 1) * size + size],
+                   "total": len(items)})
+    return ok({"items": deps.documents.list(page, size, kb_id=kb_id),
+               "total": deps.documents.count(kb_id=kb_id)})
 
 
 @router.get("/{document_id}")
-def get_document(document_id: str, deps: Dependencies = Depends(get_deps)) -> dict:
-    """单文档元数据。"""
+def get_document(document_id: str, request: Request = None,
+                 deps: Dependencies = Depends(get_deps)) -> dict:
+    """单文档元数据（V5.1：不可见库的文档一律 40401，不泄露存在性）。"""
     entry = deps.documents.get(document_id) if deps.documents else None
     if entry is None:
+        raise NotFoundError(f"文档不存在: {document_id}")
+    if request is not None and not _can_access_doc(request, entry.kb_id):
         raise NotFoundError(f"文档不存在: {document_id}")
     return ok({
         "document_id": entry.document_id,
         "filename": entry.filename,
         "title": entry.title,
         "chunk_count": entry.chunk_count,
+        "kb_id": entry.kb_id,
         "created_at": entry.created_at,
     })
 
 
+def _can_access_doc(request: Request, kb_id: str) -> bool:
+    from app.api.auth import get_authorizer
+
+    deps = request.app.state.deps
+    info = deps.kbs.get(kb_id) if deps.kbs else None
+    if info is None:
+        return False
+    return get_authorizer(request).can_read_kb(getattr(request.state, "user", None), info)
+
+
 @router.delete("/{document_id}")
-def delete_document(document_id: str, deps: Dependencies = Depends(get_deps)) -> dict:
-    """删除文档（级联清向量块，6.5）。"""
+def delete_document(document_id: str, request: Request = None,
+                    deps: Dependencies = Depends(get_deps)) -> dict:
+    """删除文档（级联清向量块，6.5）；向量删除定位文档所属库，而非配置默认集合。"""
     entry = deps.documents.get(document_id) if deps.documents else None
     if entry is None:
         raise NotFoundError(f"文档不存在: {document_id}")
+    if request is not None:
+        info = deps.kbs.get(entry.kb_id) if deps.kbs else None
+        if info is None or not get_authorizer(request).can_write_kb(
+                getattr(request.state, "user", None), info):
+            raise NotFoundError(f"文档不存在: {document_id}")
+    collection = None
+    if deps.kbs is not None:
+        collection = deps.kbs.collection_of(entry.kb_id)
     deleted = 0
     if deps.vector_store is not None:
         deleted = deps.vector_store.delete_document(
-            document_id, collection=deps.config.vector_store.collection)
+            document_id, collection=collection or deps.config.vector_store.collection)
     if deps.documents is not None:
         deps.documents.delete(document_id)
     return ok({"document_id": document_id, "deleted_chunks": deleted})

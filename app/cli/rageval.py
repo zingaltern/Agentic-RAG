@@ -78,18 +78,37 @@ def load_pairs(path: Path) -> list[dict]:
     return pairs
 
 
-def call_query(base_url: str, query: str, kb_id: str | None = None) -> dict:
+def call_query(base_url: str, query: str, kb_id: str | None = None,
+               token: str | None = None) -> dict:
     payload: dict = {"query": query, "top_k": 5, "debug": True}
     if kb_id:
         payload["kb_id"] = kb_id
+    headers = {"Content-Type": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
     req = urllib.request.Request(
         f"{base_url}/api/query",
         data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
+        headers=headers,
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=60) as resp:
         return json.loads(resp.read().decode("utf-8"))
+
+
+def login_and_get_token(base_url: str, username: str, password: str) -> str:
+    """V5.1：现场登录换取 token（--login <user> <pass>）。"""
+    req = urllib.request.Request(
+        f"{base_url}/api/auth/login",
+        data=json.dumps({"username": username, "password": password}).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        body = json.loads(resp.read().decode("utf-8"))
+    if body.get("code") != 0:
+        sys.exit(f"登录失败（{base_url}）：{body.get('message')}")
+    return body["data"]["token"]
 
 
 # -- 进程内模式 ---------------------------------------------------------------
@@ -369,6 +388,9 @@ def main() -> int:
     parser.add_argument("--all-kbs", action="store_true",
                         help="遍历 tests/eval/qa_pairs/ 下全部库目录评测")
     parser.add_argument("--baseline", default=None, help="基线报告路径（对比 diff 列）")
+    parser.add_argument("--token", default=None, help="HTTP 模式：Bearer token（认证启用时）")
+    parser.add_argument("--login", nargs=2, metavar=("USER", "PASS"),
+                        help="HTTP 模式：现场登录换取 token")
     args = parser.parse_args()
 
     from app.core.config import load_config
@@ -392,10 +414,13 @@ def main() -> int:
         if args.in_process:
             responses = _run_in_process(config, docs, pairs, kb_id=kb)
         else:
+            token = args.token
+            if args.login:
+                token = login_and_get_token(args.base_url, args.login[0], args.login[1])
             responses = []
             for pair in pairs:
                 try:
-                    responses.append(call_query(args.base_url, pair["query"], kb_id=kb))
+                    responses.append(call_query(args.base_url, pair["query"], kb_id=kb, token=token))
                 except urllib.error.HTTPError as exc:
                     responses.append({"code": exc.code, "data": {}, "message": f"HTTP {exc.code}"})
                 except Exception as exc:  # noqa: BLE001

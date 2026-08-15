@@ -31,6 +31,8 @@ class KbInfo:
     name: str
     description: str = ""
     collection: str = DEFAULT_COLLECTION
+    owner: str = "admin"             # V5.1：私有库归属（shared 库 owner 无实际意义）
+    scope: str = "shared"            # V5.1：shared|private
     created_at: float = 0.0
 
 
@@ -48,7 +50,8 @@ class KbStore:
         self._kbs: dict[str, KbInfo] = {
             default_kb: KbInfo(kb_id=default_kb, name="默认知识库",
                                description="内置默认知识库（不可删除）",
-                               collection=DEFAULT_COLLECTION, created_at=time.time()),
+                               collection=DEFAULT_COLLECTION,
+                               owner="admin", scope="shared", created_at=time.time()),
         }
         self.on_kb_changed: list[Callable[[str, str], None]] = []   # (event: create|delete, kb_id)
         self._load()
@@ -59,21 +62,29 @@ class KbStore:
         path = Path(self._persist_file)
         if not path.exists():
             return
+        migrated = False
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
             for item in raw:
                 kb_id = item.get("kb_id")
                 if not kb_id or kb_id == self.default_kb:
                     continue
+                # V5.1 kb.json v2 兼容迁移：旧记录（无 owner/scope）补默认值
+                if "owner" not in item or "scope" not in item:
+                    migrated = True
                 self._kbs[kb_id] = KbInfo(
                     kb_id=kb_id,
                     name=item.get("name", kb_id),
                     description=item.get("description", ""),
                     collection=item.get("collection", kb_id),
+                    owner=item.get("owner", "admin"),
+                    scope=item.get("scope", "shared"),
                     created_at=item.get("created_at", 0.0),
                 )
         except Exception as exc:  # noqa: BLE001
             logger.warning("kb.json 读取失败（%s）：%s，回退内置 default", path, exc)
+        if migrated:
+            self._persist()
 
     def _persist(self) -> None:
         try:
@@ -88,7 +99,8 @@ class KbStore:
     @staticmethod
     def _to_dict(info: KbInfo) -> dict:
         return {"kb_id": info.kb_id, "name": info.name, "description": info.description,
-                "collection": info.collection, "created_at": info.created_at}
+                "collection": info.collection, "owner": info.owner, "scope": info.scope,
+                "created_at": info.created_at}
 
     # -- 事件钩子（P3 预留：增量索引/多端同步） ----------------------------------
 
@@ -101,10 +113,13 @@ class KbStore:
 
     # -- CRUD -------------------------------------------------------------------
 
-    def create(self, name: str, description: str = "") -> KbInfo:
+    def create(self, name: str, description: str = "",
+               owner: str = "admin", scope: str = "shared") -> KbInfo:
         """按 name 生成 kb_id（slug 化 + 冲突/非法追加 4 位短 hash）。"""
         if not name or not name.strip():
             raise ValueError("name 不能为空")
+        if scope not in ("shared", "private"):
+            raise ValueError(f"非法 scope: {scope!r}")
         base = slugify(name) or "kb"
         kb_id = base
         if not KB_ID_RE.match(kb_id):
@@ -115,7 +130,7 @@ class KbStore:
                 if kb_id in self._kbs:      # 极端冲突：再追加
                     kb_id = f"kb_{hashlib.md5(name.encode('utf-8')).hexdigest()[:8]}"
             info = KbInfo(kb_id=kb_id, name=name.strip(), description=description,
-                          collection=kb_id, created_at=time.time())
+                          collection=kb_id, owner=owner, scope=scope, created_at=time.time())
             self._kbs[kb_id] = info
         self._persist()
         self._notify("create", kb_id)

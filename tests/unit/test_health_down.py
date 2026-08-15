@@ -17,11 +17,15 @@ class _BrokenStore:
         raise RuntimeError("存储不可达")
 
 
-def test_health_down_when_component_fails(tmp_path):
+def test_health_down_when_component_fails(tmp_path, isolated_stores):
     config = load_config()
     config.vector_store.persist_dir = str(tmp_path / "chroma")
-    app = create_app(config=config, components=True,
-                     embedding=_BrokenEmbedding(), vector_store=_BrokenStore())
+    config.documents.persist_file = str(tmp_path / "documents.json")
+    config.kbs.persist_file = str(tmp_path / "kb.json")
+    app = create_app(config=config, components=True, prewarm=False,
+                     embedding=_BrokenEmbedding(), vector_store=_BrokenStore(),
+                     kbs=isolated_stores["kbs"], users=isolated_stores["users"],
+                     documents=isolated_stores["documents"])
     with TestClient(app) as client:
         body = client.get("/api/health").json()
     assert body["code"] == 0
@@ -31,7 +35,7 @@ def test_health_down_when_component_fails(tmp_path):
     assert body["data"]["status"] == "down"
 
 
-def test_health_not_loaded_when_embedding_unready(tmp_path):
+def test_health_not_loaded_when_embedding_unready(tmp_path, isolated_stores):
     """embedding.ready() 返回 False（如加载失败未抛异常）→ not_loaded + degraded。"""
 
     class _Unready:
@@ -40,7 +44,11 @@ def test_health_not_loaded_when_embedding_unready(tmp_path):
 
     config = load_config()
     config.vector_store.persist_dir = str(tmp_path / "chroma")
-    app = create_app(config=config, components=True, embedding=_Unready())
+    config.documents.persist_file = str(tmp_path / "documents.json")
+    config.kbs.persist_file = str(tmp_path / "kb.json")
+    app = create_app(config=config, components=True, prewarm=False, embedding=_Unready(),
+                     kbs=isolated_stores["kbs"], users=isolated_stores["users"],
+                     documents=isolated_stores["documents"])
     with TestClient(app) as client:
         body = client.get("/api/health").json()
     assert body["data"]["checks"]["embedding"] == "not_loaded"

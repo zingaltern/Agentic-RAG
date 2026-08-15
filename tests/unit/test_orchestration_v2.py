@@ -140,14 +140,17 @@ def test_debug_trace_records_actual_query_and_variants():
     assert rewritten[0]["rewritten"] == ["年假申请流程"]
 
 
-def test_wire_injects_embedding_and_llm(tmp_path):
+def test_wire_injects_embedding_and_llm(tmp_path, isolated_stores):
     """装配级：wire 把 embedding 注入 evaluator/detector，llm 注入 rewriter。"""
     from app.core.registry import wire
 
     config = load_config()
     config.vector_store.persist_dir = str(tmp_path / "chroma")
+    config.documents.persist_file = str(tmp_path / "documents.json")
+    config.kbs.persist_file = str(tmp_path / "kb.json")
     deps = wire(config, embedding=StubEmbedding(dimension=128), llm=_LLM(),
-                reranker=_Reranker())
+                reranker=_Reranker(), kbs=isolated_stores["kbs"],
+                users=isolated_stores["users"], documents=isolated_stores["documents"])
     from app.adapters.evaluator.semantic_v2 import SemanticV2Evaluator
     from app.adapters.detector.semantic_verifier import SemanticVerifierDetector
     from app.adapters.rewriter.llm_rewriter import LLMRewriter
@@ -161,17 +164,21 @@ def test_wire_injects_embedding_and_llm(tmp_path):
     assert deps.orchestration is not None
 
 
-def test_wire_fallback_providers_switchable(tmp_path):
+def test_wire_fallback_providers_switchable(tmp_path, isolated_stores):
     """旧 provider 可切回：identity/rule/citation 装配正常。"""
     from app.core.registry import wire
 
     config = load_config()
     config.vector_store.persist_dir = str(tmp_path / "chroma")
+    config.documents.persist_file = str(tmp_path / "documents.json")
+    config.kbs.persist_file = str(tmp_path / "kb.json")
     config.reranker.provider = "identity"
     config.evaluator.provider = "rule"
     config.rewriter.provider = "rule"
     config.detector.provider = "citation"
-    deps = wire(config, embedding=StubEmbedding(dimension=128), llm=_LLM())
+    deps = wire(config, embedding=StubEmbedding(dimension=128), llm=_LLM(),
+                kbs=isolated_stores["kbs"], users=isolated_stores["users"],
+                documents=isolated_stores["documents"])
     assert deps.reranker is not None and deps.evaluator is not None
     assert deps.rewriter is not None and deps.detector is not None
     assert deps.orchestration is not None

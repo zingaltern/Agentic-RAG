@@ -1,13 +1,15 @@
 <script setup>
 import { onMounted, ref } from 'vue'
+import { Delete, FolderOpened, FolderAdd } from '@element-plus/icons-vue'
 import { api } from '../api'
 import { useAppStore } from '../stores/app'
 
 const store = useAppStore()
 const kbs = ref([])
 const dialog = ref(false)
-const form = ref({ name: '', description: '' })
+const form = ref({ name: '', description: '', scope: 'shared' })
 const saving = ref(false)
+const isAdmin = () => store.currentUser && store.currentUser.role === 'admin'
 
 onMounted(loadKbs)
 async function loadKbs() {
@@ -18,23 +20,30 @@ async function loadKbs() {
 async function createKb() {
   if (!form.value.name.trim()) { store.pushError('请输入知识库名称'); return }
   saving.value = true
-  const res = await api('/api/kbs', {
-    method: 'POST',
-    body: JSON.stringify(form.value),
-  })
-  saving.value = false
-  if (res.code === 0) {
-    store.pushError(`已创建：${res.data.kb_id}`)
-    dialog.value = false
-    form.value = { name: '', description: '' }
-    loadKbs()
+  try {
+    const res = await api('/api/kbs', {
+      method: 'POST',
+      body: JSON.stringify(form.value),
+    })
+    if (res.code === 0) {
+      store.pushInfo(`已创建：${res.data.kb_id}`)
+      dialog.value = false
+      form.value = { name: '', description: '', scope: 'shared' }
+      loadKbs()
+    }
+  } finally {
+    saving.value = false
   }
+}
+
+function readOnlyKb(row) {
+  return row.scope === 'shared' && !isAdmin()
 }
 
 async function removeKb(kbId) {
   const res = await api(`/api/kbs/${kbId}`, { method: 'DELETE' })
   if (res.code === 0) {
-    store.pushError(`已删除知识库：${kbId}（集合级联清空）`)
+    store.pushInfo(`已删除知识库：${kbId}（集合级联清空）`)
     loadKbs()
   }
 }
@@ -44,23 +53,47 @@ async function removeKb(kbId) {
   <div>
     <div class="card">
       <div class="row">
-        <h2 style="flex: 1">③ 知识库管理</h2>
-        <el-button type="primary" @click="dialog = true">新建知识库</el-button>
+        <h2 class="card-title" style="flex: 1; margin: 0">
+          <span class="title-icon"><el-icon><FolderOpened /></el-icon></span>知识库管理
+        </h2>
+        <el-button type="primary" @click="dialog = true">
+          <el-icon style="margin-right: 5px"><FolderAdd /></el-icon>新建知识库
+        </el-button>
       </div>
       <el-table :data="kbs" size="small" border>
-        <el-table-column prop="kb_id" label="kb_id" min-width="120" />
+        <el-table-column prop="kb_id" label="标识（kb_id）" min-width="120" />
         <el-table-column prop="name" label="名称" min-width="140" />
         <el-table-column prop="description" label="描述" min-width="180" />
-        <el-table-column prop="collection" label="collection" width="120" />
-        <el-table-column label="操作" width="110">
+        <el-table-column label="归属" width="140">
+          <template #default="{ row }">
+            <el-tag v-if="row.scope === 'shared'" type="info" size="small">共享</el-tag>
+            <el-tag v-else type="warning" size="small">私有 · {{ row.owner }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="120">
           <template #default="{ row }">
             <el-tooltip v-if="row.kb_id === 'default'" content="默认库不可删除" placement="top">
               <span><el-button type="danger" size="small" disabled>删除</el-button></span>
             </el-tooltip>
-            <el-button v-else type="danger" size="small" @click="removeKb(row.kb_id)">删除</el-button>
+            <el-popconfirm
+              v-else-if="!readOnlyKb(row)"
+              title="删除知识库将级联清空全部向量，不可恢复。确认删除？"
+              confirm-button-text="删除"
+              cancel-button-text="取消"
+              @confirm="removeKb(row.kb_id)"
+            >
+              <template #reference>
+                <el-button type="danger" size="small">
+                  <el-icon style="margin-right: 4px"><Delete /></el-icon>删除
+                </el-button>
+              </template>
+            </el-popconfirm>
           </template>
         </el-table-column>
       </el-table>
+      <div class="muted" style="margin-top: 10px">
+        每个知识库对应一个向量集合（collection），由名称自动生成并分配集合名，无需手动配置。
+      </div>
     </div>
 
     <el-dialog v-model="dialog" title="新建知识库" width="420px">
@@ -71,6 +104,13 @@ async function removeKb(kbId) {
         <el-form-item label="描述">
           <el-input v-model="form.description" type="textarea" :rows="2" />
         </el-form-item>
+        <el-form-item v-if="isAdmin()" label="归属">
+          <el-select v-model="form.scope">
+            <el-option label="共享（全员可读，仅管理员可写）" value="shared" />
+            <el-option label="私有（仅本人可见可管理）" value="private" />
+          </el-select>
+        </el-form-item>
+        <div v-else class="muted">普通用户仅可创建私有库（服务端强制）</div>
       </el-form>
       <template #footer>
         <el-button @click="dialog = false">取消</el-button>

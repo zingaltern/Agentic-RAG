@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -19,13 +20,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.api import documents, health, jobs, kbs, plugins, query
-from app.api.auth import require_auth
+from app.api import documents, health, jobs, kbs, plugins, query, users
+from app.api.auth import TokenAuth, require_auth, router as auth_router
 from app.api.utils import fail
 from app.core.config import DEFAULT_SETTINGS_PATH, SystemConfig, load_config
 from app.core.errors import AppError, InternalError, ValidationError
 from app.core.logging import get_logger, set_trace_id, setup_logging
 from app.core.registry import Dependencies, wire
+from app.services.rbac import Authorizer
 
 APP_VERSION = "1.0.0"
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
@@ -36,11 +38,13 @@ def create_app(settings_path: str = DEFAULT_SETTINGS_PATH,
                components: bool = True,
                config: SystemConfig | None = None,
                deps: Dependencies | None = None,
+               prewarm: bool = True,
                **wire_kwargs: Any) -> FastAPI:
     """创建应用实例。
 
     - config：传入则以它为准（测试可改 persist_dir 等）。
     - deps：直接注入装配好的依赖（测试用）。
+    - prewarm：是否后台预热真实模型（默认 True；单测传 False 避免并发加载真实模型卡死）。
     - **wire_kwargs：透传给 wire（如 embedding=StubEmbedding()）。
     """
     if config is None:
@@ -48,6 +52,10 @@ def create_app(settings_path: str = DEFAULT_SETTINGS_PATH,
     setup_logging(level=config.logging.level, json=config.logging.json_enabled)
     if deps is None:
         deps = wire(config, components=components, **wire_kwargs)
+
+    if components and prewarm:
+        # 启动加速：模型后台预热（health 不受阻，首次提问不冷加载）
+        threading.Thread(target=prewarm_models, args=(deps,), daemon=True).start()
 
     app = FastAPI(
         title="Agentic RAG 智能知识库系统",
@@ -57,6 +65,18 @@ def create_app(settings_path: str = DEFAULT_SETTINGS_PATH,
     )
     app.state.deps = deps
     app.state.config = config
+    app.state.token_auth = TokenAuth(config.auth.secret)
+    app.state.authorizer = Authorizer()
+
+    # V5.1 首管理员引导：auth_enabled=true 且用户表为空时，用环境变量创建 admin
+    if config.api.auth_enabled and deps.users is not None and deps.users.is_empty():
+        if config.auth.admin_user and config.auth.admin_password:
+            deps.users.create(config.auth.admin_user, config.auth.admin_password,
+                              name="系统管理员", role="admin")
+            logger.info("已通过环境变量创建首管理员: %s", config.auth.admin_user)
+        else:
+            logger.warning("认证已启用但用户表为空：请配置 RAG_ADMIN_USER/RAG_ADMIN_PASSWORD "
+                           "后重启，或通过 CLI 创建首管理员")
 
     # 13.8 CORS：dev 模式 5173 跨域白名单（生产同源不受影响）
     if config.api.cors_origins:
@@ -89,6 +109,14 @@ def create_app(settings_path: str = DEFAULT_SETTINGS_PATH,
         response.headers["X-Trace-Id"] = trace_id
         return response
 
+    from starlette.exceptions import HTTPException as StarletteHTTPException
+
+    @app.exception_handler(StarletteHTTPException)
+    async def http_exception_handler(request: Request, exc: StarletteHTTPException) -> JSONResponse:
+        # 404/405 等框架级错误同样走统一 {code, message, data} 契约（40440/40500）
+        self_code = 40440 if exc.status_code == 404 else 40500 if exc.status_code == 405 else 50001
+        return JSONResponse(status_code=exc.status_code, content=fail(self_code, str(exc.detail)))
+
     @app.exception_handler(AppError)
     async def app_error_handler(request: Request, exc: AppError) -> JSONResponse:
         return JSONResponse(status_code=200, content=fail(exc.code, exc.message))
@@ -110,8 +138,10 @@ def create_app(settings_path: str = DEFAULT_SETTINGS_PATH,
     app.include_router(documents.router, dependencies=[Depends(require_auth)])
     app.include_router(jobs.router, dependencies=[Depends(require_auth)])
     app.include_router(query.router, dependencies=[Depends(require_auth)])
-    app.include_router(plugins.router)
+    app.include_router(plugins.router, dependencies=[Depends(require_auth)])
     app.include_router(kbs.router, dependencies=[Depends(require_auth)])
+    app.include_router(users.router, dependencies=[Depends(require_auth)])
+    app.include_router(auth_router, dependencies=[Depends(require_auth)])
 
     app.mount("/ui", StaticFiles(directory=str(WEB_DIR), html=True), name="ui")
 
@@ -124,8 +154,20 @@ def create_app(settings_path: str = DEFAULT_SETTINGS_PATH,
         if _assets.is_dir():
             app.mount("/assets", StaticFiles(directory=str(_assets)), name="spa-assets")
 
+        @app.middleware("http")
+        async def no_cache_static(request: Request, call_next) -> Any:
+            """SPA 静态资源禁用缓存：vite rebuild 后桌面 Electron 拖缓存旧页面。"""
+            resp = await call_next(request)
+            if not resp.headers.get("Cache-Control"):
+                path = request.url.path
+                if path == "" or path == "/" or path.startswith("/assets/") or path.startswith("/ui"):
+                    resp.headers["Cache-Control"] = "no-store"
+            return resp
+
         @app.get("/{full_path:path}", include_in_schema=False)
         async def spa_fallback(full_path: str) -> FileResponse:
+            if full_path.startswith("api/") or full_path == "api":
+                raise StarletteHTTPException(status_code=404, detail="接口不存在")
             if full_path == "ui" or full_path.startswith("ui/"):
                 rel = full_path[len("ui/"):] if full_path.startswith("ui/") else "index.html"
                 web_file = (WEB_DIR / rel).resolve()
@@ -137,3 +179,24 @@ def create_app(settings_path: str = DEFAULT_SETTINGS_PATH,
                 return FileResponse(candidate)
             return FileResponse(_dist / "index.html")
     return app
+
+
+def prewarm_models(deps: "Any") -> None:
+    """后台预热 embedding/reranker 模型（daemon 线程，不阻塞启动与 /api/health）。
+
+    模型本身懒加载（首次使用时加载）；预热让首次提问不等待下载/加载，
+    同时 health 只读探活（is_loaded）保持秒回。
+    """
+    import logging
+
+    logger = logging.getLogger("app.main")
+    try:
+        if deps.embedding is not None:
+            getattr(deps.embedding, "ready", lambda: True)()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("embedding 预热失败（首次提问将现场加载）: %s", exc)
+    try:
+        if deps.reranker is not None:
+            getattr(deps.reranker, "ready", lambda: True)()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("reranker 预热失败（首次提问将现场加载）: %s", exc)

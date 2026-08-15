@@ -2,6 +2,7 @@
  * 13.11.2：BASE_URL 单一常量文件 —— 后端地址策略唯一入口。
  * Web（dev/prod）同源走 ''（vite proxy / FastAPI 托管）；桌面端（W8）经 VITE_API_BASE 注入；
  * 设置页「连接外部后端」（localStorage external_base）优先覆盖（桌面经 userData IPC 持久化）。
+ * V5.1：登录 Token（localStorage auth_token）持久化，API Key 机制已移除。
  */
 export const BASE_URL = import.meta.env.VITE_API_BASE || ''
 
@@ -14,10 +15,22 @@ export function getBaseUrl() {
   }
 }
 
-export function getApiKey() {
+export function getToken() {
   try {
-    return localStorage.getItem('api_key') || ''
+    return localStorage.getItem('auth_token') || ''
   } catch {
     return ''
   }
+}
+
+export function setToken(token) {
+  try {
+    localStorage.setItem('auth_token', token || '')
+  } catch { /* ignore */ }
+}
+
+export function clearToken() {
+  try {
+    localStorage.removeItem('auth_token')
+  } catch { /* ignore */ }
 }

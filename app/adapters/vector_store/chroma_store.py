@@ -113,11 +113,26 @@ class ChromaStore(VectorStore):
     def count(self, collection: str = "kb") -> int:
         return self._coll(collection).count()
 
-    def drop_collection(self, collection: str = "kb") -> None:
+    def drop_collection(self, collection: str = "kb") -> bool:
+        """删除集合（含物理落盘）。超时保护：60s 内未完成按清理失败处理，杜绝挂死进程。
+
+        返回 True=已删除/不存在，False=超时或删除失败（调用方记日志继续后续流程）。
+        """
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError as _TimeoutError
+
+        from app.core.logging import get_logger
+
+        name = self._chroma_name(collection)
         try:
-            self._client.delete_collection(self._chroma_name(collection))
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(self._client.delete_collection, name)
+                future.result(timeout=60)
+            return True
+        except _TimeoutError:
+            get_logger("vector_store").warning("drop_collection 超时（>60s）：%s，按清理失败处理", name)
+            return False
         except Exception:
-            pass  # 集合不存在时静默
+            return True  # 集合不存在等异常按"已清理"处理（静默兼容旧行为）
 
     # -- 适配器扩展（BM25 索引 / 幂等去重） ------------------------------------
 
