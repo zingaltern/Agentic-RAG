@@ -88,6 +88,20 @@ class TableAwareConfig(BaseModel):
     json_max_bytes: int = 4096             # table_json 字节上限（超限截断+warning）
 
 
+class HardBoundaryConfig(BaseModel):
+    """标题硬边界（P1-5，DEVELOPMENT.md 5.2；默认关闭：聚合不感知 section 变更）。"""
+
+    enabled: bool = False
+
+
+class ContextPrefixConfig(BaseModel):
+    """上下文前缀（P1-5；默认关闭）。chunk.text 前缀不计切块 token 目标、计入 embedding。"""
+
+    enabled: bool = False
+    template: str = "{doc_title} > {section}"
+    include_page: bool = False             # 前缀附加页码（需 page_spans/page 可解析）
+
+
 class ChunkerConfig(BaseModel):
     """父子分块参数（5.2）。"""
 
@@ -95,6 +109,8 @@ class ChunkerConfig(BaseModel):
     child_target_tokens: int = 128
     token_char_ratio: float = 1.8            # 中文 token≈len(text)/1.8 估算
     table_aware: TableAwareConfig = TableAwareConfig()   # P1-4：表格原子块（默认关）
+    hard_boundary: HardBoundaryConfig = HardBoundaryConfig()     # P1-5：标题硬边界（默认关）
+    context_prefix: ContextPrefixConfig = ContextPrefixConfig()  # P1-5：上下文前缀（默认关）
 
 
 class VectorStoreConfig(BaseModel):

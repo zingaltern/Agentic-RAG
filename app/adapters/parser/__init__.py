@@ -281,7 +281,10 @@ def _parse_pdf(raw: bytes) -> tuple[str, dict]:
         pages_with_text = 0
         # P1-4：按阅读顺序登记全文档表格（index 在汇合后统一补齐）
         all_tables: list[dict] = []
+        # P1-5：页码行号区间 [[start_line, end_line, page], ...]，chunk 按段落起始行查表
+        page_spans: list[list[int]] = []
         for page in pdf:
+            page_start = global_line
             page_text = _extract_page_with_tables(page, all_tables)
             page_lines = page_text.split("\n")
             for heading in _pdf_page_headings(page, body_size):
@@ -292,6 +295,7 @@ def _parse_pdf(raw: bytes) -> tuple[str, dict]:
                 sections.append((heading, global_line + line_in_page))
             global_line += len(page_lines)
             parts.append(page_text)
+            page_spans.append([page_start, global_line - 1, page.number + 1])
             total_chars += len(page_text)
             if page_text.strip():
                 pages_with_text += 1
@@ -308,6 +312,8 @@ def _parse_pdf(raw: bytes) -> tuple[str, dict]:
         }
         if sections:
             metadata["sections"] = sections   # T5：字号启发式章节标题
+        if pdf.page_count > 1 and page_spans:
+            metadata["page_spans"] = page_spans   # P1-5：多页 PDF 页码行号区间（单页已由 page=1 覆盖）
         if all_tables:
             for i, t in enumerate(all_tables):
                 t["index"] = i
@@ -475,13 +481,17 @@ def _parse_pptx(raw: bytes) -> tuple[str, dict]:
     except Exception as exc:
         raise ParseError(f"PPT 解析失败（文件损坏或非 pptx）: {exc}") from exc
     lines: list[str] = []
-    for slide in prs.slides:
+    page_spans: list[list[int]] = []
+    for slide_no, slide in enumerate(prs.slides, 1):
+        start = len(lines)
         for shape in slide.shapes:
             if shape.has_text_frame:
                 text = shape.text_frame.text.strip()
                 if text:
                     lines.append(text)
-    return "\n".join(lines), {"page": None, "author": None}
+        if len(lines) > start:
+            page_spans.append([start, len(lines) - 1, slide_no])
+    return "\n".join(lines), {"page": None, "author": None, "page_spans": page_spans}
 
 def _parse_html(raw: bytes) -> tuple[str, dict]:
     """HTML：标准库 html.parser 提取正文文本（去 script/style/注释），零新增依赖。"""

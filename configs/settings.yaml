@@ -30,6 +30,13 @@ chunker:                           # 父子分块（DEVELOPMENT.md 5.2）
     enabled: false
     max_rows_per_chunk: 30         # 超限大表按行组切，每组行数上限（强制带表头）
     json_max_bytes: 4096           # table_json 字节上限（超限截断+warning）
+  hard_boundary:                   # P1-5：标题硬边界（默认关；section 变更即断块）
+    enabled: false
+  context_prefix:                  # P1-5：上下文前缀（默认关；不计切块 token、计 embedding）
+    enabled: false
+    include_page: false
+    template: "{doc_title} > {section}"
+    include_page: false            # 前缀附加页码（需 page_spans 可解析）
 
 vector_store:
   provider: chroma

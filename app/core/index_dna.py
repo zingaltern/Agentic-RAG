@@ -18,11 +18,14 @@ from typing import Any
 
 
 def _chunker_fingerprint(chunker: Any) -> dict:
-    """影响块形态的 chunker 参数（P1-4/P1-5 落地后在此追加 table_aware/hard_boundary 等）。"""
+    """影响块形态的 chunker 参数（P1-4/P1-5：表格原子块/硬边界/上下文前缀均改变块形态）。"""
     return {
         "parent_target_tokens": chunker.parent_target_tokens,
         "child_target_tokens": chunker.child_target_tokens,
         "token_char_ratio": chunker.token_char_ratio,
+        "table_aware": chunker.table_aware.model_dump(),
+        "hard_boundary": chunker.hard_boundary.model_dump(),
+        "context_prefix": chunker.context_prefix.model_dump(),
     }
 
 
