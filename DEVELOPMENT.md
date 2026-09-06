@@ -648,6 +648,7 @@ POST /api/documents/upload (multipart file)
   `app/services/desensitize.desensitize_text`（身份证/手机号/银行卡 → `***`），默认关闭。
 - **幂等并发（V5.0）**：`_run` 内以 content_hash 为粒度加进程锁（`_lock_for`），幂等检查与写入原子化，杜绝 TOCTOU 双份入库。
 - **解析质量门禁（P0-1）**：`ingestion.quality_gate = {enabled: false, mode: reject|flag, min_text_chars: 30, max_garbled_ratio: 0.05, min_pages_with_text_ratio: 0.2}`（默认关闭=行为与现状完全一致）。启用时在 parse 之后、脱敏之前执行 5.1 的 `evaluate_parse_quality`：命中任一 flag 时 `mode=reject` → 抛 `QualityGateError`（30005，Job failed）；`mode=flag` → `doc.metadata["quality_flags"]` 打标 + warning 日志（含 flags 与 trace_id）继续入库；`mode` 非法值启动即抛 `SystemConfigError`（config field_validator）。
+- **原件归档（P0-2）**：`ingestion.archive = {enabled: false, dir: "./data/archive"}`（默认关闭）。启用时入库成功路径（幂等锁内、duplicate 判定之后）将**原始字节**原子写至 `{dir}/{kb_id}/{document_id}{ext}`（ext 只取 `Path(filename).suffix`；`core/persist.atomic_write_bytes` tmp+rename 原子写）→ `DocEntry.archive_path` 随 register 登记；写失败仅 warning 不回滚入库。**级联清理**：删除文档/删库时同步删除归档原件（被遗忘权）。归档是"换 embedding 全量重建（rebuild CLI）"、解析器升级重解析与审计取证的前置。
 
 ### 5.11 插件注册与装配（PluginRegistry + wire()）
 
@@ -732,11 +733,12 @@ class PluginRegistry:
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/api/documents?page=1&size=20&kb_id=` | 分页（按创建时间倒序；kb_id 可选过滤，V5.0） |
-| GET | `/api/documents/{id}` | 单文档元数据 |
-| DELETE | `/api/documents/{id}` | 删除文档（级联清向量块；**按文档所属库解析 collection**，V5.0 修 P0-1） |
+| GET | `/api/documents/{id}` | 单文档元数据（P0-2：含 `archive_path` 归档路径） |
+| DELETE | `/api/documents/{id}` | 删除文档（级联清向量块；**按文档所属库解析 collection**，V5.0 修 P0-1；P0-2：级联删除归档原件） |
 
 > 文档索引持久化：`data/documents.json`（V5.0，含 content_hash 幂等索引）；启动时索引为空且 Chroma 有数据
-> → 自动全量重建（消除重启后幽灵文档）。
+> → 自动全量重建（消除重启后幽灵文档）。P0-2：删除文档 / 批量删除 / 删库级联时同步删除归档原件
+> （`DocEntry.archive_path`，best-effort；归档开关默认关）。
 
 ### 6.6 插件
 | 方法 | 路径 | 入参 | 说明 |
