@@ -107,6 +107,10 @@ ingestion:
   archive:                        # P0-2：原件归档（默认关；换 embedding 重建/重解析/审计取证的前置）
     enabled: false
     dir: ./data/archive
+  pii:                            # P2-6：PII 全局策略（默认关；库级 KbInfo.pii 可覆盖）
+    enabled: false
+    mode: mask                     # mask=*** | replace=[身份证] 占位符 | delete=移除
+    types: [id_card, phone, bank_card]
 
 cleaner:
   enabled: false                  # 数据清洗层开关（解析后、分块前），默认关不改变现有行为

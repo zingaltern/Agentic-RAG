@@ -44,13 +44,14 @@ def compute_content_hash(raw: bytes) -> str:
 class IngestionPipeline:
     def __init__(self, config: SystemConfig, embedding: VectorEngine,
                  vector_store: VectorStore, jobs: JobStore,
-                 documents: DocumentsStore, max_workers: int = 2,
+                 documents: DocumentsStore, kbs=None, max_workers: int = 2,
                  start_workers: bool = True):
         self.config = config
         self.embedding = embedding
         self.vector_store = vector_store
         self.jobs = jobs
         self.documents = documents
+        self.kbs = kbs                   # P2-6：库级 pii 策略解析（None=不启用库级覆盖）
         # P1-3：索引 DNA——入库时写入 chunk.metadata 与 DocEntry（装配期计算一次，
         # /api/plugins/switch 热切换重建 deps 时随新 config 重算）
         self._index_dna = compute_index_dna(config)["dna"]
@@ -155,6 +156,51 @@ class IngestionPipeline:
         job = job or self.jobs.create(filename, kb_id=kb_id)
         return self._run(raw, filename, job, kb_id=kb_id, collection=collection)
 
+    def _resolve_pii_policy(self, kb_id: str) -> dict | None:
+        """P2-6：解析生效的 PII 策略（kb 库级 > 全局 > 旧开关兼容）；None=不处理。
+
+        库级非法配置降级为"不处理"并 warning（不误伤入库主流程）。
+        """
+        pii = self.config.ingestion.pii
+        kb_pii = None
+        if self.kbs is not None:
+            info = self.kbs.get(kb_id)
+            kb_pii = getattr(info, "pii", None) if info is not None else None
+        if kb_pii is not None:
+            return self._normalize_pii(kb_pii, source=f"kb:{kb_id}")
+        if pii.enabled:
+            if self.config.ingestion.desensitize_enabled:
+                logger.warning(
+                    "旧开关 desensitize_enabled 与 ingestion.pii 同时开启：按新逻辑（pii）执行，"
+                    "旧开关已 deprecated（两个周期后移除）",
+                    extra={"extra_fields": {"kb_id": kb_id}},
+                )
+            return {"mode": pii.mode, "types": list(pii.types)}
+        if self.config.ingestion.desensitize_enabled:
+            # 仅旧开关开启（兼容期）：等价 mask + 全类型
+            return {"mode": "mask", "types": ["id_card", "phone", "bank_card"]}
+        return None
+
+    @staticmethod
+    def _normalize_pii(raw: dict, source: str) -> dict | None:
+        """校验库级 pii 配置形状；enabled=false 显式关闭返回 None，非法项降级 None。"""
+        if not isinstance(raw, dict):
+            logger.warning("库级 pii 配置非法（非 dict），忽略", extra={"extra_fields": {"source": source}})
+            return None
+        if raw.get("enabled") is False:
+            return None
+        mode = raw.get("mode", "mask")
+        types = list(raw.get("types") or ["id_card", "phone", "bank_card"])
+        from app.services.desensitize import VALID_MODES, VALID_TYPES
+
+        if mode not in VALID_MODES or any(t not in VALID_TYPES for t in types):
+            logger.warning(
+                "库级 pii 配置非法（mode/types），降级为不处理",
+                extra={"extra_fields": {"source": source, "mode": mode, "types": types}},
+            )
+            return None
+        return {"mode": mode, "types": types}
+
     def _archive_original(self, raw: bytes, filename: str, kb_id: str, document_id: str) -> str | None:
         """P0-2：原始字节归档（尽力而为），目标 `{archive.dir}/{kb_id}/{document_id}{ext}`。
 
@@ -211,11 +257,16 @@ class IngestionPipeline:
                                                 "quality_flags": flags}},
                     )
 
-            # S5（13.11.1）：敏感数据脱敏（身份证/手机号/银行卡），默认关闭
-            if self.config.ingestion.desensitize_enabled:
-                from app.services.desensitize import desensitize_text
+            # S5（13.11.1）/ P2-6：PII 两级化（kb 库级策略 > 全局 ingestion.pii > 旧开关兼容 > 不处理）
+            pii_policy = self._resolve_pii_policy(kb_id)
+            if pii_policy:
+                from app.services.desensitize import detect_pii, desensitize_text
 
-                doc.text = desensitize_text(doc.text)
+                hits = detect_pii(doc.text)
+                if hits:
+                    doc.metadata["pii_types"] = sorted({h["type"] for h in hits})   # 仅打标类型集合
+                    doc.text = desensitize_text(doc.text, mode=pii_policy["mode"],
+                                                types=pii_policy["types"])
 
             # 数据清洗层（解析后、分块前）：归一/去噪/段落去重/质量过滤，默认关闭
             if self.config.cleaner.enabled:

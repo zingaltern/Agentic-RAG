@@ -212,6 +212,37 @@ class QualityGateConfig(BaseModel):
         return value
 
 
+class PiiConfig(BaseModel):
+    """PII 全局脱敏策略（P2-6，DEVELOPMENT.md 5.10；默认关闭）。
+
+    库级覆盖见 KbInfo.pii（生效优先级 kb.pii > 本段 > 不处理）；
+    mode 非法值 / types 非法项启动即抛 SystemConfigError。
+    """
+
+    enabled: bool = False
+    mode: str = "mask"                       # mask | replace | delete
+    types: list[str] = ["id_card", "phone", "bank_card"]
+
+    @field_validator("mode")
+    @classmethod
+    def _mode_valid(cls, value: str) -> str:
+        from app.services.desensitize import VALID_MODES
+
+        if value not in VALID_MODES:
+            raise SystemConfigError(f"ingestion.pii.mode 必须为 {'/'.join(VALID_MODES)}，实际为 {value!r}")
+        return value
+
+    @field_validator("types")
+    @classmethod
+    def _types_valid(cls, value: list[str]) -> list[str]:
+        from app.services.desensitize import VALID_TYPES
+
+        bad = [x for x in value if x not in VALID_TYPES]
+        if bad:
+            raise SystemConfigError(f"ingestion.pii.types 含非法类型: {bad}（合法：{list(VALID_TYPES)}）")
+        return value
+
+
 class ArchiveConfig(BaseModel):
     """原件归档（P0-2，DEVELOPMENT.md 5.10；默认关闭：不改变现有入库行为）。
 
@@ -236,6 +267,7 @@ class IngestionConfig(BaseModel):
     zip_max_entries: int = 1000
     quality_gate: QualityGateConfig = QualityGateConfig()   # P0-1：解析质量门禁（默认关）
     archive: ArchiveConfig = ArchiveConfig()                # P0-2：原件归档（默认关）
+    pii: PiiConfig = PiiConfig()                            # P2-6：PII 全局策略（默认关；kb 级可覆盖）
 
 
 class CleanerConfig(BaseModel):
