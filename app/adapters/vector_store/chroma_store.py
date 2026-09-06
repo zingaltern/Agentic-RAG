@@ -69,7 +69,10 @@ class ChromaStore(VectorStore):
             if value is None or isinstance(value, dict):
                 return False
             if isinstance(value, list):
-                return all(isinstance(v, (str, int, float, bool)) for v in value)
+                # 同型标量 list 才可存（chromadb 拒收混合型 list，如 [1, "p"]）；
+                # 用精确 type 集合规避 bool 是 int 子类的误判（[True, 1] 实为异型）
+                return bool(value) and len({type(v) for v in value}) == 1 \
+                    and all(isinstance(v, (str, int, float, bool)) for v in value)
             return isinstance(value, (str, int, float, bool))
 
         return {k: v for k, v in metadata.items() if _storable(v)}
