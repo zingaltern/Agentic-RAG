@@ -63,6 +63,9 @@ detector:
 
 llm:
   provider: deepseek
+  candidates: []              # A6：多模型候选（按优先级），空=单模型
+  circuit_fail_threshold: 3
+  circuit_cooldown_seconds: 60
   model: deepseek-chat
   base_url: https://api.deepseek.com
   temperature: 0.1
@@ -104,6 +107,87 @@ moderation:                       # P-C：入库前内容审核层（默认关�
   enabled: false
   mode: reject                    # reject=拒收（40003）；flag=仅标记 metadata
   keywords_csv: ./configs/moderation_keywords.csv
+
+memory:                          # A1：会话记忆压缩
+  enabled: true
+  compress_threshold: 6
+
+web:                              # A5：联网检索（Tavily，key 走环境变量）
+  enabled: false
+  provider: tavily
+  api_key_env: RAG_TAVILY_API_KEY
+  max_results: 5
+  search_depth: basic
+  timeout_seconds: 8
+  first_round_only: true
+
+# —— 13.12 输入侧治理（在线侧输入处理落地；全部默认关，clarification 默认开）——
+query_input:                      # L1 输入标准化管线（默认关：仅全角/空白归一）
+  enabled: false
+  filter_invalid_chars: true      # Emoji/控制字符清理 + 连续重复标点压缩
+  asr_smooth: true                # 语音转写语气词清理 + 连续单字重复压缩
+  asr_filler_words: ["嗯", "那个", "就是说", "然后", "呃", "额", "这个这个", "就是"]
+  resolve_relative_time: true     # 相对时间 → 绝对时间（"昨天"→"2026-08-17"）
+  time_reference_date: null       # 如 "2026-08-17"；null=取当天
+  timezone: Asia/Shanghai
+
+query_security:                   # 查询侧安全前置（复用入库侧注入扫描+内容审核）
+  enabled: false
+  mode: audit                     # audit=命中仅审计日志；reject=拦截（40002/40003）
+  injection: true
+  moderation: true
+  patterns: []                    # 追加注入模式（内置表始终生效）
+  whitelist: []                   # 误杀白名单子串
+  keywords_csv: ./configs/moderation_keywords.csv
+
+greeting:                         # L0 极简通道：问候/闲聊/能力边界直达（13.13 T2，部署启用）
+  enabled: true
+  rules:                          # 每条规则独立回复；单个正则非法自动跳过（不中断主链路）
+    - name: greet
+      pattern: "^(?:你好|您好|嗨|哈喽|hello|hi|hey)\\s*[!！。~～]*$"
+      reply: "您好，我是企业知识库问答助手，可以问我知识库相关的问题，例如「年假怎么申请？」"
+    - name: presence
+      pattern: "^(?:在吗|在么|有人吗)\\s*[?？]*$"
+      reply: "在的，请问想查询知识库里的什么内容？"
+    - name: thanks
+      pattern: "^(?:谢谢|感谢|谢啦|多谢)\\s*[!！。~～]*$"
+      reply: "不客气，如还有其他问题随时问我。"
+    - name: identity
+      pattern: "^(?:你是谁|你叫什么名字|你是什么|介绍一下你自己|你能做什么|你有什么功能)"
+      reply: "我是企业知识库问答助手：基于已上传到本机的文档回答问题并标注引用来源，知识库没有的内容我会如实告知。"
+    - name: is_bot
+      pattern: "^(?:你是机器人吗|是真人吗|是AI吗|是ai吗|是人工智能吗)"
+      reply: "我是 AI 问答助手，基于本机知识库回答问题，不是真人。"
+    - name: realtime_weather
+      pattern: "^(?:今天|现在|当前)?(?:天气怎么样?|天气如何|气温多少)"
+      reply: "抱歉，天气等实时信息不在知识库问答范围内，请问我知识库相关的问题。"
+    - name: realtime_time
+      pattern: "^(?:现在几点(?:了)?|今天几号|今天多少号|今天是什么日期)"
+      reply: "抱歉，实时日期时间不在知识库问答范围内。"
+
+clarification:                    # A2 反问模板化（默认开：固定模板+槽位，LLM 仅可选增强）
+  enabled: true
+  max_rounds: 2                   # 每会话连续反问上限（dialogue 启用后计数）
+  use_llm: false
+  templates:
+    no_entity: "请问您具体想了解哪个方面的内容呢？"
+    missing_issue: "请问您遇到了什么具体问题？"
+    generic: "您的需求我暂时没有理解清楚，建议您描述更详细一些，或联系人工客服。"
+  fallback_message: "您的需求我暂时没有理解清楚，建议您描述更详细一些，或联系人工客服。"
+
+dialogue:                         # L2 服务端会话（13.13 T3：部署启用，前端已携带 session_id）
+  enabled: true
+  session:
+    ttl_seconds: 1800             # 会话空闲过期（30 分钟）
+    max_rounds: 5                 # 保留最近 N 轮
+    enable_rollback: true
+    rollback_keywords: ["不对", "说错了", "不是这个", "重来", "不是"]
+  boundary:
+    enabled: true
+    semantic_threshold: 0.60      # 余弦 < 阈值 → 提示新话题
+    entity_jaccard_threshold: 0.20
+    use_embedding: true
+  max_sessions: 100               # 内存会话上限（LRU 淘汰）
 
 logging:
   level: info

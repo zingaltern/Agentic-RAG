@@ -81,6 +81,27 @@ class QueryRewriter(ABC):
     def rewrite(self, query: str, feedback: EvaluationResult) -> str: ...
 
 
+class QueryNormalizer(ABC):
+    """查询输入标准化器（在线侧输入处理.md L1；13.12）。
+
+    纯规则、确定性、无 LLM；输入输出均为文本，异常由实现内部消化（不得上抛）。
+    """
+
+    @abstractmethod
+    def normalize(self, query: str) -> str: ...
+
+
+class BoundaryDetector(ABC):
+    """会话边界判定器（在线侧输入处理.md L2 4.3.2；13.12）。
+
+    判断当前 Query 相对上一轮 Query 是否为「新话题」；
+    两维判定均不可用时应保守返回 False（不丢上下文，降级不误伤）。
+    """
+
+    @abstractmethod
+    def is_new_topic(self, current: str, previous: str) -> bool: ...
+
+
 class Cleaner(ABC):
     """文档清洗器（解析后、分块前）：去噪/归一/质量过滤/段落级近重复去重。
 

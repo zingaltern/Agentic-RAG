@@ -11,6 +11,10 @@
 
 多库（13.5）：qa_pairs/{kb}/*.jsonl 按库评测；--kb 指定单库，--all-kbs 遍历全部子目录；
 --baseline <path> 对比基线报告输出 diff 列。报告输出 reports/eval-{ts}.md。
+
+外部基准测试集（8.4）：--kb + --pairs + --docs 显式指定独立目录（如 tests/review/，
+make review 目标）；--fresh-kb 进程内评测前清空该库向量集合与文档幂等表（与 KB 删除
+端点 C7 级联一致），保证每轮全新入库、结果可复现。
 """
 from __future__ import annotations
 
@@ -121,7 +125,8 @@ class _StubLLM:
 
 
 def _run_in_process(config, docs_dir: Path, pairs: list[dict],
-                    kb_id: str = "default", debug: bool = False) -> list[dict]:
+                    kb_id: str = "default", debug: bool = False,
+                    fresh: bool = False) -> list[dict]:
     from app.core.config import load_config
     from app.core.registry import wire
     from app.services.kb_store import DEFAULT_KB_ID, KbStore
@@ -132,6 +137,12 @@ def _run_in_process(config, docs_dir: Path, pairs: list[dict],
         ks.create(kb_id)                     # 物理集合随评测创建（进程内隔离）
     collection = ks.collection_of(kb_id)
     deps = wire(config, llm=_StubLLM(), kbs=ks)
+    if fresh and collection and deps.vector_store is not None:
+        # 8.4 --fresh-kb：评测前清空该库（集合 + 文档幂等表），保证全新入库可复现；
+        # 不清幂等表会因 content_hash 命中跳过重嵌、块却已删 → 检索必空
+        deps.vector_store.drop_collection(collection)
+        if deps.documents is not None:
+            deps.documents.delete_by_kb(kb_id)
 
     files = sorted(p for p in docs_dir.iterdir() if p.is_file())
     for path in files:
@@ -388,6 +399,8 @@ def main() -> int:
     parser.add_argument("--all-kbs", action="store_true",
                         help="遍历 tests/eval/qa_pairs/ 下全部库目录评测")
     parser.add_argument("--baseline", default=None, help="基线报告路径（对比 diff 列）")
+    parser.add_argument("--fresh-kb", action="store_true",
+                        help="进程内模式：评测前清空该 kb 的向量集合与文档幂等表（全新入库，8.4）")
     parser.add_argument("--token", default=None, help="HTTP 模式：Bearer token（认证启用时）")
     parser.add_argument("--login", nargs=2, metavar=("USER", "PASS"),
                         help="HTTP 模式：现场登录换取 token")
@@ -412,7 +425,7 @@ def main() -> int:
         pairs = load_pairs(pairs_path)
         docs = Path(args.docs) if (args.docs and len(kbs) == 1) else Path(_default_docs(kb))
         if args.in_process:
-            responses = _run_in_process(config, docs, pairs, kb_id=kb)
+            responses = _run_in_process(config, docs, pairs, kb_id=kb, fresh=args.fresh_kb)
         else:
             token = args.token
             if args.login:

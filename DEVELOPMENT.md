@@ -464,6 +464,8 @@ orchestration:
   request_timeout_seconds: 30
   max_concurrent_queries: 4              # V5.1：并发查询上限，耗尽/等待超时返回 43001
   semaphore_acquire_timeout_seconds: 5.0 # V5.1：获取并发信号量的等待超时（秒）
+  hopeless_shortcut: true                # 13.13 T1：首轮评估分远低于阈值 → 跳过改写轮直接 21001
+  hopeless_score_threshold: 0.15         # 13.13 T1：无望判定阈值（通过线 0.45）
 
 ingestion:
   max_file_size_mb: 50
@@ -802,6 +804,22 @@ class PluginRegistry:
 - 指标：`ContextPrecision / ContextRecall / Faithfulness / AnswerRelevancy / Hit@5`。
 - 输出 Markdown 报告（逐条 + 聚合）到 `reports/eval-{timestamp}.md`。
 
+### 8.4 外部基准测试集（`make review`，两层评测策略，2026-08-30 新增）
+
+> 评测体系分两层：**验证集（自建）与测试集（外部公开数据集）物理分离**——自建集做回归
+> 门禁，公开数据集做能力测试，避免「自己出题自己答」的过拟合，并补齐真实世界文档分布盲区。
+
+| 层 | 命令 | 数据 | 作用 |
+|---|---|---|---|
+| 验证集 | `make eval` | `tests/eval/qa_pairs/{default,docs}/` 自建 107 条（语料 `tests/eval/sample_data/`） | 开发回归门禁（13.1 度量协议：改动后不回退） |
+| 测试集 | `make review` | `tests/review/` 外部公开数据集（首个：CMRC 2018，CC BY-SA 4.0，独立 kb `cmrc`） | 度量 RAG 真实效果（Hit@1/Hit@5、ContextPrecision/Recall、兜底率） |
+
+- 数据来源、用例（测试对）结构与再生成方式见 `tests/review/README.md`；原始数据集下载到 `tests/review/raw/`（gitignore，不入库）。
+- 转换器：`python -m app.cli.build_review_set`（GitHub 原始 JSON → 语料文档 + qa_pairs；固定 seed 可复现；纯标准库，不新增第三方依赖）。
+- `rageval` 新增 `--fresh-kb`（进程内模式）：评测前清理该 kb 的 Chroma 集合与文档幂等表（`drop_collection` + `documents.delete_by_kb`，与 KB 删除端点 C7 级联一致），保证每轮全新入库、结果可复现。
+- 报告输出 `reports/review-{ts}.md`；基线对比 `--baseline reports/review-<基线>.md`（判据与口径与 8.3/13.6 单一实现一致）。
+- 判读纪律：`make review` 指标**只看趋势不看单点**——首轮运行结果存档为基线，后续改动对比 Δ；不作为 `make test`/`make eval` 之外的硬门禁（外部集无"全绿"预期，如实记录）。
+
 ---
 
 ## 第 9 章 开发计划与验收
@@ -1056,6 +1074,115 @@ V1.0 发布标准已达成：pytest 全绿（`-m "not integration"`，293 项，
 
 ---
 
+### 13.12 输入侧治理（`在线侧输入处理.md` 落地，P1+P2）—— ✅ 已交付（2026-08-18）
+
+> 把 `在线侧输入处理.md` 的输入侧治理方案按「可配置、可降级、默认关不改变现有行为」原则落地。
+> 每个新配置段都有独立 `enabled` 总开关：关闭时行为与旧版完全一致（客户端传 `history`、LLM 生成反问、无查询侧安全前置、无服务端会话）。
+
+#### 13.12.1 配置总览（新增 SystemConfig 段，全部默认关）
+
+| 配置段 | 对应设计文档 | 默认 | 作用 |
+|---|---|---|---|
+| `query_input` | L1 输入标准化 | `enabled=false` | 无效字符过滤 / ASR 顺滑 / 相对时间映射（纯规则、确定性） |
+| `query_security` | 4.6 安全风控 | `enabled=false` | 查询侧提示注入 + 内容审核前置（复用入库侧组件） |
+| `greeting` | L0 极简通道（4.1.2） | `enabled=false` | 问候语/闲聊规则直达（不检索、不调 LLM） |
+| `clarification` | 4.4.5 反问机制 | `enabled=true` | A2 反问模板化（固定模板+槽位，LLM 仅可选增强） |
+| `dialogue` | L2 对话状态引擎（4.3） | `enabled=false` | 服务端会话（session_id 生效）：生命周期 + 新话题边界判定 |
+
+#### 13.12.2 `query_input` —— L1 输入标准化管线
+
+- 步骤（每步独立 `enabled` 子开关，**每步独立 try/except：异常即跳过该步**，输出必为合法文本，最差等于输入）：
+  1. `filter_invalid_chars`：Emoji/控制字符清理 + 连续重复标点压缩（`！！！`→`！`）；
+  2. `asr_smooth`：语音转写语气词清理（`asr_filler_words` 词典可配，最长优先）+ 连续单字重复压缩（`对对对`→`对`）；
+  3. `resolve_relative_time`：相对时间 → 绝对时间（`昨天`→`2026-08-17`；`time_reference_date` 缺省取当天，支持 大前天~大后天、前年~明年）。
+- 挂接点：`OrchestrationService.run()` 内 `normalize_query`（全角/空白归一）之后执行；`deps.normalizer` 为 None（未启用）时零开销。
+- **降级**：任一步失败 → 保留上一步文本；整体异常 → 原 query 透传。
+- 实现：`app/adapters/normalizer/rule_normalizer.py`（`RuleQueryNormalizer`，注册 `normalizer.rule` 由 `wire` 直接装配）。
+
+#### 13.12.3 `query_security` —— 查询侧安全前置
+
+- 复用入库侧 `InjectionScanner`（`injection.patterns/whitelist` 追加模式，内置表始终生效）与 `KeywordModerator`（`keywords_csv` 缺失/损坏兜底内置词表），在 `/api/query` 入口（限速之后、库路由之前）执行：
+  - `mode=audit`（默认）：命中仅记 `query_security_audit` 结构化日志，不拦截；
+  - `mode=reject`：命中抛 `InjectionError(40002)` / `ContentModerationError(40003)`（对外契约包）。
+- **降级**：检测组件内部异常 → `verdict=ok` 放行（安全检测故障不误伤可用性，仅记日志）。
+- 实现：`app/adapters/query_guard.py`（`QueryGuard`）。
+
+#### 13.12.4 `greeting` —— L0 极简通道
+
+- `patterns`（正则列表，命中任一即直达）+ `reply`（固定回复）。
+- 命中 → `Answer(code=0, text=reply, iterations=0)`，**不检索、不调 LLM**；`debug_trace` 记录 `{"fast_path": "greeting"}`。
+- **降级**：单个正则非法 → 跳过该正则继续匹配；未命中 / 未启用 → 走正常链路。
+- 挂接点：`OrchestrationService.run()` 起点（预热后、归一化前）。
+
+#### 13.12.5 `clarification` —— A2 反问模板化（升级）
+
+- `use_llm=false`（默认）：`_build_clarification` 直接按 query 特征选模板（`templates.no_entity`：长度<4 / `templates.missing_issue`：其余），**LLM 仅可选增强**（`use_llm=true` 时先 LLM 生成，失败/超时回退模板）；
+- `enabled=false`：维持旧版「反思超限直接 21001 兜底」（不反问）；
+- `max_rounds`（默认 2）：每会话连续反问上限 —— `dialogue` 启用后由服务端会话计数（`session.clarify_count`），达到上限后不再反问、直接 21001 兜底；
+- `fallback_message`：模板兜底文案。
+- 触发条件不变：反思达 `max_reflection_iterations` 且 `low_streak>=2` 且存在候选（`top` 非空）。
+
+#### 13.12.6 `dialogue` —— L2 会话状态引擎（服务端会话）
+
+- 总开关 `enabled=false`（默认）：`session_id` 仍不参与逻辑，沿用客户端传 `history` 的现状语义；`enabled=true` 后：
+  - **生命周期**（`dialogue.session`）：`ttl_seconds`（默认 1800，空闲过期重置）、`max_rounds`（默认 5，保留最近 N 轮）、`enable_rollback` + `rollback_keywords`（命中"不对/说错了/重来"等 → 移除上一轮记录）；
+  - **边界判定**（`dialogue.boundary`）：当前 query 与上轮 query 的嵌入余弦（`use_embedding` 可关）+ jieba 词集 Jaccard 双维度；**两维都低于阈值 → 新话题 → 清空短期上下文**（保留画像等长期信息由后续扩展负责）；
+  - **存储**：内存 `SessionStore`（`app/services/session_store.py`），TTL 过期清除 + `max_sessions`（默认 100）LRU 淘汰；生产可换 Redis（接口 get/new/put 不变）。
+- API 接线（`app/api/query.py`）：`session_id` 提供且 `dialogue.enabled=true` → 服务端历史优先（忽略客户端 `history`）；问答结束后回写历史 + 澄清计数。
+- **降级矩阵**：边界判定 embedding 失败 → 仅实体维度；两维均失败 → 判定非新话题（保守保留历史）；会话存储异常 → 维持无会话语义（等同现状）。
+
+#### 13.12.7 验收与回归
+
+- 新增单测 `tests/unit/test_input_governance.py`（标准化/安全前置/问候直达/模板反问/边界判定/会话存储）+ `tests/unit/test_input_governance_api.py`（API 层接线：问候短路、reject 拦截、session 历史延续与回溯）；A2 旧单测按模板化语义更新。
+- `make test` 全绿（含覆盖率门禁 ≥80%）；`make eval` 前后对比存档（13.1 度量协议）。
+
+---
+
+### 13.13 输入侧治理激活批次（V1，`docs/dev-tasks/06`）—— ✅ 已交付（2026-08-30）
+
+> 依据《在线侧输入处理.md》可落地性评估（2026-08-30）：激活已建成能力并补齐两个轻件。
+> 原则延续 13.12「可配置、可降级」；唯一默认开启项为 T1（见下，评估分过低的查询本就必然
+> 以 21001 收尾，仅缩短空转，且以 `make eval` 全量回归为门禁）。
+
+#### 13.13.1 T1 绝望短路（编排循环，对应方案 4.1「快收尾」）
+
+- 新增 `orchestration.hopeless_shortcut`（默认 True）与 `orchestration.hopeless_score_threshold`（默认 0.15）。
+- 行为：`iteration == 0` 且评估未通过且 `score <= threshold` 且无联网候选（`web_active=False`）
+  且**无会话历史（history 为空）** → 跳过改写轮，直接返回 21001 兜底文案；**不触发 21003 澄清**
+  ——域外查询的诚实答案是"未找到"而非反问，同时使 no_answer 类评测项回归 `code=21001` 判据
+  （修复基线 D059/D061）。
+- 历史豁免（冒烟结论 2026-08-30）：带会话历史的低分查询可能是针对历史的追问
+  （如"我上一条消息说了什么"），其答案不在 KB 语义内，短路会截断正常追问 → 不短路。
+- 动机：域外/闲聊查询首轮评估分已暴露无望信号，原实现仍空转约 2 轮检索 + LLM 改写。
+
+#### 13.13.2 T2 L0 极简通道扩容并默认部署启用（方案 4.1.2）
+
+- `GreetingConfig` 新增 `rules: [{name?, pattern, reply}]`（每条规则独立回复）；匹配顺序
+  `rules` → 旧版 `patterns+reply`（兼容字段保留）；单个正则非法跳过；挂接点不变（`run()` 起点）。
+- `configs/settings.yaml`：`greeting.enabled: true` + 7 条规则（问候/在场/致谢/身份认知/
+  是否机器人/实时天气/实时日期时间），identity/realtime 回复明确声明能力边界；
+  **代码默认仍 false**（部署级激活，与 `auth_enabled` 同范式）。
+- 已知取舍：greeting 上移 API 层为纯重构，不在本批次（列后续项）。
+
+#### 13.13.3 T3 服务端会话接通（激活 13.12.6 L2）
+
+- 前端：`stores/app.js` 增 `sessionId`（`localStorage.rag_session_id` 持久化、惰性生成）+
+  `ensureSessionId()`/`resetSession()`；登出重置会话；`QueryConsole` 提问携带 `session_id`
+  （仍发送 `history` 作 dialogue 关闭时的兼容），「清空对话」同时重置会话。
+- 部署配置：`configs/settings.yaml` `dialogue.enabled: true`（代码默认仍 false）。
+- 生效语义（13.12.6 不变）：服务端历史优先；新话题清空短期上下文；回溯关键词移除上一轮；
+  澄清按 session 计数（max_rounds=2），正常回答清零。有效上下文长度不变（均收敛 `history[-6:]`）。
+
+#### 13.13.4 验收
+
+- `make test` 全绿（429 项）；`make eval` 对比基线不回退且 no_answer 类改善（**107/107**，基线 105/107）；
+  前端 `npm run build` 成功（dist 随仓库约定提交）；真实后端冒烟通过（详见 `docs/dev-tasks/06` §4.1）。
+- **已知边界（冒烟结论，详见 dev-tasks/06 §4.2）**：① 规则边界判定器对元问题（"我上一条说了什么"）
+  存在盲区（query-vs-query 双维比较，规格内行为，根治需 L3 合并调用）；② SYSTEM_PROMPT 的
+  "只基于知识库上下文+强制引用"契约会压制从会话历史复述用户自述事实（历史记忆问答产品化单独立项）。
+
+---
+
 ## 第 14 章 当前状态与遗留（V5.1，2026-08-15）
 
 > 给后续开发/运维 Agent 的**现状快照**：当前可运行形态、常用命令、已知遗留与触发条件。
@@ -1066,7 +1193,8 @@ V1.0 发布标准已达成：pytest 全绿（`-m "not integration"`，293 项，
 - **模型**：embedding `bge-small-zh-v1.5`（本地）+ reranker `bge-reranker-base`（本地）+ LLM `deepseek-chat`（唯一外部调用，key 经 `RAG_DEEPSEEK_API_KEY`）。
 - **数据**：`data/chroma`（向量，`rag_<kb>` 集合）+ `data/kb.json`（知识库映射）+ `data/documents.json`（文档索引，重启自动从 Chroma 兜底重建）。
 - **前端**：`frontend/dist` 由后端托管（SPA，静态资源 no-store）；桌面端 `npm run desktop`（或打包 App，自动拉起后端）。
-- **评测集**：`tests/eval/qa_pairs/{default,docs}/` 107 条；报告 `reports/eval-{ts}.md`。
+- **评测集**：验证集 `tests/eval/qa_pairs/{default,docs}/` 107 条（报告 `reports/eval-{ts}.md`）；
+  外部测试集 `tests/review/`（CMRC 2018，独立 kb `cmrc`，报告 `reports/review-{ts}.md`，见 8.4）。
 
 ### 14.2 常用命令
 
@@ -1076,6 +1204,7 @@ V1.0 发布标准已达成：pytest 全绿（`-m "not integration"`，293 项，
 | `make run` | 启动后端（8000） |
 | `make test` | 全量单测（`-m "not integration"`，293 项，2026-08-15 实测） |
 | `make eval` | 进程内评测（Stub LLM）并存档报告 |
+| `make review` | 外部基准测试集评测（CMRC 2018 → 独立 kb `cmrc`，`--fresh-kb` 全新入库；`BASELINE=reports/review-<基线>.md` 可对比）并存档报告 |
 | `make desktop` | 启动 Electron 桌面（前端需先 `npm run build`） |
 | `cd frontend && npm run build` | 重建 SPA（静态托管实时生效） |
 | `cd frontend && npm run test:desktop` | Electron 壳测试（11 用例） |
@@ -1093,6 +1222,9 @@ V1.0 发布标准已达成：pytest 全绿（`-m "not integration"`，293 项，
 |---|---|---|
 | 团队模式启用 | 代码就绪且**当前部署已启用**（V5.1） | RBAC 深度 C 扩展（文档级/角色矩阵）：12.3 续 |
 | RBAC 拦截 | 已接线（V5.1：Authorizer + kb owner/scope） | 文档级权限/多角色矩阵（12.3 深度 C 续） |
+| A 组智能体体验（记忆压缩/澄清/联网/多模型） | ✅ 已交付（2026-08-16）：A1 历史摘要压缩（memory 段）、A2 主动澄清（21003+need_clarify）、A3 同义词扩充、A5 Tavily 联网检索（web 段，key 走环境变量）、A6 多模型候选+熔断（llm.candidates）；**A4 多库自动路由已移除（2026-08-30，docs/dev-tasks/05）**：多库基础设施（collection 隔离+库级权限）保留，选库回归显式 kb_id / 缺省 default | 除 A4 外均可独立开关（enabled） |
+| 输入侧治理（在线侧输入处理落地） | ✅ 已交付（2026-08-18，13.12）：query_input 标准化管线 / query_security 查询侧安全前置 / greeting 极简通道 / clarification 模板化反问 / dialogue 服务端会话（边界判定+生命周期） | 全部默认关（clarification 默认开）；前端传 session_id 支持为后续项（当前后端可接、前端未发） |
+| 输入侧治理激活批次（T1 绝望短路 / T2 极简通道扩容 / T3 服务端会话接通） | ✅ 已交付（2026-08-30，13.13 + docs/dev-tasks/06）：域外查询首轮短路 21001；greeting rules 扩容并部署启用；前端携带 session_id + dialogue 部署启用（L2 激活） | T1 代码默认开（eval 门禁通过）；T2/T3 代码默认关、settings.yaml 部署启用 |
 | 元数据富化（section/date） | ✅ 已交付（2026-08-16，T5）：md/txt/docx/pdf 章节标题提取→Chunk.metadata.section；pdf/docx date；支持 `filters={"metadata":{"section":...}}` | 已完结 |
 | 13.10 P3 包（OCR/表格/混合分块/多 embedding/多 LLM） | 规格已立 | 用户决策 + 13.1 度量协议验证 |
 | 契约同步自动化（openapi→TS） | 手写中 | 接口变更频繁或前端规模扩大时 |
@@ -1150,6 +1282,8 @@ V1.0 发布标准已达成：pytest 全绿（`-m "not integration"`，293 项，
 - **OCR 引擎**：本轮仅预留接口不接引擎（13.10 P3 规格：默认关、懒加载）；引擎决策另行评估。
 - **Agentic 方向**：结构化 Agent（非 ReAct 文本循环）。
 - **内容审核规则**：内置可编辑中文词表 csv + 配置开关（默认关）。
+- **A4 多库自动路由移除（2026-08-30）**：多库（kb_id → collection 隔离 + 库级权限）保留为企业 RBAC 载体；自动路由层（kb_router/KbRouter/kb_id="auto"）整体移除——前端已显式选库，企业场景路由误选代价高，且休眠路径存在普通用户 50001 缺陷（`_route_kb` 无匹配时 `can_read_kb(user, None)` 崩溃）。规格与改动清单见 `docs/dev-tasks/05-移除A4多库自动路由.md`。
+- **两层评测策略（2026-08-30）**：验证集（自建 107 条，`make eval`）与测试集（外部公开数据集，`make review`）物理分离——自建集只做回归门禁，公开数据集（首个 CMRC 2018，CC BY-SA 4.0）度量真实检索/问答效果；`rageval` 增 `--fresh-kb`（清理集合+幂等表）保证每轮全新入库可复现。规格见 8.4，数据结构见 `tests/review/README.md`。
 - 清洗/新格式均默认关闭或向后兼容：`cleaner.enabled=false` 时 `ingestion.py` 行为与旧版完全一致。
 
 ---

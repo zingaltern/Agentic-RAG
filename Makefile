@@ -10,7 +10,7 @@ PIP_DEFAULT_TIMEOUT ?= 120
 # HuggingFace 模型下载镜像（首次加载嵌入模型联网下载用；可用环境变量覆盖）
 export HF_ENDPOINT ?= https://hf-mirror.com
 
-.PHONY: bootstrap run test eval coverage integration demo-ingest demo-query docker-up docker-down clean
+.PHONY: bootstrap run test eval review coverage integration demo-ingest demo-query docker-up docker-down clean
 
 ## 首次：创建虚拟环境（python3.11 优先）并安装依赖（含 dev 依赖）
 bootstrap:
@@ -38,6 +38,16 @@ coverage:
 ## 评测（8.3/13.6）：全库（default+docs）进程内评测，输出 reports/eval-*.md（含按库汇总）
 eval:
 	$(PYTHON) -m app.cli.rageval --in-process --all-kbs
+
+## 外部基准测试集评测（8.4）：CMRC 2018 → 独立 kb cmrc，--fresh-kb 全新入库可复现。
+## 与验证集（make eval，tests/eval/）物理分离；报告 reports/review-*.md。
+## 基线对比：make review BASELINE=reports/review-<基线>.md
+review:
+	$(PYTHON) -m app.cli.rageval --in-process --fresh-kb --kb cmrc \
+		--pairs tests/review/qa_pairs/cmrc/qa_pairs.jsonl \
+		--docs tests/review/sample_data/cmrc \
+		--out reports/review-$$(date +%Y%m%d-%H%M%S).md \
+		$(if $(BASELINE),--baseline $(BASELINE),)
 
 ## 集成测试（8.2）：需要本机 BGE 模型缓存（不联网下载）
 integration:

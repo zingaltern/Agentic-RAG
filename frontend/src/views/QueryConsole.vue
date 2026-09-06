@@ -13,8 +13,9 @@ const debug = ref(false)
 const emptyKb = ref(false)          // 当前知识库无文档 → 空态给引导（先上传再提问）
 let msgSeq = 0                       // 消息稳定 key：避免 :key="i" 索引复用导致 DOM 状态错乱
 const mkMsg = (msg) => ({ id: ++msgSeq, ...msg })
-const { chat } = storeToRefs(store)   // 会话状态提升到 store：切换页面不丢失
+const { chat, webSearch } = storeToRefs(store)   // 会话/联网开关提升到 store：切页不丢
 const bodyRef = ref(null)
+const inputRef = ref(null)   // 编辑消息时聚焦输入框
 let composing = false      // 中文输入法组合期：Enter 用于确认候选，不发送
 
 onMounted(loadKbs)
@@ -47,13 +48,15 @@ async function ask() {
       role: m.role,
       content: m.role === 'user' ? m.text : (m.text || ''),
     }))
+  // 13.13 T3：携带服务端会话 ID（dialogue 启用时后端历史优先；关闭时 history 兼容现状）
+  const sessionId = store.ensureSessionId()
   chat.value.messages.push(mkMsg({ role: 'user', text: q, time: new Date() }))
   chat.value.query = ''
   chat.value.loading = true
   try {
     const res = await api('/api/query', {
       method: 'POST',
-      body: JSON.stringify({ query: q, kb_id: kbId.value, debug: debug.value, history }),
+      body: JSON.stringify({ query: q, kb_id: kbId.value, debug: debug.value, web_search: webSearch.value, history, session_id: sessionId }),
     })
     // A4：api() 不再 throw（网络失败返回 code:50001），此处统一渲染错误气泡
     chat.value.messages.push(mkMsg({
@@ -83,6 +86,7 @@ function onEnter(e) {
 
 function clearChat() {
   chat.value.messages = []
+  store.resetSession()   // 13.13 T3：清空对话 = 开启新会话（服务端历史/澄清计数随之重置）
 }
 
 // 回答按 [N] 引用切段渲染（模板插值，禁 innerHTML/v-html）
@@ -93,11 +97,20 @@ function answerParts(msg) {
   }))
 }
 
+// 已证率较高（≥0.6）即视为通过，避免「高已证率却仍显示未通过」的误导
+function getVerifiedRate(result) {
+  return (result && result.citations && result.citations.confirmed) ?? 0
+}
+function passedCheck(result) {
+  if (!result) return false
+  if (result.hallucination_check === 'passed') return true
+  return getVerifiedRate(result) >= 0.6
+}
 function badgeType(result) {
-  return result.hallucination_check === 'passed' ? 'success' : 'warning'
+  return passedCheck(result) ? 'success' : 'warning'
 }
 function badgeText(result) {
-  return result.hallucination_check === 'passed' ? '幻觉检测通过' : '幻觉检测未通过（疑似）'
+  return passedCheck(result) ? '幻觉检测通过' : '幻觉检测未通过（疑似）'
 }
 function stepTitle(step) {
   if (step.rewritten !== undefined) return `iter ${step.iter} · 改写 → ${(step.rewritten || []).join(' / ')}`
@@ -108,6 +121,20 @@ function stepTitle(step) {
 function fmtTime(d) {
   if (!d) return ''
   return new Date(d).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
+}
+
+// 消息气泡悬停操作：复制 / 编辑（编辑仅用户消息：回填输入框以便修改后重发）
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text || '')
+    store.pushInfo('已复制到剪贴板')
+  } catch {
+    store.pushError('复制失败，请手动选择复制')
+  }
+}
+function editUserMessage(m) {
+  chat.value.query = m.text || ''
+  nextTick(() => { if (inputRef.value) inputRef.value.focus() })
 }
 
 watch(
@@ -126,6 +153,7 @@ watch(
         <el-option v-for="k in kbs" :key="k.kb_id" :label="k.name" :value="k.kb_id" />
       </el-select>
       <el-checkbox v-model="debug">展示反思过程</el-checkbox>
+      <el-checkbox v-model="webSearch">联网搜索</el-checkbox>
       <el-button @click="clearChat" :disabled="!chat.messages.length">
         <el-icon style="margin-right: 5px"><Delete /></el-icon>清空对话
       </el-button>
@@ -147,6 +175,10 @@ watch(
           <div class="msg-main">
             <div class="bubble bubble-user">{{ m.text }}</div>
             <div class="msg-meta">{{ fmtTime(m.time) }}</div>
+            <div class="msg-actions">
+              <el-button text size="small" class="act-btn" @click="copyText(m.text)">复制</el-button>
+              <el-button text size="small" class="act-btn" @click="editUserMessage(m)">编辑</el-button>
+            </div>
           </div>
           <div class="avatar avatar-user"><el-icon><Promotion /></el-icon></div>
         </div>
@@ -156,7 +188,9 @@ watch(
           <div class="msg-main">
             <div class="bubble bubble-ai">
               <template v-if="m.result && m.result.code !== 0">
-                <div class="answer-box" style="margin: 0">{{ m.text }}</div>
+                <el-alert v-if="m.result.need_clarify" type="warning" :closable="false" show-icon
+                          :title="'需要澄清：' + m.text" style="margin: 0" />
+                <div v-else class="answer-box" style="margin: 0">{{ m.text }}</div>
               </template>
               <template v-else>
                 <div class="answer-text">
@@ -172,8 +206,23 @@ watch(
                 <el-collapse v-if="m.result && m.result.sources && m.result.sources.length" class="sources">
                   <el-collapse-item :title="`引用来源（${m.result.sources.length}）· 已证率 ${(((m.result.citations && m.result.citations.confirmed) ?? 0)).toFixed(2)}`" :name="1">
                     <el-table :data="m.result.sources" size="small" border>
-                      <el-table-column prop="filename" label="文件" min-width="140" />
-                      <el-table-column prop="page" label="页码" width="70" />
+                      <el-table-column label="来源" width="84">
+                        <template #default="{ row }">
+                          <el-tag v-if="row.source_type === 'web'" type="info" size="small" effect="plain">网页</el-tag>
+                          <el-tag v-else type="success" size="small" effect="plain">知识库</el-tag>
+                        </template>
+                      </el-table-column>
+                      <el-table-column label="文件" min-width="140">
+                        <template #default="{ row }">
+                          <span class="src-file">{{ row.filename }}</span>
+                        </template>
+                      </el-table-column>
+                      <el-table-column label="页码" min-width="180">
+                        <template #default="{ row }">
+                          <a v-if="row.url" :href="row.url" target="_blank" rel="noopener noreferrer" class="src-link">{{ row.page }}</a>
+                          <span v-else>{{ row.page }}</span>
+                        </template>
+                      </el-table-column>
                       <el-table-column prop="score" label="相关度评分" width="100">
                         <template #default="{ row }">{{ row.score.toFixed(3) }}</template>
                       </el-table-column>
@@ -198,6 +247,9 @@ watch(
               </template>
             </div>
             <div class="msg-time">{{ fmtTime(m.time) }}</div>
+            <div class="msg-actions">
+              <el-button text size="small" class="act-btn" @click="copyText(m.text)">复制</el-button>
+            </div>
           </div>
         </div>
       </template>
@@ -212,6 +264,7 @@ watch(
 
     <div class="card chat-input">
       <el-input
+        ref="inputRef"
         v-model="chat.query"
         type="textarea"
         :rows="2"
@@ -317,4 +370,13 @@ watch(
   overflow-y: auto;
   margin: 0;
 }
+.msg-actions {
+  display: flex; gap: 4px; margin-top: 4px;
+  opacity: 0; transition: opacity .15s ease; pointer-events: none;
+}
+.msg-row:hover .msg-actions { opacity: 1; pointer-events: auto; }
+.act-btn { padding: 2px 8px; height: auto; font-size: 12px; color: #8a94a6; }
+.act-btn:hover { color: #ff7a45; }
+.src-link { color: #ff7a45; text-decoration: none; word-break: break-all; }
+.src-link:hover { text-decoration: underline; }
 </style>

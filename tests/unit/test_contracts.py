@@ -7,6 +7,7 @@ import pytest
 
 from app.core.errors import (
     AuthError,
+    ClarifyError,
     ContentModerationError,
     InjectionError,
     EmbeddingError,
@@ -121,6 +122,7 @@ def test_error_code_table():
         30004: RerankError,
         21001: ReflectionLimitError,
         21002: RequestTimeoutError,
+        21003: ClarifyError,        # A2：主动澄清
         50001: InternalError,
     }
     codes = [c for c in table if c != 0]

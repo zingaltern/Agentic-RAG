@@ -16,9 +16,11 @@ from app.core.logging import get_logger
 if TYPE_CHECKING:
     from app.core.config import SystemConfig
     from app.core.interfaces import (
+        BoundaryDetector,
         Evaluator,
         HallucinationDetector,
         LLM,
+        QueryNormalizer,
         QueryRewriter,
         Reranker,
         Retriever,
@@ -29,6 +31,7 @@ if TYPE_CHECKING:
     from app.services.ingestion import IngestionPipeline
     from app.services.jobs_store import JobStore
     from app.services.orchestration import OrchestrationService
+    from app.services.session_store import SessionStore
 
 logger = get_logger("registry")
 
@@ -72,6 +75,11 @@ class Dependencies:
     pipeline: "IngestionPipeline | None" = None
     kbs: "KbStore | None" = None
     users: "UserStore | None" = None
+    # —— 13.12 输入侧治理（默认关时均为 None，零开销）——
+    normalizer: "QueryNormalizer | None" = None
+    boundary: "BoundaryDetector | None" = None
+    query_guard: "Any | None" = None        # app.adapters.query_guard.QueryGuard
+    sessions: "SessionStore | None" = None
 
 
 def _instantiate(module: str, provider: str, cfg: dict) -> Any:
@@ -99,7 +107,11 @@ def wire(config: "SystemConfig", components: bool = True, *,
          users: "UserStore | None" = None,
          documents: "DocumentsStore | None" = None,
          jobs: "JobStore | None" = None,
-         pipeline: "IngestionPipeline | None" = None) -> Dependencies:
+         pipeline: "IngestionPipeline | None" = None,
+         normalizer: "QueryNormalizer | None" = None,
+         boundary: "BoundaryDetector | None" = None,
+         query_guard: "Any | None" = None,
+         sessions: "SessionStore | None" = None) -> Dependencies:
     """按 config 装配默认实现。
 
     - components=False：仅返回 config（契约/UI 冒烟测试用，不加载模型）。
@@ -133,6 +145,32 @@ def wire(config: "SystemConfig", components: bool = True, *,
         except SystemConfigError as exc:
             logger.warning("LLM 装配失败，降级为未装配（health 将显示 not_loaded）：%s", exc)
             llm = None
+    # A6：多模型候选 + 熔断（config.llm.candidates 非空时包裹 MultiCandidateLLM）
+    if llm is not None and config.llm.candidates:
+        from app.adapters.llm.multi_llm import MultiCandidateLLM
+
+        candidates = [llm]
+        for item in config.llm.candidates:
+            try:
+                import os
+
+                key = os.environ.get(item.get("api_key_env") or "RAG_DEEPSEEK_API_KEY")
+                if not key:
+                    continue
+                candidates.append(_instantiate(
+                    "llm", item.get("provider", "deepseek"),
+                    {**config.llm.model_dump(),
+                     "model": item.get("model", config.llm.model),
+                     "base_url": item.get("base_url", config.llm.base_url),
+                     "api_key": key}))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("候选 LLM 装配失败（%s）：%s", item.get("model"), exc)
+        if len(candidates) > 1:
+            llm = MultiCandidateLLM(
+                candidates,
+                fail_threshold=config.llm.circuit_fail_threshold,
+                cooldown_seconds=config.llm.circuit_cooldown_seconds,
+            )
     deps.llm = llm
 
     # 纯本地组件：直接装配（可注入 stub 覆盖；embedding/llm 注入给 semantic/llm 系 provider）
@@ -155,6 +193,26 @@ def wire(config: "SystemConfig", components: bool = True, *,
     deps.documents = documents if documents is not None else DocumentsStore()
     deps.kbs = kbs if kbs is not None else KbStore()
     deps.users = users if users is not None else UserStore()
+
+    # —— 13.12 输入侧治理装配（全部默认关：未启用时保持 None，零开销）——
+    if config.query_input.enabled:
+        from app.adapters.normalizer.rule_normalizer import RuleQueryNormalizer
+
+        deps.normalizer = normalizer or RuleQueryNormalizer(**config.query_input.model_dump())
+    if config.query_security.enabled:
+        from app.adapters.query_guard import QueryGuard
+
+        deps.query_guard = query_guard or QueryGuard(**config.query_security.model_dump())
+    if config.dialogue.enabled:
+        from app.adapters.dialogue.rule_boundary import RuleBoundaryDetector
+        from app.services.session_store import SessionStore
+
+        deps.boundary = boundary or RuleBoundaryDetector(
+            embedding=embedding, **config.dialogue.boundary.model_dump())
+        deps.sessions = sessions or SessionStore(
+            ttl_seconds=config.dialogue.session.ttl_seconds,
+            max_sessions=config.dialogue.max_sessions)
+
     # C4：pipeline 可注入复用（热切换时避免重建 worker 线程/重载模型）
     deps.pipeline = pipeline if pipeline is not None else IngestionPipeline(
         config=config, embedding=embedding, vector_store=vector_store,
@@ -164,5 +222,6 @@ def wire(config: "SystemConfig", components: bool = True, *,
         config=config, retriever=retriever, reranker=deps.reranker,
         evaluator=deps.evaluator, rewriter=deps.rewriter,
         detector=deps.detector, llm=llm, vector_store=vector_store,
+        normalizer=deps.normalizer,
     )
     return deps

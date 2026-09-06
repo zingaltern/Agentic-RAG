@@ -39,3 +39,5 @@ frontend/*.log
 npm-debug.log*
 # ---- 打包产物（electron-builder 输出；含二进制 App/DMG，不入库） ----
 frontend/release/
+# 外部基准测试集原始数据（8.4，可由 build_review_set 重新下载）
+tests/review/raw/

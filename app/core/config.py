@@ -99,6 +99,13 @@ class RetrieverConfig(BaseModel):
     top_k: int = 20
     candidates: int = 50
     rr_fused_k: int = 60
+    # —— 2026-08-17：检索内并发 + query 级缓存 ——
+    # query 级 LRU 缓存条目上限（0=关闭缓存，退化为原行为）
+    query_cache_maxsize: int = 128
+    # 缓存条目存活时间（秒），作为文档变更后陈旧的兜底失效
+    query_cache_ttl_seconds: int = 300
+    # 检索内并行路数（BM25 + 向量两路并行）
+    max_concurrent_paths: int = 2
 
 
 class RerankerConfig(BaseModel):
@@ -137,6 +144,10 @@ class LlmConfig(BaseModel):
     timeout_seconds: int = 30
     # api_key 只允许环境变量注入（RAG_DEEPSEEK_API_KEY / RAG_LLM_API_KEY），禁止写入文件
     api_key: str | None = None
+    # A6（智能体体验增强）：多模型候选（按优先级）+ 熔断参数
+    candidates: list[dict] = []
+    circuit_fail_threshold: int = 3
+    circuit_cooldown_seconds: int = 60
 
 
 class OrchestrationConfig(BaseModel):
@@ -145,6 +156,9 @@ class OrchestrationConfig(BaseModel):
     request_timeout_seconds: int = 30
     max_concurrent_queries: int = 4        # C3（V5.1）：并发查询信号量上限，耗尽返回 43001
     semaphore_acquire_timeout_seconds: float = 5.0   # C3：获取信号量等待上限
+    # 13.13 T1 绝望短路：首轮评估分远低于阈值且无联网候选 → 跳过改写轮直接 21001 兜底
+    hopeless_shortcut: bool = True
+    hopeless_score_threshold: float = 0.15
 
 
 class IngestionConfig(BaseModel):
@@ -199,6 +213,138 @@ class ModerationConfig(BaseModel):
     keywords_csv: str = "./configs/moderation_keywords.csv"
 
 
+class MemoryConfig(BaseModel):
+    """A1 会话记忆压缩（智能体体验增强）。"""
+
+    enabled: bool = True
+    compress_threshold: int = 6     # 历史超过 N 轮时压缩早期轮次
+
+
+class WebConfig(BaseModel):
+    """A5 联网检索（Tavily，纯 HTTP）。"""
+
+    enabled: bool = False
+    provider: str = "tavily"
+    api_key_env: str = "RAG_TAVILY_API_KEY"   # key 只走环境变量
+    max_results: int = 5
+    search_depth: str = "basic"
+    timeout_seconds: int = 8
+    first_round_only: bool = True   # 仅首轮拉取（省配额与耗时）
+    kb_priority: bool = True        # 冲突优先级：KB 块恒排 web 之前（即使 web 相关度更高，仍以知识库为准；web 仅作补充）
+
+
+class QueryInputConfig(BaseModel):
+    """查询侧输入标准化管线（在线侧输入处理.md L1；默认关，不改变现有行为）。
+
+    - filter_invalid_chars：Emoji/控制字符清理 + 连续重复标点压缩（！！！→！）；
+    - asr_smooth：语音转写语气词清理（filler 词典可配，最长优先）+ 连续单字重复压缩（对对对→对）；
+    - resolve_relative_time：相对时间 → 绝对时间（昨天→2026-08-17；reference 缺省取当天）。
+    每步独立 try/except：异常即跳过该步，输出必为合法文本（最差等于输入）。
+    """
+
+    enabled: bool = False
+    filter_invalid_chars: bool = True
+    asr_smooth: bool = True
+    asr_filler_words: list[str] = ["嗯", "那个", "就是说", "然后", "呃", "额", "这个这个", "就是"]
+    resolve_relative_time: bool = True
+    time_reference_date: str | None = None      # 如 "2026-08-17"；None = 当天
+    timezone: str = "Asia/Shanghai"
+
+
+class QuerySecurityConfig(BaseModel):
+    """查询侧安全前置（在线侧输入处理.md 4.6 横切；默认关）。
+
+    复用入库侧 InjectionScanner / KeywordModerator，在 /api/query 入口执行：
+    - mode=audit：命中仅审计日志（query_security_audit），不拦截；
+    - mode=reject：命中抛 InjectionError(40002) / ContentModerationError(40003)。
+    - patterns/whitelist 为追加模式（内置模式表始终生效）；keywords_csv 缺失/损坏兜底内置词表。
+    """
+
+    enabled: bool = False
+    mode: str = "audit"                          # audit | reject
+    injection: bool = True
+    moderation: bool = True
+    patterns: list[str] = []
+    whitelist: list[str] = []
+    keywords_csv: str = "./configs/moderation_keywords.csv"
+
+
+class GreetingRule(BaseModel):
+    """单条极简通道规则（13.13 T2）：命中 pattern → 返回该规则独立 reply。"""
+
+    name: str = ""               # 可选标识（日志/排障用）
+    pattern: str
+    reply: str
+
+
+class GreetingConfig(BaseModel):
+    """L0 极简通道：问候语/闲聊规则直达（在线侧输入处理.md 4.1.2；代码默认关，部署可启用）。
+
+    匹配顺序：rules（每条独立回复，13.13 T2）→ 旧版 patterns+reply（兼容字段，rules 为空时生效）；
+    命中即直接返回 reply（不检索、不调 LLM）；单个正则非法 → 跳过继续匹配。
+    """
+
+    enabled: bool = False
+    rules: list[GreetingRule] = []
+    patterns: list[str] = [
+        r"^(?:你好|您好|嗨|哈喽|hello|hi)\s*[!！。~～]*$",
+        r"^(?:在吗|在么|有人吗)\s*[?？]*$",
+        r"^(?:谢谢|感谢|谢啦|多谢)\s*[!！。~～]*$",
+    ]
+    reply: str = "您好，我是企业知识库问答助手，可以问我知识库相关的问题，例如「年假怎么申请？」"
+
+
+class ClarificationConfig(BaseModel):
+    """A2 主动澄清（在线侧输入处理.md 4.4.5）：固定模板 + 槽位填充，LLM 仅可选增强。
+
+    - enabled=False：维持「反思超限直接 21001 兜底」（不反问）；
+    - use_llm=True：先 LLM 生成澄清问句，失败/超时回退模板；
+    - max_rounds：每会话连续反问上限（dialogue 启用后按 session 计数，达上限转 21001）。
+    """
+
+    enabled: bool = True
+    max_rounds: int = 2
+    use_llm: bool = False
+    templates: dict[str, str] = {
+        "no_entity": "请问您具体想了解哪个方面的内容呢？",
+        "missing_issue": "请问您遇到了什么具体问题？",
+        "generic": "您的需求我暂时没有理解清楚，建议您描述更详细一些，或联系人工客服。",
+    }
+    fallback_message: str = "您的需求我暂时没有理解清楚，建议您描述更详细一些，或联系人工客服。"
+
+
+class DialogueSessionConfig(BaseModel):
+    """L2 会话生命周期（在线侧输入处理.md 4.3.3）。"""
+
+    ttl_seconds: int = 1800          # 会话空闲过期（默认 30 分钟）
+    max_rounds: int = 5              # 保留最近 N 轮（轮 = user+assistant 对）
+    enable_rollback: bool = True     # "不对/说错了" 等回溯意图 → 移除上一轮记录
+    rollback_keywords: list[str] = ["不对", "说错了", "不是这个", "重来", "不是"]
+
+
+class DialogueBoundaryConfig(BaseModel):
+    """L2 会话边界判定（在线侧输入处理.md 4.3.2）：双维度综合判定新话题。"""
+
+    enabled: bool = True
+    semantic_threshold: float = 0.60          # 当前 query 与上轮 query 嵌入余弦 < 阈值 → 提示新话题
+    entity_jaccard_threshold: float = 0.20    # 实体重合度 < 阈值 → 提示新话题
+    use_embedding: bool = True
+
+
+class DialogueConfig(BaseModel):
+    """L2 对话状态引擎（在线侧输入处理.md 4.3；总开关默认关 → 完全维持现状）。
+
+    启用后：服务端按 session_id 维护会话历史（客户端 history 退居兜底），
+    新话题判定清空短期上下文，回溯关键词移除上一轮，TTL 过期重置；
+    会话存储为进程内内存（max_sessions LRU 淘汰），生产可换 Redis（接口不变）。
+    """
+
+    enabled: bool = False
+    session: DialogueSessionConfig = DialogueSessionConfig()
+    boundary: DialogueBoundaryConfig = DialogueBoundaryConfig()
+    max_sessions: int = 100          # 内存会话上限（超出 LRU 淘汰最久未用）
+
+
 class LoggingConfig(BaseModel):
     # yaml 键保持 4.2 的 `json: true`，字段名避免与 pydantic 内部属性重名
     model_config = ConfigDict(populate_by_name=True)
@@ -248,8 +394,16 @@ class SystemConfig(BaseSettings):
     orchestration: OrchestrationConfig = OrchestrationConfig()
     ingestion: IngestionConfig = IngestionConfig()
     cleaner: CleanerConfig = CleanerConfig()
+    memory: MemoryConfig = MemoryConfig()
+    web: WebConfig = WebConfig()
     injection: InjectionConfig = InjectionConfig()
     moderation: ModerationConfig = ModerationConfig()
+    # —— 13.12 输入侧治理（在线侧输入处理落地；全部默认关，clarification 默认开）——
+    query_input: QueryInputConfig = QueryInputConfig()
+    query_security: QuerySecurityConfig = QuerySecurityConfig()
+    greeting: GreetingConfig = GreetingConfig()
+    clarification: ClarificationConfig = ClarificationConfig()
+    dialogue: DialogueConfig = DialogueConfig()
     logging: LoggingConfig = LoggingConfig()
     documents: DocumentsConfig = DocumentsConfig()
     kbs: KbsConfig = KbsConfig()
@@ -293,6 +447,18 @@ class SystemConfig(BaseSettings):
             raise SystemConfigError("orchestration 超时配置必须 >= 1 秒")
         if self.orchestration.semaphore_acquire_timeout_seconds < 0:
             raise SystemConfigError("orchestration.semaphore_acquire_timeout_seconds 必须 >= 0（0=不等待立即 43001）")
+        # 13.12 输入侧治理：数值/枚举护栏（禁止静默降级为非法取值）
+        if self.query_security.mode not in ("audit", "reject"):
+            raise SystemConfigError("query_security.mode 必须为 audit 或 reject")
+        if self.clarification.max_rounds < 1:
+            raise SystemConfigError("clarification.max_rounds 必须 >= 1")
+        if not 0 <= self.dialogue.boundary.semantic_threshold <= 1:
+            raise SystemConfigError("dialogue.boundary.semantic_threshold 必须在 [0,1]")
+        if not 0 <= self.dialogue.boundary.entity_jaccard_threshold <= 1:
+            raise SystemConfigError("dialogue.boundary.entity_jaccard_threshold 必须在 [0,1]")
+        if self.dialogue.session.ttl_seconds < 0 or self.dialogue.session.max_rounds < 0 \
+                or self.dialogue.max_sessions < 1:
+            raise SystemConfigError("dialogue 会话参数非法（ttl_seconds/max_rounds >= 0，max_sessions >= 1）")
         return self
 
 
@@ -367,9 +533,18 @@ def _resolve_env_path(name: str, model: type[BaseModel]) -> list[str] | None:
 
 
 def _env_source_dict() -> dict[str, Any]:
-    """收集 RAG_ 前缀环境变量（真实环境优先于 .env）并映射为嵌套配置 dict。"""
+    """收集 RAG_ 前缀环境变量（真实环境优先于 .env）并映射为嵌套配置 dict。
+
+    注意：项目自实现 .env 解析（_read_dotenv），此前只把值喂给 SystemConfig，
+    未回写 os.environ。直接读 os.environ 取 key 的组件（WebRetriever、A6 候选 LLM）
+    因此拿不到 .env 里的 RAG_* —— 这里在加载时回写，保证「key 只走环境变量」对
+    .env 同样生效（真实环境已存在的变量保持不变，仅用 .env 补缺）。
+    """
     raw: dict[str, str] = _read_dotenv()
     raw.update({k: v for k, v in os.environ.items() if k.startswith("RAG_")})
+    for _k, _v in raw.items():
+        if _k.startswith("RAG_") and _k not in os.environ:
+            os.environ[_k] = _v
     out: dict[str, Any] = {}
     for key, value in raw.items():
         name = key[len("RAG_"):]

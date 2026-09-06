@@ -1,12 +1,17 @@
 """混合检索器单测（DEVELOPMENT.md 5.4、3.3）。"""
 from __future__ import annotations
 
+import threading
+import time
+
 import pytest
 
 from app.adapters.retriever.hybrid_rrf import HybridRRFRetriever
 from app.adapters.vector_store.chroma_store import ChromaStore
 from app.core.domain import Chunk
 from tests.unit.fakes import StubEmbedding
+
+
 
 CORPUS = [
     # 员工手册相关
@@ -114,3 +119,106 @@ def test_cross_collection_isolation(tmp_path):
         assert hit.chunk.chunk_id != "a1"
     hits_a = retriever.retrieve("年假怎么申请", k=5, collection="kb")
     assert all(h.chunk.metadata["source"] == "员工手册.md" for h in hits_a)
+
+
+# —— 2026-08-17：检索内并发 + query 级缓存 ——
+
+class _CountingEmbedding(StubEmbedding):
+    """统计 embed_query 调用次数，用于断言缓存命中跳过重算。"""
+
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self.query_calls = 0
+
+    def embed_query(self, text: str) -> list[float]:
+        self.query_calls += 1
+        return super().embed_query(text)
+
+
+def _counting_retriever(tmp_path) -> tuple[HybridRRFRetriever, _CountingEmbedding]:
+    store = ChromaStore(persist_dir=str(tmp_path / "chroma"), collection="kb")
+    emb = _CountingEmbedding(dimension=128)
+    chunks = [_chunk(*c) for c in CORPUS]
+    store.add_chunks(zip(chunks, emb.embed_documents([c.text for c in chunks])))
+    return HybridRRFRetriever(embedding=emb, vector_store=store, top_k=5, candidates=20, rr_fused_k=60), emb
+
+
+def test_query_cache_hit_skips_embedding(tmp_path):
+    """相同 query 二次调用应命中缓存，不再调用 embed_query 与重检索。"""
+    retriever, emb = _counting_retriever(tmp_path)
+    q = "年假怎么申请"
+    r1 = retriever.retrieve(q, k=5)
+    calls_after_first = emb.query_calls
+    assert calls_after_first >= 1
+    r2 = retriever.retrieve(q, k=5)
+    assert emb.query_calls == calls_after_first, "缓存命中不应再次调用 embed_query"
+    assert [c.chunk.chunk_id for c in r1] == [c.chunk.chunk_id for c in r2], "命中缓存结果须一致"
+
+
+def test_query_cache_reuse_across_k(tmp_path):
+    """不同 k 应复用同一缓存（存完整结果，按 k 切片）。"""
+    retriever, emb = _counting_retriever(tmp_path)
+    q = "年假怎么申请"
+    r1 = retriever.retrieve(q, k=2)
+    r2 = retriever.retrieve(q, k=5)
+    assert len(r1) <= 2 and len(r2) <= 5
+    emb_after_r1 = emb.query_calls
+    retriever.retrieve(q, k=3)
+    assert emb.query_calls == emb_after_r1, "不同 k 应命中同一缓存"
+
+
+def test_query_cache_disabled_when_maxsize_zero(tmp_path):
+    """query_cache_maxsize=0 时退化为无缓存原行为，每次都重检索。"""
+    store = ChromaStore(persist_dir=str(tmp_path / "chroma"), collection="kb")
+    emb = _CountingEmbedding(dimension=128)
+    chunks = [_chunk(*c) for c in CORPUS]
+    store.add_chunks(zip(chunks, emb.embed_documents([c.text for c in chunks])))
+    retriever = HybridRRFRetriever(embedding=emb, vector_store=store, top_k=5, candidates=20,
+                                   rr_fused_k=60, query_cache_maxsize=0)
+    q = "年假怎么申请"
+    retriever.retrieve(q, k=5)
+    n1 = emb.query_calls
+    retriever.retrieve(q, k=5)
+    assert emb.query_calls == n1 + 1, "关闭缓存后每次都应重新检索"
+
+
+def test_query_cache_ttl_expiry(tmp_path):
+    """TTL 过期后须重新检索（文档变更陈旧的兜底失效）。"""
+    store = ChromaStore(persist_dir=str(tmp_path / "chroma"), collection="kb")
+    emb = _CountingEmbedding(dimension=128)
+    chunks = [_chunk(*c) for c in CORPUS]
+    store.add_chunks(zip(chunks, emb.embed_documents([c.text for c in chunks])))
+    retriever = HybridRRFRetriever(embedding=emb, vector_store=store, top_k=5, candidates=20,
+                                   rr_fused_k=60, query_cache_ttl_seconds=1)
+    q = "年假怎么申请"
+    retriever.retrieve(q, k=5)
+    n1 = emb.query_calls
+    time.sleep(1.1)
+    retriever.retrieve(q, k=5)
+    assert emb.query_calls == n1 + 1, "TTL 过期后应重新检索"
+
+
+def test_concurrent_retrieve_consistent(tmp_path):
+    """8 线程并发 retrieve 同一 query，结果必须完全一致（无竞态 / 线程安全）。"""
+    store = ChromaStore(persist_dir=str(tmp_path / "chroma"), collection="kb")
+    emb = StubEmbedding(dimension=128)
+    chunks = [_chunk(*c) for c in CORPUS]
+    store.add_chunks(zip(chunks, emb.embed_documents([c.text for c in chunks])))
+    retriever = HybridRRFRetriever(embedding=emb, vector_store=store, top_k=5, candidates=20, rr_fused_k=60)
+    q = "年假怎么申请"
+    results: list[list[str]] = []
+    lock = threading.Lock()
+
+    def worker():
+        r = retriever.retrieve(q, k=5)
+        with lock:
+            results.append([c.chunk.chunk_id for c in r])
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(results) == 8
+    first = results[0]
+    assert all(r == first for r in results), "并发检索结果必须一致（无竞态）"

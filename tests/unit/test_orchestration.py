@@ -117,16 +117,29 @@ def test_sources_filename_equals_metadata_source():
 
 
 def test_fallback_21001_after_max_iterations():
-    """始终 below_threshold → 反思达上限 → 兜底 code=21001 + 兜底文案。"""
-    retriever = _Retriever([_scored("不相关内容")])
+    """检索空 + 始终 below → 反思达上限 → 21001 兜底（A2：无候选不澄清）。"""
+    retriever = _Retriever([])   # 检索无候选
     config = load_config()
     n = config.orchestration.max_reflection_iterations
-    evaluator = _Evaluator([EvaluationResult(False, 0.1, "below_threshold")] * (n + 1))
+    evaluator = _Evaluator([EvaluationResult(False, 0.25, "below_threshold")] * (n + 1))
     svc = _build(retriever, evaluator, _Rewriter(["a"] * n), _Detector(), _LLM())
     answer = svc.run("离职补偿金怎么算")
     assert answer.code == 21001
     assert answer.text == FALLBACK_TEXT
     assert answer.iterations == n
+
+
+def test_clarify_21003_when_low_scores_with_candidates():
+    """A2：检索有候选但连续低分 → 21003 主动澄清（need_clarify=True）。"""
+    retriever = _Retriever([_scored("不相关内容")])
+    config = load_config()
+    n = config.orchestration.max_reflection_iterations
+    evaluator = _Evaluator([EvaluationResult(False, 0.25, "below_threshold")] * (n + 1))
+    svc = _build(retriever, evaluator, _Rewriter(["a"] * n), _Detector(), _LLM())
+    answer = svc.run("年假怎么申请")
+    assert answer.code == 21003
+    assert answer.need_clarify is True
+    assert answer.text, "澄清分支必须返回澄清问句（Stub LLM 返回固定文本）"
     # 改写无变化后触发换路（13.3.3-1：BM25-only + 向量-only），检索次数随轮次增加
     assert len(retriever.calls) >= n + 1
     assert all(c["filters"] == {} for c in retriever.calls)

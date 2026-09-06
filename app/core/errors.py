@@ -95,6 +95,13 @@ class ReflectionLimitError(AppError):
     message = "抱歉，暂未找到相关答案…"
 
 
+class ClarifyError(AppError):
+    """主动澄清：意图不清时反问引导（A2，智能体体验增强）。"""
+
+    code = 21003
+    message = "需要澄清：请明确您的意图"
+
+
 class RequestTimeoutError(AppError):
     """全局请求超时。"""
 

@@ -8,12 +8,22 @@
 """
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 
 from app.api.auth import get_authorizer
 from app.api.utils import fail, get_deps, ok
-from app.core.errors import BusyError, InternalError, RateLimitError, ValidationError
+from app.core.errors import (
+    BusyError,
+    ContentModerationError,
+    InjectionError,
+    InternalError,
+    RateLimitError,
+    ValidationError,
+)
+from app.core.logging import get_logger, get_trace_id
 from app.core.registry import Dependencies
 
 router = APIRouter(prefix="/api/query", tags=["query"])
@@ -29,6 +39,7 @@ class QueryRequest(BaseModel):
     filters: dict | None = None
     collection: str | None = None
     kb_id: str | None = None        # 13.5：与 collection 二选一，kb_id 优先，缺省 default
+    web_search: bool = False     # A5：联网搜索（前端开关；服务端 web.enabled 为全局默认）
     debug: bool = False
 
 
@@ -71,6 +82,23 @@ def _query_impl(payload: QueryRequest, request: Request,
     if deps.kbs is None:
         raise InternalError("知识库服务尚未装配")
 
+    # 13.12.3 查询侧安全前置：audit=仅审计标记；reject=拦截（40002/40003）
+    if deps.query_guard is not None:
+        guard_result = deps.query_guard.check(payload.query)
+        if guard_result.verdict == "blocked":
+            if guard_result.blocked_by == "injection":
+                raise InjectionError("您的输入疑似包含提示注入指令，已被拦截")
+            raise ContentModerationError("您的输入未通过内容审核，已被拦截")
+        if guard_result.verdict == "flag" and guard_result.hits:
+            get_logger("query_guard").info(
+                "query_security_audit",
+                extra={"extra_fields": {"hits": guard_result.hits[:5],
+                                        "trace_id": get_trace_id()}},
+            )
+
+    # 13.12.6 服务端会话解析（dialogue 未启用/无 session_id → 沿用客户端 history）
+    resolved_history, session = _resolve_session(request, deps, payload, payload.query)
+
     # 13.5：kb_id 与 collection 二选一，kb_id 优先，缺省 default；目标库不存在 → 参数错误
     if payload.kb_id:
         info = deps.kbs.get(payload.kb_id)
@@ -97,11 +125,14 @@ def _query_impl(payload: QueryRequest, request: Request,
         collection=collection,
         top_k=payload.top_k,
         debug=payload.debug,
-        history=payload.history,
+        history=resolved_history,
+        web_search=payload.web_search,
+        allow_clarify=_session_allow_clarify(request, session),
     )
+    # 13.12.6 问答结束回写会话（历史/澄清计数/最后提问）
+    _update_session(request, deps, payload, session, result, payload.query)
     # S6 审计（13.11.1）：含 user_id/kb_id 与回答摘要，不含完整敏感文本与 key
     from app.api.auth import current_user
-    from app.core.logging import get_logger, get_trace_id
 
     get_logger("audit").info(
         "query_audit",
@@ -132,3 +163,62 @@ def _query_impl(payload: QueryRequest, request: Request,
         # 反思超限兜底：code=21001 + 兜底文案（6.4）
         return fail(result.code, result.message, data=data)
     return ok(data)
+
+
+# ---------------------------------------------------------------------------
+# 13.12.6 服务端会话（L2 对话状态引擎落地）
+# ---------------------------------------------------------------------------
+
+def _matches_any(text: str, keywords: list[str]) -> bool:
+    return any(kw and kw in text for kw in keywords)
+
+
+def _resolve_session(request: Request, deps: Dependencies, payload: "QueryRequest",
+                     query: str) -> tuple[list[dict], object | None]:
+    """P2：服务端会话解析。
+
+    dialogue 未启用 / 无 session_id / 会话存储未装配 → (客户端 history, None)（现状语义）；
+    启用后：回溯关键词移除上一轮；新话题判定清空短期上下文；TTL 过期由 store 处理。
+    """
+    cfg = request.app.state.config.dialogue
+    if not cfg.enabled or not payload.session_id or deps.sessions is None:
+        return (payload.history or []), None
+    store = deps.sessions
+    session = store.get(payload.session_id) or store.new(payload.session_id)
+    if cfg.session.enable_rollback and _matches_any(query, cfg.session.rollback_keywords):
+        if session.history:
+            session.history = session.history[:-1]   # 回溯：移除上一轮记录
+    if session.last_query and deps.boundary is not None and cfg.boundary.enabled:
+        try:
+            if deps.boundary.is_new_topic(query, session.last_query):
+                session.history = []                 # 新话题：清空短期上下文
+        except Exception as exc:  # noqa: BLE001
+            get_logger("dialogue").warning("会话边界判定异常（保留历史降级）：%s", exc)
+    return list(session.history), session
+
+
+def _session_allow_clarify(request: Request, session: object | None) -> bool:
+    """13.12.5：连续反问达 clarification.max_rounds → 不再反问（转 21001 兜底）。"""
+    if session is None:
+        return True
+    return getattr(session, "clarify_count", 0) < request.app.state.config.clarification.max_rounds
+
+
+def _update_session(request: Request, deps: Dependencies, payload: "QueryRequest",
+                    session: object | None, result: Any, query: str) -> None:
+    """P2：问答结束后回写会话（历史 + 澄清计数 + 最后提问），并做轮数截断。"""
+    if session is None or deps.sessions is None:
+        return
+    cfg = request.app.state.config.dialogue
+    if result.text:
+        session.history.append({"role": "user", "content": query})
+        session.history.append({"role": "assistant", "content": result.text})
+        max_rounds = cfg.session.max_rounds
+        if max_rounds > 0 and len(session.history) > max_rounds * 2:
+            session.history = session.history[-(max_rounds * 2):]
+    if result.code == 0:
+        session.clarify_count = 0          # 正常回答 → 澄清计数清零（连续反问重置）
+    elif getattr(result, "need_clarify", False):
+        session.clarify_count += 1
+    session.last_query = query
+    deps.sessions.put(session)

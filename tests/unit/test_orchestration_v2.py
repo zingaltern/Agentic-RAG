@@ -183,3 +183,56 @@ def test_wire_fallback_providers_switchable(tmp_path, isolated_stores):
     assert deps.reranker is not None and deps.evaluator is not None
     assert deps.rewriter is not None and deps.detector is not None
     assert deps.orchestration is not None
+
+
+# -- 13.13 T1 绝望短路 ---------------------------------------------------------------
+
+def test_hopeless_shortcut_skips_rewrites_on_round0():
+    """13.13 T1：首轮评估分远低于阈值 → 跳过改写轮直接 21001，不调用改写器。"""
+    from app.services.orchestration import FALLBACK_TEXT
+
+    retriever = _Retriever([_scored("不相关内容")])
+    evaluator = _Eval([EvaluationResult(False, 0.05, "below_threshold")] * 4)
+    rewriter = _Rewrite(["x"] * 4)
+    svc = _build(retriever, evaluator, rewriter)
+    answer = svc.run("公司有员工食堂吗")
+    assert answer.code == 21001
+    assert answer.text == FALLBACK_TEXT
+    assert answer.iterations == 0, "首轮即短路，不得进入改写轮"
+    assert rewriter.calls == [], "绝望短路不得调用改写器"
+    assert len(retriever.calls) == 1, "仅首轮检索一次"
+
+
+def test_hopeless_shortcut_disabled_keeps_reflection_loop():
+    """开关关闭 → 回退旧行为：跑满反思轮次后收尾（有候选 → 21003 澄清）。"""
+    config = load_config()
+    config.orchestration.hopeless_shortcut = False
+    retriever = _Retriever([_scored("不相关内容")])
+    evaluator = _Eval([EvaluationResult(False, 0.05, "below_threshold")] * 4)
+    svc = _build(retriever, evaluator, _Rewrite(["x"] * 4), config=config)
+    answer = svc.run("公司有员工食堂吗")
+    assert answer.iterations == config.orchestration.max_reflection_iterations
+    assert answer.code == 21003, "关闭短路后恢复旧澄清语义"
+
+
+def test_hopeless_shortcut_not_triggered_above_threshold():
+    """分数低于通过线（0.45）但高于无望线（0.15）→ 正常反思循环。"""
+    retriever = _Retriever([_scored("不相关内容")])
+    evaluator = _Eval([EvaluationResult(False, 0.25, "below_threshold")] * 4)
+    rewriter = _Rewrite(["换个问法"] * 4)
+    svc = _build(retriever, evaluator, rewriter)
+    answer = svc.run("这个具体怎么操作")
+    assert len(retriever.calls) >= 2, "分数高于无望阈值必须继续改写轮"
+    assert answer.code in (21001, 21003)
+
+
+def test_hopeless_shortcut_suppressed_with_history():
+    """带会话历史时不得短路：低分查询可能是针对历史的追问（13.13 T3 冒烟结论）。"""
+    retriever = _Retriever([_scored("不相关内容")])
+    evaluator = _Eval([EvaluationResult(False, 0.05, "below_threshold")] * 4)
+    rewriter = _Rewrite(["x"] * 4)
+    svc = _build(retriever, evaluator, rewriter)
+    history = [{"role": "user", "content": "请记住：我的工号是8888"},
+               {"role": "assistant", "content": "好的，已记录。"}]
+    answer = svc.run("我的工号是多少", history=history)
+    assert answer.iterations >= 1, "历史非空时绝望短路必须让位于反思循环"
