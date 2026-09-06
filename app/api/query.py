@@ -66,7 +66,13 @@ def query(payload: QueryRequest, request: Request,
     if not sem.acquire(timeout=config.orchestration.semaphore_acquire_timeout_seconds):
         raise BusyError()
     try:
-        return _query_impl(payload, request, deps)
+        response = _query_impl(payload, request, deps)
+        from app.core import metrics
+
+        metrics.inc_counter("rag_query_total",
+                            {"result": "ok" if response.get("code") == 0 else "error"},
+                            help_text="问答结果计数（P2-7）")
+        return response
     finally:
         sem.release()
 

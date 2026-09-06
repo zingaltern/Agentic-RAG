@@ -50,6 +50,7 @@ class Job:
     kb_id: str | None = None      # 13.5：所属知识库（缺省 default）
     created_at: float = 0.0
     updated_at: float = 0.0
+    stage_timings: dict = field(default_factory=dict)   # P2-7：阶段耗时 ms（parse/clean/chunk/embed/index）
 
 
 @dataclass

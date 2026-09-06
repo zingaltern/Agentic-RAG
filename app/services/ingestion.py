@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import io
 import threading
+import time
 import queue
 from pathlib import Path
 from uuid import uuid4
@@ -27,6 +28,7 @@ from app.core.errors import (
 )
 from app.core.index_dna import compute_index_dna
 from app.core.interfaces import VectorEngine, VectorStore
+from app.core import metrics
 from app.core.logging import get_logger, set_trace_id
 from app.core.persist import atomic_write_bytes
 from app.services.documents_store import DocumentsStore
@@ -74,6 +76,8 @@ class IngestionPipeline:
                 self._queue.task_done()
                 break
             raw, filename, job, kb_id, collection = item
+            metrics.set_gauge("rag_ingest_queue_depth", self._queue.qsize(),
+                              help_text="入库队列当前深度（P2-7）")
             try:
                 self._run(raw, filename, job, kb_id=kb_id, collection=collection)
             except Exception:
@@ -230,6 +234,14 @@ class IngestionPipeline:
         set_trace_id(uuid4().hex[:12])
         collection = collection or self.config.vector_store.collection
         self.jobs.update(job.job_id, status="running")
+        stage_timings: dict[str, int] = {}   # P2-7：阶段耗时 ms（parse/clean/chunk/embed/index）
+        t0 = time.perf_counter()
+
+        def _stage(name: str) -> None:
+            """记录上一阶段耗时（ms）并写入 histogram（秒）。"""
+            stage_timings[name] = round((time.perf_counter() - t0) * 1000)
+            metrics.observe("rag_ingest_stage_seconds", stage_timings[name] / 1000,
+                            {"stage": name}, help_text="入库各阶段耗时分布（P2-7）")
         try:
             doc = parse_file(io.BytesIO(raw), filename, config=self.config.ingestion)
             doc.metadata["kb_id"] = kb_id          # 入库时写 Chunk.metadata.kb_id（13.5）
@@ -256,6 +268,8 @@ class IngestionPipeline:
                         extra={"extra_fields": {"job_id": job.job_id, "filename": filename,
                                                 "quality_flags": flags}},
                     )
+
+            _stage("parse")   # P2-7：parse 段含解析与质量门禁
 
             # S5（13.11.1）/ P2-6：PII 两级化（kb 库级策略 > 全局 ingestion.pii > 旧开关兼容 > 不处理）
             pii_policy = self._resolve_pii_policy(kb_id)
@@ -324,6 +338,8 @@ class IngestionPipeline:
                         raise ContentModerationError(f"命中类别：{'、'.join(categories)}")
                     doc.metadata["moderation_flags"] = result.matched_rules
 
+            _stage("clean")   # P2-7：clean 段含 pii 脱敏/清洗/注入扫描/内容审核
+
             # TOCTOU 防护：同 content_hash 的并发入库串行化（per-hash 锁），
             # 幂等检查与写入之间不再存在竞态窗口
             with self._lock_for(doc.content_hash):
@@ -334,6 +350,8 @@ class IngestionPipeline:
                     entry = self.documents.get(existing)
                     self.jobs.update(job.job_id, status="success", document_id=existing,
                                      chunk_count=entry.chunk_count if entry else 0)
+                    metrics.inc_counter("rag_ingest_total", {"result": "duplicate"},
+                                        help_text="入库结果计数（P2-7）")
                     logger.info(
                         "重复上传命中既有文档，跳过入库",
                         extra={"extra_fields": {"job_id": job.job_id, "document_id": existing,
@@ -350,6 +368,7 @@ class IngestionPipeline:
                     hard_boundary=self.config.chunker.hard_boundary.model_dump(),
                     context_prefix=self.config.chunker.context_prefix.model_dump(),
                 )
+                _stage("chunk")   # P2-7
                 parents = [c for c in chunks if c.parent_id is None]
                 batch_size = self.config.ingestion.embed_batch_size
                 vectors: list[list[float]] = []
@@ -358,12 +377,17 @@ class IngestionPipeline:
                     vectors.extend(self.embedding.embed_documents([c.text for c in batch]))
                 if len(vectors) != len(parents):
                     raise EmbeddingError(f"向量数（{len(vectors)}）与块数（{len(parents)}）不一致")
+                _stage("embed")   # P2-7
                 self.vector_store.add_chunks(zip(parents, vectors), collection=collection)
                 # P0-2：原件归档（幂等锁内成功路径；写失败仅告警不回滚入库，归档尽力而为）
                 archive_path = self._archive_original(raw, filename, kb_id, doc.document_id)
                 self.documents.register(doc, chunk_count=len(parents), archive_path=archive_path)
+                _stage("index")   # P2-7
                 self.jobs.update(job.job_id, status="success",
-                                 document_id=doc.document_id, chunk_count=len(parents))
+                                 document_id=doc.document_id, chunk_count=len(parents),
+                                 stage_timings=stage_timings)
+                metrics.inc_counter("rag_ingest_total", {"result": "success"},
+                                    help_text="入库结果计数（P2-7）")
                 logger.info(
                     "入库成功",
                     extra={"extra_fields": {"job_id": job.job_id, "document_id": doc.document_id,
@@ -393,4 +417,12 @@ class IngestionPipeline:
         except Exception as exc:
             self.jobs.update(job.job_id, status="failed", error_code="50001")
             logger.exception("入库失败：未知错误", extra={"extra_fields": {"job_id": job.job_id}})
+        finally:
+            final = self.jobs.get(job.job_id) or job
+            if final.status == "failed":
+                code = final.error_code or "50001"
+                result = "rejected" if code in ("30005", "40002", "40003") else "failed"
+                metrics.inc_counter("rag_ingest_total",
+                                    {"result": result, "error_code": code},
+                                    help_text="入库结果计数（P2-7）")
         return self.jobs.get(job.job_id) or job
