@@ -26,6 +26,17 @@ chunker:                           # 父子分块（DEVELOPMENT.md 5.2）
   parent_target_tokens: 512
   child_target_tokens: 128
   token_char_ratio: 1.8
+  table_aware:                     # P1-4：表格原子块（默认关；[TABLE] 行按普通文本聚合）
+    enabled: false
+    max_rows_per_chunk: 30         # 超限大表按行组切，每组行数上限（强制带表头）
+    json_max_bytes: 4096           # table_json 字节上限（超限截断+warning）
+  hard_boundary:                   # P1-5：标题硬边界（默认关；section 变更即断块）
+    enabled: false
+  context_prefix:                  # P1-5：上下文前缀（默认关；不计切块 token、计 embedding）
+    enabled: false
+    include_page: false
+    template: "{doc_title} > {section}"
+    include_page: false            # 前缀附加页码（需 page_spans 可解析）
 
 vector_store:
   provider: chroma
@@ -87,6 +98,20 @@ ingestion:
   max_queue_size: 64              # C5（V5.1）：入库队列上限，满时返回 43003
   zip_max_total_mb: 200           # S2（V5.1）：zip 解压总大小上限（防炸弹）
   zip_max_entries: 1000           # S2：zip 条目数上限
+  quality_gate:                   # P0-1：解析质量门禁（默认关，不改变现有入库行为）
+    enabled: false
+    mode: reject                  # reject=拒收（Job failed 30005）；flag=仅打标 metadata 继续入库
+    min_text_chars: 30            # 有效文本最小字符数（不足判 empty_text）
+    max_garbled_ratio: 0.05       # U+FFFD 乱码占比上限（超过判 high_garbled）
+    min_pages_with_text_ratio: 0.2  # 多页 PDF 有文本页占比下限（低于判 few_pages_with_text）
+  archive:                        # P0-2：原件归档（默认关；换 embedding 重建/重解析/审计取证的前置）
+    enabled: false
+    dir: ./data/archive
+  pii:                            # P2-6：PII 全局策略（默认关；库级 KbInfo.pii 可覆盖）
+    enabled: false
+    mode: mask                     # mask=*** | replace=[身份证] 占位符 | delete=移除
+    types: [id_card, phone, bank_card]
+  parser_routing: {}              # P3-8：解析链路由（空=旧单实现路径；例 {"pdf": {"chain": ["pymupdf"]}}）
 
 cleaner:
   enabled: false                  # 数据清洗层开关（解析后、分块前），默认关不改变现有行为
@@ -198,3 +223,7 @@ documents:
 
 kbs:
   persist_file: ./data/kb.json
+
+index_dna:                        # P1-3：索引 DNA 查询侧校验（默认关；换 embedding/分块/清洗配置后提示重建）
+  enabled: false
+  mode: audit                     # audit=warning+响应标记；reject=拦截（30006）

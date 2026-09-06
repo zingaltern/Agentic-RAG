@@ -4,14 +4,17 @@ parse_file → split_chunks → (parent chunks) embed_documents(batch) → vecto
 - 后台单线程 Worker（ThreadPoolExecutor max_workers=2），不占 HTTP worker 线程。
 - 入库只存父块（5.10 明确 parent chunks）；子块文本供 W3 上下文回溯，本阶段不落库。
 - 幂等：content_hash 命中（Chroma 持久 + 内存双检）返回既有 document_id，不重复入库。
-- 失败：Job 标记 failed + error_code（ParseError→30003 / 向量化→30002 / 其他→50001）。
+- 失败：Job 标记 failed + error_code（ParseError→30003 / 向量化→30002 /
+  解析质量门禁 QualityGateError→30005 / 注入→40002 / 审核→40003 / 其他→50001）。
 """
 from __future__ import annotations
 
 import hashlib
 import io
 import threading
+import time
 import queue
+from pathlib import Path
 from uuid import uuid4
 
 from app.core.config import SystemConfig
@@ -21,13 +24,17 @@ from app.core.errors import (
     EmbeddingError,
     InjectionError,
     ParseError,
+    QualityGateError,
 )
+from app.core.index_dna import compute_index_dna
 from app.core.interfaces import VectorEngine, VectorStore
+from app.core import metrics
 from app.core.logging import get_logger, set_trace_id
+from app.core.persist import atomic_write_bytes
 from app.services.documents_store import DocumentsStore
 from app.services.jobs_store import JobStore
 from app.adapters.chunker import split_chunks
-from app.adapters.parser import parse_file
+from app.adapters.parser import evaluate_parse_quality, parse_file, reindex_tables
 
 logger = get_logger("ingestion")
 
@@ -39,13 +46,17 @@ def compute_content_hash(raw: bytes) -> str:
 class IngestionPipeline:
     def __init__(self, config: SystemConfig, embedding: VectorEngine,
                  vector_store: VectorStore, jobs: JobStore,
-                 documents: DocumentsStore, max_workers: int = 2,
+                 documents: DocumentsStore, kbs=None, max_workers: int = 2,
                  start_workers: bool = True):
         self.config = config
         self.embedding = embedding
         self.vector_store = vector_store
         self.jobs = jobs
         self.documents = documents
+        self.kbs = kbs                   # P2-6：库级 pii 策略解析（None=不启用库级覆盖）
+        # P1-3：索引 DNA——入库时写入 chunk.metadata 与 DocEntry（装配期计算一次，
+        # /api/plugins/switch 热切换重建 deps 时随新 config 重算）
+        self._index_dna = compute_index_dna(config)["dna"]
         # C5（V5.1）：有界队列 + 固定 worker（替代无界 ThreadPoolExecutor），
         # 队列满时 submit 拒绝并标记 Job failed（43003），防止大批量上传内存无限堆积
         self._queue: queue.Queue = queue.Queue(maxsize=config.ingestion.max_queue_size)
@@ -65,6 +76,8 @@ class IngestionPipeline:
                 self._queue.task_done()
                 break
             raw, filename, job, kb_id, collection = item
+            metrics.set_gauge("rag_ingest_queue_depth", self._queue.qsize(),
+                              help_text="入库队列当前深度（P2-7）")
             try:
                 self._run(raw, filename, job, kb_id=kb_id, collection=collection)
             except Exception:
@@ -147,21 +160,127 @@ class IngestionPipeline:
         job = job or self.jobs.create(filename, kb_id=kb_id)
         return self._run(raw, filename, job, kb_id=kb_id, collection=collection)
 
+    def _resolve_pii_policy(self, kb_id: str) -> dict | None:
+        """P2-6：解析生效的 PII 策略（kb 库级 > 全局 > 旧开关兼容）；None=不处理。
+
+        库级非法配置降级为"不处理"并 warning（不误伤入库主流程）。
+        """
+        pii = self.config.ingestion.pii
+        kb_pii = None
+        if self.kbs is not None:
+            info = self.kbs.get(kb_id)
+            kb_pii = getattr(info, "pii", None) if info is not None else None
+        if kb_pii is not None:
+            return self._normalize_pii(kb_pii, source=f"kb:{kb_id}")
+        if pii.enabled:
+            if self.config.ingestion.desensitize_enabled:
+                logger.warning(
+                    "旧开关 desensitize_enabled 与 ingestion.pii 同时开启：按新逻辑（pii）执行，"
+                    "旧开关已 deprecated（两个周期后移除）",
+                    extra={"extra_fields": {"kb_id": kb_id}},
+                )
+            return {"mode": pii.mode, "types": list(pii.types)}
+        if self.config.ingestion.desensitize_enabled:
+            # 仅旧开关开启（兼容期）：等价 mask + 全类型
+            return {"mode": "mask", "types": ["id_card", "phone", "bank_card"]}
+        return None
+
+    @staticmethod
+    def _normalize_pii(raw: dict, source: str) -> dict | None:
+        """校验库级 pii 配置形状；enabled=false 显式关闭返回 None，非法项降级 None。"""
+        if not isinstance(raw, dict):
+            logger.warning("库级 pii 配置非法（非 dict），忽略", extra={"extra_fields": {"source": source}})
+            return None
+        if raw.get("enabled") is False:
+            return None
+        mode = raw.get("mode", "mask")
+        types = list(raw.get("types") or ["id_card", "phone", "bank_card"])
+        from app.services.desensitize import VALID_MODES, VALID_TYPES
+
+        if mode not in VALID_MODES or any(t not in VALID_TYPES for t in types):
+            logger.warning(
+                "库级 pii 配置非法（mode/types），降级为不处理",
+                extra={"extra_fields": {"source": source, "mode": mode, "types": types}},
+            )
+            return None
+        return {"mode": mode, "types": types}
+
+    def _archive_original(self, raw: bytes, filename: str, kb_id: str, document_id: str) -> str | None:
+        """P0-2：原始字节归档（尽力而为），目标 `{archive.dir}/{kb_id}/{document_id}{ext}`。
+
+        - ext 只取 `Path(filename).suffix`：恶意文件名（如 "../../x"）的 suffix 为空串，
+          路径各段均来自受约束字段（kb_id 正则约束 / document_id 为 uuid hex），无路径穿越面；
+        - 写失败 warning 后返回 None（archive_path 置空 = 未归档），不影响入库主流程。
+        """
+        cfg = self.config.ingestion.archive
+        if not cfg.enabled:
+            return None
+        suffix = Path(filename).suffix
+        target = Path(cfg.dir) / kb_id / f"{document_id}{suffix}"
+        try:
+            atomic_write_bytes(target, raw)
+            return str(target)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "原件归档失败（继续入库，archive_path 置空）",
+                extra={"extra_fields": {"document_id": document_id, "archive_dir": cfg.dir,
+                                        "error": str(exc)}},
+            )
+            return None
+
     def _run(self, raw: bytes, filename: str, job: Job,
              kb_id: str = "default", collection: str | None = None) -> Job:
         # worker 线程无请求上下文，生成独立 trace_id 贯穿本 Job 日志
         set_trace_id(uuid4().hex[:12])
         collection = collection or self.config.vector_store.collection
         self.jobs.update(job.job_id, status="running")
+        stage_timings: dict[str, int] = {}   # P2-7：阶段耗时 ms（parse/clean/chunk/embed/index）
+        t0 = time.perf_counter()
+
+        def _stage(name: str) -> None:
+            """记录上一阶段耗时（ms）并写入 histogram（秒）。"""
+            stage_timings[name] = round((time.perf_counter() - t0) * 1000)
+            metrics.observe("rag_ingest_stage_seconds", stage_timings[name] / 1000,
+                            {"stage": name}, help_text="入库各阶段耗时分布（P2-7）")
         try:
             doc = parse_file(io.BytesIO(raw), filename, config=self.config.ingestion)
             doc.metadata["kb_id"] = kb_id          # 入库时写 Chunk.metadata.kb_id（13.5）
+            doc.metadata["index_dna"] = self._index_dna   # P1-3：dna 随 chunker 继承进 chunk metadata
 
-            # S5（13.11.1）：敏感数据脱敏（身份证/手机号/银行卡），默认关闭
-            if self.config.ingestion.desensitize_enabled:
-                from app.services.desensitize import desensitize_text
+            # P0-1：解析质量门禁（parse 之后、脱敏之前；默认关闭=行为与现状完全一致）。
+            # reject 模式在此抛 QualityGateError，由本函数尾部错误映射统一置 Job failed
+            # （worker 线程与同步 ingest 同路径），不在此处自行吞掉异常。
+            gate = self.config.ingestion.quality_gate
+            if gate.enabled:
+                flags = evaluate_parse_quality(
+                    doc.text, doc.metadata.get("text_stats") or {},
+                    min_text_chars=gate.min_text_chars,
+                    max_garbled_ratio=gate.max_garbled_ratio,
+                    min_pages_with_text_ratio=gate.min_pages_with_text_ratio,
+                )
+                if flags:
+                    if gate.mode == "reject":
+                        raise QualityGateError(data={"quality_flags": flags})
+                    # flag 模式：打标（list[str]，Chroma metadata 可存储）+ warning 后继续入库
+                    doc.metadata["quality_flags"] = flags
+                    logger.warning(
+                        "解析质量门禁打标（flag 模式，继续入库）",
+                        extra={"extra_fields": {"job_id": job.job_id, "filename": filename,
+                                                "quality_flags": flags}},
+                    )
 
-                doc.text = desensitize_text(doc.text)
+            _stage("parse")   # P2-7：parse 段含解析与质量门禁
+
+            # S5（13.11.1）/ P2-6：PII 两级化（kb 库级策略 > 全局 ingestion.pii > 旧开关兼容 > 不处理）
+            pii_policy = self._resolve_pii_policy(kb_id)
+            if pii_policy:
+                from app.services.desensitize import detect_pii, desensitize_text
+
+                hits = detect_pii(doc.text)
+                if hits:
+                    doc.metadata["pii_types"] = sorted({h["type"] for h in hits})   # 仅打标类型集合
+                    doc.text = desensitize_text(doc.text, mode=pii_policy["mode"],
+                                                types=pii_policy["types"])
 
             # 数据清洗层（解析后、分块前）：归一/去噪/段落去重/质量过滤，默认关闭
             if self.config.cleaner.enabled:
@@ -177,6 +296,7 @@ class IngestionPipeline:
                     min_chunk_chars=self.config.cleaner.min_chunk_chars,
                 )
                 doc.text = cleaner.clean(doc.text)
+                reindex_tables(doc)   # P1-4：清洗删表后按 [TABLE] 顺序重对齐 tables JSON
                 if not doc.text.strip():
                     logger.warning("清洗后文档为空（%s）：全部段落被噪声/去重/质量过滤剔除，仍按空文档入库",
                                    filename,
@@ -218,6 +338,8 @@ class IngestionPipeline:
                         raise ContentModerationError(f"命中类别：{'、'.join(categories)}")
                     doc.metadata["moderation_flags"] = result.matched_rules
 
+            _stage("clean")   # P2-7：clean 段含 pii 脱敏/清洗/注入扫描/内容审核
+
             # TOCTOU 防护：同 content_hash 的并发入库串行化（per-hash 锁），
             # 幂等检查与写入之间不再存在竞态窗口
             with self._lock_for(doc.content_hash):
@@ -228,6 +350,8 @@ class IngestionPipeline:
                     entry = self.documents.get(existing)
                     self.jobs.update(job.job_id, status="success", document_id=existing,
                                      chunk_count=entry.chunk_count if entry else 0)
+                    metrics.inc_counter("rag_ingest_total", {"result": "duplicate"},
+                                        help_text="入库结果计数（P2-7）")
                     logger.info(
                         "重复上传命中既有文档，跳过入库",
                         extra={"extra_fields": {"job_id": job.job_id, "document_id": existing,
@@ -240,7 +364,11 @@ class IngestionPipeline:
                     parent_target_tokens=self.config.chunker.parent_target_tokens,
                     child_target_tokens=self.config.chunker.child_target_tokens,
                     token_char_ratio=self.config.chunker.token_char_ratio,
+                    table_aware=self.config.chunker.table_aware.model_dump(),
+                    hard_boundary=self.config.chunker.hard_boundary.model_dump(),
+                    context_prefix=self.config.chunker.context_prefix.model_dump(),
                 )
+                _stage("chunk")   # P2-7
                 parents = [c for c in chunks if c.parent_id is None]
                 batch_size = self.config.ingestion.embed_batch_size
                 vectors: list[list[float]] = []
@@ -249,10 +377,17 @@ class IngestionPipeline:
                     vectors.extend(self.embedding.embed_documents([c.text for c in batch]))
                 if len(vectors) != len(parents):
                     raise EmbeddingError(f"向量数（{len(vectors)}）与块数（{len(parents)}）不一致")
+                _stage("embed")   # P2-7
                 self.vector_store.add_chunks(zip(parents, vectors), collection=collection)
-                self.documents.register(doc, chunk_count=len(parents))
+                # P0-2：原件归档（幂等锁内成功路径；写失败仅告警不回滚入库，归档尽力而为）
+                archive_path = self._archive_original(raw, filename, kb_id, doc.document_id)
+                self.documents.register(doc, chunk_count=len(parents), archive_path=archive_path)
+                _stage("index")   # P2-7
                 self.jobs.update(job.job_id, status="success",
-                                 document_id=doc.document_id, chunk_count=len(parents))
+                                 document_id=doc.document_id, chunk_count=len(parents),
+                                 stage_timings=stage_timings)
+                metrics.inc_counter("rag_ingest_total", {"result": "success"},
+                                    help_text="入库结果计数（P2-7）")
                 logger.info(
                     "入库成功",
                     extra={"extra_fields": {"job_id": job.job_id, "document_id": doc.document_id,
@@ -273,7 +408,21 @@ class IngestionPipeline:
             # P-C：内容审核 reject（40003）
             self.jobs.update(job.job_id, status="failed", error_code=str(exc.code))
             logger.warning("入库失败：内容审核未通过", extra={"extra_fields": {"job_id": job.job_id, "error_code": exc.code}})
+        except QualityGateError as exc:
+            # P0-1：解析质量门禁 reject（30005，疑似扫描件/损坏文件）
+            self.jobs.update(job.job_id, status="failed", error_code=str(exc.code))
+            logger.warning("入库失败：解析质量不达标（疑似扫描件/损坏文件）",
+                           extra={"extra_fields": {"job_id": job.job_id, "error_code": exc.code,
+                                                   "quality_flags": (exc.data or {}).get("quality_flags")}})
         except Exception as exc:
             self.jobs.update(job.job_id, status="failed", error_code="50001")
             logger.exception("入库失败：未知错误", extra={"extra_fields": {"job_id": job.job_id}})
+        finally:
+            final = self.jobs.get(job.job_id) or job
+            if final.status == "failed":
+                code = final.error_code or "50001"
+                result = "rejected" if code in ("30005", "40002", "40003") else "failed"
+                metrics.inc_counter("rag_ingest_total",
+                                    {"result": result, "error_code": code},
+                                    help_text="入库结果计数（P2-7）")
         return self.jobs.get(job.job_id) or job

@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.core.errors import SystemConfigError
@@ -80,12 +80,37 @@ class EmbeddingConfig(BaseModel):
     dimension: int = 0                       # 0 = 由模型自动识别（运行时回填实际维度）
 
 
+class TableAwareConfig(BaseModel):
+    """表格原子块（P1-4，DEVELOPMENT.md 5.2；默认关闭：[TABLE] 行按普通文本聚合）。"""
+
+    enabled: bool = False
+    max_rows_per_chunk: int = 30           # 超限大表按行组切，每组行数上限（强制带表头）
+    json_max_bytes: int = 4096             # table_json 字节上限（超限截断+warning）
+
+
+class HardBoundaryConfig(BaseModel):
+    """标题硬边界（P1-5，DEVELOPMENT.md 5.2；默认关闭：聚合不感知 section 变更）。"""
+
+    enabled: bool = False
+
+
+class ContextPrefixConfig(BaseModel):
+    """上下文前缀（P1-5；默认关闭）。chunk.text 前缀不计切块 token 目标、计入 embedding。"""
+
+    enabled: bool = False
+    template: str = "{doc_title} > {section}"
+    include_page: bool = False             # 前缀附加页码（需 page_spans/page 可解析）
+
+
 class ChunkerConfig(BaseModel):
     """父子分块参数（5.2）。"""
 
     parent_target_tokens: int = 512
     child_target_tokens: int = 128
     token_char_ratio: float = 1.8            # 中文 token≈len(text)/1.8 估算
+    table_aware: TableAwareConfig = TableAwareConfig()   # P1-4：表格原子块（默认关）
+    hard_boundary: HardBoundaryConfig = HardBoundaryConfig()     # P1-5：标题硬边界（默认关）
+    context_prefix: ContextPrefixConfig = ContextPrefixConfig()  # P1-5：上下文前缀（默认关）
 
 
 class VectorStoreConfig(BaseModel):
@@ -161,6 +186,75 @@ class OrchestrationConfig(BaseModel):
     hopeless_score_threshold: float = 0.15
 
 
+class QualityGateConfig(BaseModel):
+    """解析质量门禁（P0-1，DEVELOPMENT.md 5.1/5.10；默认关闭：不改变现有入库行为）。
+
+    - mode=reject：命中任一 flag（empty_text/high_garbled/few_pages_with_text）
+      抛 QualityGateError（30005），Job failed；
+    - mode=flag：仅 doc.metadata["quality_flags"] 打标 + warning 日志，继续入库。
+    - mode 非法值在 field_validator 抛 SystemConfigError（pydantic v2 对非
+      ValueError 异常原样上抛）→ 启动即错（4.3，禁止静默降级）。
+    """
+
+    enabled: bool = False
+    mode: str = "reject"                     # reject | flag
+    min_text_chars: int = 30                 # 有效文本最小字符数（不足 → empty_text）
+    max_garbled_ratio: float = 0.05          # U+FFFD 乱码占比上限（超过 → high_garbled）
+    min_pages_with_text_ratio: float = 0.2   # 多页 PDF 有文本页占比下限（低于 → few_pages_with_text）
+
+    @field_validator("mode")
+    @classmethod
+    def _mode_must_be_reject_or_flag(cls, value: str) -> str:
+        if value not in ("reject", "flag"):
+            raise SystemConfigError(
+                f"ingestion.quality_gate.mode 必须为 reject 或 flag，实际为 {value!r}"
+            )
+        return value
+
+
+class PiiConfig(BaseModel):
+    """PII 全局脱敏策略（P2-6，DEVELOPMENT.md 5.10；默认关闭）。
+
+    库级覆盖见 KbInfo.pii（生效优先级 kb.pii > 本段 > 不处理）；
+    mode 非法值 / types 非法项启动即抛 SystemConfigError。
+    """
+
+    enabled: bool = False
+    mode: str = "mask"                       # mask | replace | delete
+    types: list[str] = ["id_card", "phone", "bank_card"]
+
+    @field_validator("mode")
+    @classmethod
+    def _mode_valid(cls, value: str) -> str:
+        from app.services.desensitize import VALID_MODES
+
+        if value not in VALID_MODES:
+            raise SystemConfigError(f"ingestion.pii.mode 必须为 {'/'.join(VALID_MODES)}，实际为 {value!r}")
+        return value
+
+    @field_validator("types")
+    @classmethod
+    def _types_valid(cls, value: list[str]) -> list[str]:
+        from app.services.desensitize import VALID_TYPES
+
+        bad = [x for x in value if x not in VALID_TYPES]
+        if bad:
+            raise SystemConfigError(f"ingestion.pii.types 含非法类型: {bad}（合法：{list(VALID_TYPES)}）")
+        return value
+
+
+class ArchiveConfig(BaseModel):
+    """原件归档（P0-2，DEVELOPMENT.md 5.10；默认关闭：不改变现有入库行为）。
+
+    启用后入库成功路径将**原始字节**原子写至 {dir}/{kb_id}/{document_id}{ext}，
+    供换 embedding 全量重建（P1-3 rebuild CLI）、解析器升级重解析与审计取证使用；
+    写失败仅告警不回滚入库（归档尽力而为，archive_path 置 None 表示未归档）。
+    """
+
+    enabled: bool = False
+    dir: str = "./data/archive"
+
+
 class IngestionConfig(BaseModel):
     max_file_size_mb: int = 50
     allowed_extensions: list[str] = ["pdf", "docx", "xlsx", "pptx", "md", "txt",
@@ -171,6 +265,10 @@ class IngestionConfig(BaseModel):
     # S2（V5.1）：zip 系格式解压防御上限（防止 zip 炸弹炸内存/CPU）
     zip_max_total_mb: int = 200
     zip_max_entries: int = 1000
+    quality_gate: QualityGateConfig = QualityGateConfig()   # P0-1：解析质量门禁（默认关）
+    archive: ArchiveConfig = ArchiveConfig()                # P0-2：原件归档（默认关）
+    pii: PiiConfig = PiiConfig()                            # P2-6：PII 全局策略（默认关；kb 级可覆盖）
+    parser_routing: dict = {}                               # P3-8：解析链路由（空=旧单实现路径；{"pdf":{"chain":["pymupdf"]}}）
 
 
 class CleanerConfig(BaseModel):
@@ -364,6 +462,20 @@ class KbsConfig(BaseModel):
     persist_file: str = "data/kb.json"
 
 
+class IndexDnaConfig(BaseModel):
+    """索引 DNA 查询侧校验（P1-3，DEVELOPMENT.md 13.5；默认关闭）。
+
+    - enabled=false：不做校验（现状行为）；
+    - mode=audit（默认）：collection dna 与当前配置不一致 → warning 日志 +
+      响应标记 index_dna_mismatch=true，不拦截；
+    - mode=reject：命中抛 IndexDnaMismatchError（30006）。
+    存量无 dna 的 collection 视为 legacy：仅日志提示，不告警不拒绝。
+    """
+
+    enabled: bool = False
+    mode: str = "audit"                      # audit | reject
+
+
 class SystemConfig(BaseSettings):
     """系统唯一配置入口（4.2 完整 Schema）。
 
@@ -407,6 +519,7 @@ class SystemConfig(BaseSettings):
     logging: LoggingConfig = LoggingConfig()
     documents: DocumentsConfig = DocumentsConfig()
     kbs: KbsConfig = KbsConfig()
+    index_dna: IndexDnaConfig = IndexDnaConfig()   # P1-3：索引 DNA 查询侧校验（默认关）
 
     @model_validator(mode="after")
     def _validate_providers(self) -> "SystemConfig":

@@ -200,6 +200,8 @@ class DetectionResult:
 | 30002 | 向量化失败 |
 | 30003 | 解析失败（损坏文件/格式不支持） |
 | 30004 | 重排打分失败（bge_reranker，语义区别于向量化失败 30002） |
+| 30005 | 文档解析质量不达标（疑似扫描件/损坏文件；P0-1 质量门禁 `ingestion.quality_gate.mode=reject` 命中时） |
+| 30006 | 索引配置与向量库不一致（P1-3 `index_dna.mode=reject` 命中；请执行 `python -m app.cli.rebuild --kb <id>` 重建） |
 | 21001 | 兜底：反思达到上限仍未找到可靠答案 |
 | 21002 | 全局请求超时 |
 | 43001 | 系统繁忙（并发查询信号量耗尽/超时，V5.1） |
@@ -500,6 +502,10 @@ logging:
 - 统一产出 `Document`：`text` 归一为 UTF-8；元数据写入 `metadata`：`source`（原文件名）、`page`（PDF/Word 页码）、`kind`（扩展名）。
 - PDF → 用 `pymupdf`（fitz）逐页提取；Word → `python-docx` 段落级；Excel → 每 sheet 每行判为一段文本，`metadata` 记录 `sheet` 与行号；PPT → `python-pptx`。
 - 失败（损坏/不支持）→  抛 `ParseError（code 30003），Job 标记 failed。
+- **表格一等公民（P1-4）**：PDF（`find_tables`）与 Word（按 body 文档流**保序**，修复旧实现表格追加在段落末尾的问题）解析时，表格以 `[TABLE]\n{markdown}\n[/TABLE]` 原子块进入正文，并登记 `metadata["tables"] = [{index, header, rows, page}]`（顺序对应正文第 N 个 [TABLE] 块）；xlsx 整文档即表，v1 不动。清洗后执行 `reindex_tables(doc)` 重对齐（cleaner 删表则丢弃对应 JSON + warning）。cleaner 对 [TABLE] 块内容豁免（normalize 白名单 + dedup/quality 跳过含表格段落）。
+- **解析器降级链（P3-8，`ingestion.parser_routing`，默认空=现状）**：`ParserSpec(name, extensions, fn, priority)` 注册表（`PARSER_REGISTRY`，旧 `PARSERS` dict 由注册表展开保留兼容）；路由 `{"pdf": {"chain": ["pymupdf", "ocr_dummy"]}}`（key 为不带点的扩展名，链按序尝试）。链内逐实现尝试：抛错或空文本（复用 P0-1 `evaluate_parse_quality` 的 `min_text_chars`）→ warning（含 parser 名）降级下一实现；链尽失败按 P0-1 mode 处理（reject → 30005，否则 30003）。成功后 `metadata["parser"]` / `metadata["parser_version"]` 溯源；**空路由配置走旧单实现路径，零差异**。新格式接入 SOP（四动作，其余阶段零改动）：①实现函数 → ②注册 ParserSpec → ③`ingestion.allowed_extensions` 加扩展名 → ④`parser_routing` 加链一行 → 补单测。`ocr_dummy` 占位 spec 已注册（保持抛错，不入默认链，用于验证挂载机制）。
+- **解析探针（P0-1）**：`_parse_pdf` 逐页统计写入 `metadata["text_stats"] = {total_chars, page_count, pages_with_text}`（`pages_with_text`=有实质文本的页数）；`garbled_ratio`（U+FFFD 字符数 / 文本总字符数，无字符时为 0.0）在 `_build_document` 对全部解析器统一计算——txt/html/eml 的 `errors="replace"` 解码同样产生 U+FFFD——并入 `metadata["text_stats"]`（非 PDF 解析器按单页文档补齐该结构）。`text_stats` 仅作解析事实探针，不入 Chroma chunk metadata（`chroma_store._clean_metadata` 剔除 Chroma 无法存储的 dict 等非标量值）。
+- **质量检查纯函数（P0-1，P3-8 降级链复用）**：parser 模块级 `evaluate_parse_quality(text, text_stats, *, min_text_chars, max_garbled_ratio, min_pages_with_text_ratio) -> list[str]`，返回 flag 列表（空=通过）：`empty_text`（去首尾空白后文本少于 `min_text_chars`，含扫描件抽出空文本）/ `high_garbled`（`garbled_ratio` 超过 `max_garbled_ratio`）/ `few_pages_with_text`（仅 `page_count>1` 的多页 PDF 生效：`pages_with_text/page_count` 低于 `min_pages_with_text_ratio`）。
 
 ### 5.2 智能分块 `split_chunks`（父子块）
 - 参数：配置 `chunker.parent_target_tokens=512`、`child_target_tokens=128`、`token_char_ratio=1.8`（中文近数 `len(text)/1.8` 估算 token）。
@@ -509,6 +515,8 @@ logging:
   3. 父块 `parent_id=None`；子块 `parent_id=父块chunk_id`。
   4. `chunk_id = sha256(document_id + str(order))[:16]`。
 - 检索命中子块时，编排层回溯其父块全文进入 LLM 上下文。
+- **标题硬边界 + 上下文前缀 + 页码溯源（P1-5，`chunker.hard_boundary`/`chunker.context_prefix`，默认关）**：① 硬边界——父块聚合遇 section 归属变更强制断开（标题行为新块首行），同 section 连续内容不误断；② 页码——PDF 解析记录 `metadata["page_spans"]=[[start_line, end_line, page], ...]`（pptx 以 slide 号为页码），chunk 按段落起始行查表写 `metadata["page"]`（查不到不写）；③ 前缀——`chunk.text = template.format(doc_title, section) [+ " (p页码)"] + "\n" + 原文`（模板默认 `{doc_title} > {section}`，无 section 降级为仅 doc_title；前缀不计入切块 token 目标、计入 embedding 输入，超 64 token 截断 + warning；父子块一致加前缀）。索引 DNA 指纹纳入三组配置（变更即需重建）。
+- **表格原子块（P1-4，`chunker.table_aware`，默认关）**：`[TABLE]...[/TABLE]` 预合并为原子单元，不参与句子聚合、不与正文粘块——整表 ≤ 父块目标 → 独立父块（`metadata["chunk_type"]="table"`、`metadata["table_json"]`（对应 tables[index] 的 JSON，超 `json_max_bytes`(4096B) 截断+warning），不产子块；超限 → 按「语义行组」切（每组 ≤ `max_rows_per_chunk`(30) 行且强制携带完整表头，`metadata["table_part"]="2/3"`）。开启后 chunk metadata 剔除文档级探针键（`text_stats`/`tables`/`sections`）。
 
 ### 5.3 向量化（M-VP 本地 BGE v1.5）
 - 默认模型 `BAAI/bge-small-zh-v1.5`（稠密 512 维，中文优、体积 ~100MB、CPU 友好）。
@@ -641,9 +649,11 @@ POST /api/documents/upload (multipart file)
   队列满时 `submit` 拒绝，Job 标记 `failed`（error_code=`43003`「入库队列已满，请稍后重试」），
   路由层据此返回契约包（HTTP 200 + body code，不静默排队）。
 - 说明：**解析/向量化全程不占用 HTTP worker 阻塞线程**；/query 时才同步走各模块。
-- **S5 脱敏（V5.0）**：`ingestion.desensitize_enabled=true` 时，parse 之后、分块之前对全文执行
-  `app/services/desensitize.desensitize_text`（身份证/手机号/银行卡 → `***`），默认关闭。
+- **S5 脱敏（V5.0，P2-6 两级化重构）**：PII 处理两级设计——检测打标 + 按策略脱敏。`app/services/desensitize.detect_pii(text) -> [{type: id_card|phone|bank_card, count, sample_hash}]`（**不含原文**，sample_hash 为首个命中 sha256 前 8 位）；`desensitize_text(text, mode="mask", types=None)`：mask=`***`（现行为）/ replace=`[身份证]` 等占位符 / delete=移除。配置两级：全局 `ingestion.pii = {enabled: false, mode: mask, types: [...]}`；库级覆盖 `KbInfo.pii`（kb.json 兼容，创建/更新 API 接受），**生效优先级 kb.pii > ingestion.pii > 不处理**（kb.pii {enabled:false} 显式关闭全局）。命中文档 `metadata["pii_types"]` 记录类型集合（仅打标）。执行点与顺序不变（parse 之后、清洗之前）。**兼容**：旧 `desensitize_enabled` 与新 `pii.enabled` 同开时新逻辑优先 + warning，旧开关标记 deprecated（两个周期后移除）。
 - **幂等并发（V5.0）**：`_run` 内以 content_hash 为粒度加进程锁（`_lock_for`），幂等检查与写入原子化，杜绝 TOCTOU 双份入库。
+- **解析质量门禁（P0-1）**：`ingestion.quality_gate = {enabled: false, mode: reject|flag, min_text_chars: 30, max_garbled_ratio: 0.05, min_pages_with_text_ratio: 0.2}`（默认关闭=行为与现状完全一致）。启用时在 parse 之后、脱敏之前执行 5.1 的 `evaluate_parse_quality`：命中任一 flag 时 `mode=reject` → 抛 `QualityGateError`（30005，Job failed）；`mode=flag` → `doc.metadata["quality_flags"]` 打标 + warning 日志（含 flags 与 trace_id）继续入库；`mode` 非法值启动即抛 `SystemConfigError`（config field_validator）。
+- **索引 DNA（P1-3）**：`compute_index_dna(config)`（`app/core/index_dna.py` 纯函数）对 embedding.model_name/dimension/query_instruction + chunker 参数 + cleaner 配置做 sha256 规范化指纹（[:12]）；入库成功时写入 `chunk.metadata["index_dna"]` 与 `DocEntry.index_dna`，新 Chroma collection 建集合时 metadata 携带（存量无 dna 的 collection 视为 legacy）。任一相关配置变更即 dna 变化。
+- **原件归档（P0-2）**：`ingestion.archive = {enabled: false, dir: "./data/archive"}`（默认关闭）。启用时入库成功路径（幂等锁内、duplicate 判定之后）将**原始字节**原子写至 `{dir}/{kb_id}/{document_id}{ext}`（ext 只取 `Path(filename).suffix`；`core/persist.atomic_write_bytes` tmp+rename 原子写）→ `DocEntry.archive_path` 随 register 登记；写失败仅 warning 不回滚入库。**级联清理**：删除文档/删库时同步删除归档原件（被遗忘权）。归档是"换 embedding 全量重建（rebuild CLI）"、解析器升级重解析与审计取证的前置。
 
 ### 5.11 插件注册与装配（PluginRegistry + wire()）
 
@@ -728,11 +738,12 @@ class PluginRegistry:
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/api/documents?page=1&size=20&kb_id=` | 分页（按创建时间倒序；kb_id 可选过滤，V5.0） |
-| GET | `/api/documents/{id}` | 单文档元数据 |
-| DELETE | `/api/documents/{id}` | 删除文档（级联清向量块；**按文档所属库解析 collection**，V5.0 修 P0-1） |
+| GET | `/api/documents/{id}` | 单文档元数据（P0-2：含 `archive_path` 归档路径） |
+| DELETE | `/api/documents/{id}` | 删除文档（级联清向量块；**按文档所属库解析 collection**，V5.0 修 P0-1；P0-2：级联删除归档原件） |
 
 > 文档索引持久化：`data/documents.json`（V5.0，含 content_hash 幂等索引）；启动时索引为空且 Chroma 有数据
-> → 自动全量重建（消除重启后幽灵文档）。
+> → 自动全量重建（消除重启后幽灵文档）。P0-2：删除文档 / 批量删除 / 删库级联时同步删除归档原件
+> （`DocEntry.archive_path`，best-effort；归档开关默认关）。
 
 ### 6.6 插件
 | 方法 | 路径 | 入参 | 说明 |
@@ -841,6 +852,8 @@ V1.0 发布标准已达成：pytest 全绿（`-m "not integration"`，293 项，
 - `/api/health` 每种组件探测（嵌入模型已加载、Chroma 可连、LLM 通）。
 - Prometheus 指标：各接口延迟分位、检索耗时、`reflection_iterations_count`、幻觉率、入库队列深度。
 - 日志：JSON 结构化、`trace_id` 全链路贯穿。
+- **阶段级指标（P2-7）**：`/api/metrics`（admin 权限，Prometheus exposition 文本）——`rag_ingest_stage_seconds{stage}`（histogram：parse/clean/chunk/embed/index）、`rag_ingest_total{result}`（success/failed/duplicate/rejected，按 error_code 分 label）、`rag_ingest_queue_depth`（gauge）、`rag_query_total{result}`。零新依赖（core/metrics.py 自实现）。
+- **建议告警阈值（P2-7）**：入库失败率 >5%（5min 窗口）、队列深度持续 >80% 容量、/api/query 5xx 突增。无 Prometheus 部署时可人工 curl /api/metrics 观测。
 
 ### 10.3 环境部署文档
 - `README.md` 写明：准备 DeepSeek key、首启动自动下载模型、`make run`/`make test`、`/ui` 路径。
@@ -966,6 +979,7 @@ V1.0 发布标准已达成：pytest 全绿（`-m "not integration"`，293 项，
 - 问答：`POST /api/query` 可选 `kb_id`（与 `collection` 二选一，`kb_id` 优先；缺省 `default`）；`filters` 仅限库内。
 - 隔离保障：检索双路（BM25/向量）都按 kb 的 collection 作用域执行；`KbStore` 校验查询/上传目标库存在，否则一律按参数错误拒绝。
 - 验收：隔离自动化用例全过（`tests/integration/test_kbs_isolation.py`）。
+- **索引 DNA 校验与重建（P1-3）**：查询侧（`/api/query` collection 解析后）比对 collection metadata dna 与当前配置——`index_dna = {enabled: false, mode: audit|reject}`；`audit`（默认）命中仅 warning + 响应标记 `index_dna_mismatch: true`；`reject` 抛 `IndexDnaMismatchError`（30006）；存量无 dna 视为 legacy 仅日志提示。重建：`python -m app.cli.rebuild --kb <id> [--yes]`——读 P0-2 归档原件 → 完整入库链写临时 collection（`rag_<id>__rebuild`）→ 校验文档数/dna → 切换 `KbInfo.collection` 指针 → 删旧集合与旧归档；**重建期间暂停上传与查询**（v1 单机语义，失败自动回滚指针并恢复索引快照）。
 
 ### 13.6 评测体系 v2 —— ✅ 已交付
 

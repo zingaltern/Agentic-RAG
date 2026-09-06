@@ -17,6 +17,7 @@ class KbCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=64, description="知识库名称")
     description: str = Field(default="", max_length=256)
     scope: str = Field(default="shared", pattern="^(shared|private)$", description="V5.1：shared|private")
+    pii: dict | None = Field(default=None, description="P2-6：库级 PII 策略 {enabled, mode, types}（覆盖全局）")
 
 
 def _kb_dict(info, users=None) -> dict:
@@ -60,7 +61,8 @@ def create_kb(payload: KbCreate, request: Request,
     else:
         owner, scope = user.user_id, "private"
     try:
-        info = deps.kbs.create(payload.name, payload.description, owner=owner, scope=scope)
+        info = deps.kbs.create(payload.name, payload.description, owner=owner, scope=scope,
+                               pii=payload.pii)   # P2-6：库级 PII 策略
     except ValueError as exc:
         raise ValidationError(str(exc)) from exc
     if deps.vector_store is not None:

@@ -2,7 +2,8 @@
 
 - persist 目录由配置 vector_store.persist_dir 指定（SQLite 后端，单文件）。
 - 距离空间 cosine；相似度 score = 1 - distance（3.2：由实现决定算法并文档注明）。
-- Chroma 不允许 metadata 值为 None → 入库前剔除。
+- Chroma metadata 值类型受限（1.x 仅标量与同型标量 list）→ 入库前剔除 None 与
+  dict / 含非标量元素的 list（见 _clean_metadata）。
 - 附加适配器方法（非接口契约）：get_all_chunks / get_document_id_by_hash，
   供 BM25 索引与幂等去重使用。
 """
@@ -20,13 +21,16 @@ from app.core.interfaces import VectorStore
 
 class ChromaStore(VectorStore):
     def __init__(self, persist_dir: str = "./data/chroma", collection: str = "kb",
-                 batch_size: int = 64, **_: object):
+                 batch_size: int = 64, index_dna: str | None = None, **_: object):
         try:
             self._client = chromadb.PersistentClient(path=persist_dir)
         except Exception as exc:
             raise EmbeddingError(f"Chroma 初始化失败（{persist_dir}）: {exc}") from exc
         self._default_collection = collection
         self._batch_size = batch_size
+        # P1-3：索引 DNA——新建集合时写入 metadata（get_or_create 对已存在集合忽略此参数，
+        # 恰好满足"存量集合不被覆盖"语义）；None = 未启用 dna（legacy 语义）
+        self._index_dna = index_dna
         # C2：语料变更纪元——add_chunks/delete_document 递增，供 BM25 缓存做变更检测
         self._epoch: dict[str, int] = {}
         self._epoch_lock = threading.Lock()
@@ -49,16 +53,46 @@ class ChromaStore(VectorStore):
         return f"rag_{collection}"
 
     def _coll(self, collection: str):
-        """取集合，不存在则按 cosine 空间创建。"""
+        """取集合，不存在则按 cosine 空间创建（新建时 metadata 携带索引 DNA，P1-3）。"""
+        metadata = {"hnsw:space": "cosine"}
+        if self._index_dna:
+            metadata["index_dna"] = self._index_dna
         return self._client.get_or_create_collection(
             name=self._chroma_name(collection),
-            metadata={"hnsw:space": "cosine"},
+            metadata=metadata,
         )
+
+    def get_collection_dna(self, collection: str = "kb") -> str | None:
+        """附加适配器方法（非接口契约）：返回集合构建时的索引 DNA（P1-3）。
+
+        None = 集合不存在或为存量 legacy（建集合时尚无 DNA 机制）。只读，不建集合。
+        """
+        try:
+            coll = self._client.get_collection(name=self._chroma_name(collection))
+        except Exception:  # noqa: BLE001  集合不存在 → 视为 legacy
+            return None
+        return (coll.metadata or {}).get("index_dna")
 
     @staticmethod
     def _clean_metadata(metadata: dict) -> dict:
-        """Chroma metadata 值不允许 None，剔除后再入库。"""
-        return {k: v for k, v in metadata.items() if v is not None}
+        """Chroma metadata 值类型约束清洗（1.x 仅接受 str/int/float/bool 标量与同型标量 list）。
+
+        - None 一律剔除（Chroma 不允许）；
+        - dict / 含非标量元素的 list（如 P0-1 parser 探针 text_stats，经 chunker
+          整体继承 doc.metadata）Chroma 无法存储，剔除后入库——文档级事实仍以
+          parse 产出的 doc.metadata 为准，不因存储层裁剪而丢失判定依据。
+        """
+        def _storable(value) -> bool:
+            if value is None or isinstance(value, dict):
+                return False
+            if isinstance(value, list):
+                # 同型标量 list 才可存（chromadb 拒收混合型 list，如 [1, "p"]）；
+                # 用精确 type 集合规避 bool 是 int 子类的误判（[True, 1] 实为异型）
+                return bool(value) and len({type(v) for v in value}) == 1 \
+                    and all(isinstance(v, (str, int, float, bool)) for v in value)
+            return isinstance(value, (str, int, float, bool))
+
+        return {k: v for k, v in metadata.items() if _storable(v)}
 
     @staticmethod
     def _score(distance: float) -> float:

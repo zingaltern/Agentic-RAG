@@ -35,6 +35,7 @@ class KbInfo:
     owner: str = "admin"             # V5.1：私有库归属（shared 库 owner 无实际意义）
     scope: str = "shared"            # V5.1：shared|private
     created_at: float = 0.0
+    pii: dict | None = None          # P2-6：库级 PII 策略（None=未配置，走全局）
 
 
 def slugify(name: str) -> str:
@@ -80,6 +81,7 @@ class KbStore:
                     collection=item.get("collection", kb_id),
                     owner=item.get("owner", "admin"),
                     scope=item.get("scope", "shared"),
+                    pii=item.get("pii"),
                     created_at=item.get("created_at", 0.0),
                 )
         except Exception as exc:  # noqa: BLE001
@@ -97,7 +99,7 @@ class KbStore:
     def _to_dict(info: KbInfo) -> dict:
         return {"kb_id": info.kb_id, "name": info.name, "description": info.description,
                 "collection": info.collection, "owner": info.owner, "scope": info.scope,
-                "created_at": info.created_at}
+                "created_at": info.created_at, "pii": info.pii}
 
     # -- 事件钩子（P3 预留：增量索引/多端同步） ----------------------------------
 
@@ -111,7 +113,8 @@ class KbStore:
     # -- CRUD -------------------------------------------------------------------
 
     def create(self, name: str, description: str = "",
-               owner: str = "admin", scope: str = "shared") -> KbInfo:
+               owner: str = "admin", scope: str = "shared",
+               pii: dict | None = None) -> KbInfo:
         """按 name 生成 kb_id（slug 化 + 冲突/非法追加 4 位短 hash）。"""
         if not name or not name.strip():
             raise ValueError("name 不能为空")
@@ -130,7 +133,8 @@ class KbStore:
                 if kb_id in self._kbs or kb_id in used_collections:      # 极端冲突：再追加
                     kb_id = f"kb_{hashlib.md5(name.encode('utf-8')).hexdigest()[:8]}"
             info = KbInfo(kb_id=kb_id, name=name.strip(), description=description,
-                          collection=kb_id, owner=owner, scope=scope, created_at=time.time())
+                          collection=kb_id, owner=owner, scope=scope, created_at=time.time(),
+                          pii=pii)
             self._kbs[kb_id] = info
         self._persist()
         self._notify("create", kb_id)
@@ -139,6 +143,35 @@ class KbStore:
     def get(self, kb_id: str) -> KbInfo | None:
         with self._lock:
             return self._kbs.get(kb_id)
+
+    def update(self, kb_id: str, **fields) -> KbInfo:
+        """更新已存在库的可变字段（P1-3：collection 指针切换；P2-6 将扩展 pii 库级策略）。
+
+        - 仅允许白名单字段（collection/owner/scope/description），非法字段 ValueError；
+        - collection 切换为元数据级原子（单次 atomic_write_json），失败原样上抛由调用方处理；
+        - 触发 "update" 事件钩子。
+        """
+        allowed = {"collection", "owner", "scope", "description"}
+        unknown = set(fields) - allowed
+        if unknown:
+            raise ValueError(f"不允许更新的字段: {sorted(unknown)}")
+        with self._lock:
+            info = self._kbs.get(kb_id)
+            if info is None:
+                raise KeyError(f"知识库不存在: {kb_id!r}")
+            if "collection" in fields:
+                if not isinstance(fields["collection"], str) or not fields["collection"]:
+                    raise ValueError("collection 必须为非空字符串")
+                used = {i.collection for kid, i in self._kbs.items() if kid != kb_id}
+                if fields["collection"] in used:
+                    raise ValueError(f"collection 已被其它库占用: {fields['collection']!r}")
+            if "scope" in fields and fields["scope"] not in ("shared", "private"):
+                raise ValueError(f"非法 scope: {fields['scope']!r}")
+            for key, value in fields.items():
+                setattr(info, key, value)
+        self._persist()
+        self._notify("update", kb_id)
+        return info
 
     def exists(self, kb_id: str) -> bool:
         with self._lock:

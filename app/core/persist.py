@@ -32,3 +32,27 @@ def atomic_write_json(path: str | Path, payload: object, mode: int = 0o600) -> N
         except OSError:
             pass
         raise
+
+
+def atomic_write_bytes(path: str | Path, data: bytes, mode: int = 0o600) -> None:
+    """原子写二进制：临时文件 + fsync + os.replace（P0-2 原件归档用；父目录自动创建）。
+
+    与 atomic_write_json 同一套原子语义：崩溃/并发不产生半截文件；
+    写入失败清理临时文件并向上抛异常（调用方按归档"尽力而为"策略降级）。
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(tmp_name, mode)
+        os.replace(tmp_name, path)
+    except Exception:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise

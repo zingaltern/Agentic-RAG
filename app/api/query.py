@@ -66,7 +66,13 @@ def query(payload: QueryRequest, request: Request,
     if not sem.acquire(timeout=config.orchestration.semaphore_acquire_timeout_seconds):
         raise BusyError()
     try:
-        return _query_impl(payload, request, deps)
+        response = _query_impl(payload, request, deps)
+        from app.core import metrics
+
+        metrics.inc_counter("rag_query_total",
+                            {"result": "ok" if response.get("code") == 0 else "error"},
+                            help_text="问答结果计数（P2-7）")
+        return response
     finally:
         sem.release()
 
@@ -119,6 +125,9 @@ def _query_impl(payload: QueryRequest, request: Request,
 
         raise AuthError(f"无权访问知识库: {info.kb_id!r}")
 
+    # P1-3：索引 DNA 校验（audit=warning+响应标记；reject=30006 拦截）
+    dna_mismatch = _check_index_dna(deps, collection)
+
     result = deps.orchestration.run(
         query=payload.query,
         filters=payload.filters,
@@ -159,6 +168,8 @@ def _query_impl(payload: QueryRequest, request: Request,
     }
     if payload.debug and result.debug_trace:
         data["debug_trace"] = result.debug_trace
+    if dna_mismatch:
+        data["index_dna_mismatch"] = True   # P1-3：索引 dna 与当前配置不一致（audit 模式标记）
     if result.code != 0:
         # 反思超限兜底：code=21001 + 兜底文案（6.4）
         return fail(result.code, result.message, data=data)
@@ -171,6 +182,45 @@ def _query_impl(payload: QueryRequest, request: Request,
 
 def _matches_any(text: str, keywords: list[str]) -> bool:
     return any(kw and kw in text for kw in keywords)
+
+
+def _check_index_dna(deps: Dependencies, collection: str) -> bool:
+    """P1-3：索引 DNA 校验（13.5）。
+
+    - enabled=false → 不校验（现状行为）；
+    - 存量集合无 dna（legacy）→ 仅日志提示，不告警不拒绝；
+    - dna 不一致：audit（默认）warning + 返回 True（响应标记 index_dna_mismatch）；
+      reject 抛 IndexDnaMismatchError（30006）。
+    返回值：是否命中 mismatch（供响应标记）。
+    """
+    from app.core.index_dna import compute_index_dna
+    from app.core.errors import IndexDnaMismatchError
+
+    cfg = deps.config.index_dna
+    if not cfg.enabled:
+        return False
+    getter = getattr(deps.vector_store, "get_collection_dna", None)
+    if getter is None:          # 非 Chroma 存储无 dna 能力 → legacy 语义
+        return False
+    stored = getter(collection)
+    if stored is None:          # 存量 legacy 集合：仅提示
+        get_logger("query").info(
+            "索引 DNA 缺失（存量 legacy 集合，不校验）",
+            extra={"extra_fields": {"collection": collection, "trace_id": get_trace_id()}},
+        )
+        return False
+    current = compute_index_dna(deps.config)["dna"]
+    if stored == current:
+        return False
+    get_logger("query").warning(
+        "索引 DNA 与当前配置不一致（换 embedding/分块/清洗配置后需重建索引）",
+        extra={"extra_fields": {"collection": collection, "stored_dna": stored,
+                                "current_dna": current, "trace_id": get_trace_id()}},
+    )
+    if cfg.mode == "reject":
+        raise IndexDnaMismatchError(
+            f"集合 {collection!r} 构建于 dna={stored}，当前配置 dna={current}")
+    return True
 
 
 def _resolve_session(request: Request, deps: Dependencies, payload: "QueryRequest",
