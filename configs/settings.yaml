@@ -111,6 +111,7 @@ ingestion:
     enabled: false
     mode: mask                     # mask=*** | replace=[身份证] 占位符 | delete=移除
     types: [id_card, phone, bank_card]
+  parser_routing: {}              # P3-8：解析链路由（空=旧单实现路径；例 {"pdf": {"chain": ["pymupdf"]}}）
 
 cleaner:
   enabled: false                  # 数据清洗层开关（解析后、分块前），默认关不改变现有行为

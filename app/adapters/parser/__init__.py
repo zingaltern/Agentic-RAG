@@ -13,11 +13,12 @@ import hashlib
 import io
 import re
 from pathlib import Path
+from dataclasses import dataclass
 from typing import BinaryIO
 from uuid import uuid4
 
 from app.core.domain import Document
-from app.core.errors import ParseError
+from app.core.errors import ParseError, QualityGateError
 from app.core.logging import get_logger
 
 logger = get_logger("parser")
@@ -189,16 +190,70 @@ def parse_file(file_stream: BinaryIO, filename: str, config: object | None = Non
     if not isinstance(raw, bytes):
         raw = bytes(raw)
     _check_magic(ext, raw, filename, config)
-    try:
-        parser = PARSERS.get(ext)
-        if parser is None:
-            raise ParseError(f"不支持的文档格式: {filename!r}")
-        text, meta = parser(raw)
-    except ParseError:
-        raise
-    except Exception as exc:
-        raise ParseError(f"{filename} 解析失败: {exc}") from exc
-    return _build_document(filename, raw, text or "", meta)
+
+    routing = getattr(config, "parser_routing", None) or {} if config is not None else {}
+    chain_names = _routing_chain(ext, routing)
+    if not chain_names:
+        # 旧路径（默认）：单实现分发，无链式降级、无 parser 溯源元数据（零差异承诺）
+        try:
+            parser = PARSERS.get(ext)
+            if parser is None:
+                raise ParseError(f"不支持的文档格式: {filename!r}")
+            text, meta = parser(raw)
+        except ParseError:
+            raise
+        except Exception as exc:
+            raise ParseError(f"{filename} 解析失败: {exc}") from exc
+        return _build_document(filename, raw, text or "", meta)
+
+    # P3-8：链式解析（路由非空时启用）——按序尝试，抛错/空文本降级，成功携带溯源元数据
+    gate_cfg = getattr(config, "quality_gate", None)
+    min_chars = gate_cfg.min_text_chars if gate_cfg is not None else 30
+    specs = [PARSER_REGISTRY[n] for n in chain_names if n in PARSER_REGISTRY]
+    for name in chain_names:
+        if name not in PARSER_REGISTRY:
+            logger.warning("解析链含未注册实现（跳过）：%s", name,
+                           extra={"extra_fields": {"filename": filename, "parser": name}})
+    if not specs:
+        raise ParseError(f"{filename} 解析链无可用实现: {chain_names}")
+    errors: list[str] = []
+    for spec in specs:
+        try:
+            text, meta = spec.fn(raw)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"{spec.name}: {exc}")
+            logger.warning("解析器降级（抛错，尝试链内下一实现）",
+                           extra={"extra_fields": {"filename": filename,
+                                                   "parser": spec.name, "error": str(exc)}})
+            continue
+        flags = evaluate_parse_quality(text or "", (meta or {}).get("text_stats") or {},
+                                       min_text_chars=min_chars,
+                                       max_garbled_ratio=(gate_cfg.max_garbled_ratio
+                                                          if gate_cfg is not None else 0.05),
+                                       min_pages_with_text_ratio=(gate_cfg.min_pages_with_text_ratio
+                                                                  if gate_cfg is not None else 0.2))
+        if flags:
+            errors.append(f"{spec.name}: {','.join(flags)}")
+            logger.warning("解析器降级（产出质量不达标，尝试链内下一实现）",
+                           extra={"extra_fields": {"filename": filename,
+                                                   "parser": spec.name, "flags": flags}})
+            continue
+        meta = dict(meta or {})
+        meta["parser"] = spec.name
+        meta["parser_version"] = "1"
+        return _build_document(filename, raw, text or "", meta)
+    # 链尽失败：按 P0-1 mode 处理——gate reject → 30005；否则 30003
+    detail = "; ".join(errors) or "无可用实现"
+    if gate_cfg is not None and gate_cfg.enabled and gate_cfg.mode == "reject":
+        raise QualityGateError(f"全部解析实现质量不达标（{detail}）")
+    raise ParseError(f"{filename} 解析失败（链内 {len(specs)} 个实现均不可用）: {detail}")
+
+
+def _routing_chain(ext: str, routing: dict) -> list[str]:
+    """P3-8：取扩展名的解析链（key 兼容带点/不带点；非法形状返回空链=旧路径）。"""
+    entry = routing.get(ext.lstrip(".")) or routing.get(ext) or {}
+    chain = entry.get("chain") if isinstance(entry, dict) else None
+    return [str(n) for n in chain] if isinstance(chain, list) else []
 
 
 def _extract_markdown_sections(text: str) -> list[tuple[str, int]]:
@@ -577,15 +632,41 @@ def _parse_ocr(raw: bytes, ext: str) -> tuple[str, dict]:
     raise ParseError(f"OCR 未启用（图片 {ext} 暂不支持，需开启 parser.ocr.enabled 并接入引擎）")
 
 
-PARSERS: dict[str, callable] = {
-    ".pdf": _parse_pdf,
-    ".docx": _parse_docx,
-    ".xlsx": _parse_xlsx,
-    ".pptx": _parse_pptx,
-    ".md": _parse_text,
-    ".txt": _parse_text,
-    ".html": _parse_html,
-    ".htm": _parse_html,
-    ".eml": _parse_eml,
-    ".msg": _parse_eml,
-}
+@dataclass(frozen=True)
+class ParserSpec:
+    """解析器注册规格（P3-8）：name 为路由/溯源标识；extensions 带点；priority 预留排序。"""
+
+    name: str
+    extensions: tuple[str, ...]
+    fn: callable
+    priority: int = 100
+
+
+def _register_parser(spec: ParserSpec) -> ParserSpec:
+    PARSER_REGISTRY[spec.name] = spec
+    return spec
+
+
+PARSER_REGISTRY: dict[str, ParserSpec] = {}
+_register_parser(ParserSpec("pymupdf", (".pdf",), _parse_pdf))
+_register_parser(ParserSpec("python-docx", (".docx",), _parse_docx))
+_register_parser(ParserSpec("openpyxl", (".xlsx",), _parse_xlsx))
+_register_parser(ParserSpec("python-pptx", (".pptx",), _parse_pptx))
+_register_parser(ParserSpec("native_text", (".md", ".txt"), _parse_text))
+_register_parser(ParserSpec("html_std", (".html", ".htm"), _parse_html))
+_register_parser(ParserSpec("email_std", (".eml", ".msg"), _parse_eml))
+
+
+def _parse_ocr_entry(raw: bytes) -> tuple[str, dict]:
+    """OCR 占位（13.10 P3 预留）：适配单参签名，保持现抛错实现，不入默认链。"""
+    return _parse_ocr(raw, ".pdf")
+
+
+_register_parser(ParserSpec("ocr_dummy", (), _parse_ocr_entry, priority=999))
+
+
+# 兼容：既有 import 以 PARSERS[ext] 单实现分发；由注册表按扩展名展开生成
+PARSERS: dict[str, callable] = {}
+for _spec in PARSER_REGISTRY.values():
+    for _ext in _spec.extensions:
+        PARSERS[_ext] = _spec.fn
