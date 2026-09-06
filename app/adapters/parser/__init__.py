@@ -18,6 +18,9 @@ from uuid import uuid4
 
 from app.core.domain import Document
 from app.core.errors import ParseError
+from app.core.logging import get_logger
+
+logger = get_logger("parser")
 
 SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".xlsx", ".pptx", ".md", ".txt",
                        ".html", ".htm", ".eml", ".msg"}
@@ -82,6 +85,57 @@ def evaluate_parse_quality(text: str, text_stats: dict, *,
     if page_count > 1 and (pages_with_text / page_count) < min_pages_with_text_ratio:
         flags.append("few_pages_with_text")
     return flags
+
+
+_TABLE_BLOCK_RE = re.compile(r"\[TABLE\]\n(.*?)\n\[/TABLE\]", flags=re.S)
+
+
+def _md_header_cells(block: str) -> list[str]:
+    """从 [TABLE] 块提取表头单元格（第一条非分隔行的管道单元格）。"""
+    for line in block.split("\n"):
+        s = line.strip()
+        if not s.startswith("|"):
+            continue
+        if set(s) <= {"|", "-", " ", ":"}:
+            continue   # |---|---| 分隔行
+        return [c.strip() for c in s.strip("|").split("|")]
+    return []
+
+
+def reindex_tables(doc: Document) -> None:
+    """P1-4：清洗后按 [TABLE] 出现顺序重对齐 metadata["tables"]（DEVELOPMENT 5.1）。
+
+    - 数量一致 → 无操作（normalize 白名单保证表内容未被改写，顺序天然对齐）；
+    - cleaner（noise/dedup/quality）删掉了含表格的段落 → 按表头单元格匹配重对齐，
+      对不上号的 JSON 丢弃并 warning（表格正文还在 text 中、JSON 缺失时降级为纯文本检索）。
+    """
+    tables = doc.metadata.get("tables")
+    if not tables:
+        return
+    blocks = _TABLE_BLOCK_RE.findall(doc.text or "")
+    if len(blocks) == len(tables):
+        return
+    kept: list[dict] = []
+    used: set[int] = set()
+    for block in blocks:
+        header = _md_header_cells(block)
+        match = next((i for i, t in enumerate(tables)
+                      if i not in used
+                      and [str(c) for c in (t.get("header") or [])] == header), None)
+        if match is None:   # 表头匹配失败（空表头等）→ 取剩余未用表的顺序兜底
+            match = next((i for i in range(len(tables)) if i not in used), None)
+        if match is None:
+            break
+        used.add(match)
+        kept.append({**tables[match], "index": len(kept)})
+    if len(kept) != len(tables):
+        logger.warning(
+            f"清洗后表格 JSON 重对齐：{len(tables)}→{len(kept)}，"
+            f"丢弃 {len(tables) - len(kept)} 个无对应 [TABLE] 块的登记",
+            extra={"extra_fields": {"before": len(tables), "after": len(kept),
+                                    "filename": doc.filename}},
+        )
+    doc.metadata["tables"] = kept
 
 
 def _check_magic(ext: str, raw: bytes, filename: str, config: object | None = None) -> None:
@@ -225,8 +279,10 @@ def _parse_pdf(raw: bytes) -> tuple[str, dict]:
         # P0-1 探针：逐页统计（total_chars / pages_with_text），供解析质量门禁识别扫描件
         total_chars = 0
         pages_with_text = 0
+        # P1-4：按阅读顺序登记全文档表格（index 在汇合后统一补齐）
+        all_tables: list[dict] = []
         for page in pdf:
-            page_text = _extract_page_with_tables(page)
+            page_text = _extract_page_with_tables(page, all_tables)
             page_lines = page_text.split("\n")
             for heading in _pdf_page_headings(page, body_size):
                 try:
@@ -252,6 +308,10 @@ def _parse_pdf(raw: bytes) -> tuple[str, dict]:
         }
         if sections:
             metadata["sections"] = sections   # T5：字号启发式章节标题
+        if all_tables:
+            for i, t in enumerate(all_tables):
+                t["index"] = i
+            metadata["tables"] = all_tables   # P1-4：顺序对应正文第 N 个 [TABLE] 块
         date = _normalize_pdf_date((pdf.metadata or {}).get("creationDate"))
         if date:
             metadata["date"] = date
@@ -260,12 +320,14 @@ def _parse_pdf(raw: bytes) -> tuple[str, dict]:
         pdf.close()
 
 
-def _extract_page_with_tables(page) -> str:
+def _extract_page_with_tables(page, tables_out: list | None = None) -> str:
     """按 y 坐标把页内文本块与表格（Markdown 化）合并为阅读顺序的文本。
 
-    表格块标记为 [TABLE]...[/TABLE]，与正文段落用空行隔开，供后续分块/清洗识别。
+    表格块标记为 [TABLE]...[/TABLE]，与正文段落用空行隔开，供后续分块/清洗识别；
+    P1-4：tables_out 非空时按阅读顺序登记 {header, rows, page}（index 由调用方统一补）。
     """
     blocks: list[tuple[float, str]] = []
+    raw_tables: list[tuple[float, list[list[str]]]] = []
     # 文本块（dict 模式带坐标）
     for block in page.get_text("dict").get("blocks", []):
         if block.get("type") != 0:
@@ -281,20 +343,30 @@ def _extract_page_with_tables(page) -> str:
     try:
         tables = page.find_tables()
         for table in tables:
-            md = _table_to_markdown(table)
+            rows = _table_rows(table)
+            md = _rows_to_markdown(rows)
             if md:
                 blocks.append((table.bbox[1], f"[TABLE]\n{md}\n[/TABLE]"))
+                raw_tables.append((table.bbox[1], rows))
     except Exception:
         pass  # 表格抽取失败不阻断正文
     blocks.sort(key=lambda b: b[0])
+    if tables_out is not None:
+        for _y, rows in sorted(raw_tables, key=lambda t: t[0]):
+            tables_out.append({"header": rows[0], "rows": rows[1:],
+                               "page": getattr(page, "number", None)})
     return "\n".join(text for _, text in blocks)
 
 
-def _table_to_markdown(table) -> str:
-    """表格 → Markdown 管道表格（首行表头 + 分隔行）。"""
+def _table_rows(table) -> list[list[str]]:
+    """表格 → 清洗后的二维行（P1-4：markdown 与 tables JSON 共用同一份行数据）。"""
     rows = table.extract() or []
     rows = [[(c or "").replace("\n", " ").strip() for c in row] for row in rows]
-    rows = [row for row in rows if any(row)]
+    return [row for row in rows if any(row)]
+
+
+def _rows_to_markdown(rows: list[list[str]]) -> str:
+    """行数据 → Markdown 管道表格（首行表头 + 分隔行）。"""
     if not rows:
         return ""
     lines = ["| " + " | ".join(rows[0]) + " |",
@@ -306,29 +378,59 @@ def _table_to_markdown(table) -> str:
     return "\n".join(lines)
 
 
+def _table_to_markdown(table) -> str:
+    """表格 → Markdown 管道表格（兼容旧调用；P1-4 起内部走 _table_rows/_rows_to_markdown）。"""
+    return _rows_to_markdown(_table_rows(table))
+
+
 def _parse_docx(raw: bytes) -> tuple[str, dict]:
-    """Word：python-docx 段落级 + 表格单元格。"""
+    """Word：python-docx 按 body 文档流保序解析（段落 + [TABLE] 表格块，P1-4）。
+
+    修复旧实现的两处缺陷：表格无标记且固定追加在段落末尾——现按 body 顺序
+    遍历 w:p/w:tbl，表格在原位输出 [TABLE] 块并登记 metadata["tables"]。
+    """
     from docx import Document as DocxDocument
+    from docx.oxml.ns import qn
+    from docx.table import Table as DocxTable
+    from docx.text.paragraph import Paragraph as DocxParagraph
 
     try:
         doc = DocxDocument(io.BytesIO(raw))
     except Exception as exc:
         raise ParseError(f"Word 解析失败（文件损坏或非 docx）: {exc}") from exc
-    kept = [(p.text.strip(), p) for p in doc.paragraphs if p.text.strip()]
-    lines = [t for t, _ in kept]
-    for table in doc.tables:
-        for row in table.rows:
-            cells = [c.text.strip() for c in row.cells if c.text.strip()]
-            if cells:
-                lines.append(" | ".join(cells))
+
+    lines: list[str] = []
     sections: list[tuple[str, int]] = []
-    for pos, (t, para) in enumerate(kept):
-        style_name = para.style.name if para.style else ""
-        if style_name.startswith("Heading") or style_name.startswith("标题"):
-            sections.append((t, pos))
+    tables_meta: list[dict] = []
+    for child in doc.element.body.iterchildren():
+        if child.tag == qn("w:p"):
+            para = DocxParagraph(child, doc)
+            text = para.text.strip()
+            if not text:
+                continue
+            style_name = para.style.name if para.style else ""
+            if style_name.startswith("Heading") or style_name.startswith("标题"):
+                sections.append((text, len(lines)))   # T5：Heading 样式章节标题（行号=当前行）
+            lines.append(text)
+        elif child.tag == qn("w:tbl"):
+            table = DocxTable(child, doc)
+            rows = [[c.text.strip() for c in row.cells] for row in table.rows]
+            rows = [row for row in rows if any(row)]
+            if not rows:
+                continue
+            md = _rows_to_markdown(rows)
+            lines.append("[TABLE]")
+            lines.extend(md.split("\n"))
+            lines.append("[/TABLE]")
+            tables_meta.append({"header": rows[0], "rows": rows[1:], "page": None})
+
     metadata: dict = {"page": None, "author": None}
     if sections:
         metadata["sections"] = sections       # T5：Heading 样式章节标题
+    if tables_meta:
+        for i, t in enumerate(tables_meta):
+            t["index"] = i
+        metadata["tables"] = tables_meta      # P1-4：顺序对应正文第 N 个 [TABLE] 块
     try:
         created = doc.core_properties.created
         if created:

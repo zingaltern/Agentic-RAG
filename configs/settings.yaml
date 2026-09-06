@@ -26,6 +26,10 @@ chunker:                           # 父子分块（DEVELOPMENT.md 5.2）
   parent_target_tokens: 512
   child_target_tokens: 128
   token_char_ratio: 1.8
+  table_aware:                     # P1-4：表格原子块（默认关；[TABLE] 行按普通文本聚合）
+    enabled: false
+    max_rows_per_chunk: 30         # 超限大表按行组切，每组行数上限（强制带表头）
+    json_max_bytes: 4096           # table_json 字节上限（超限截断+warning）
 
 vector_store:
   provider: chroma

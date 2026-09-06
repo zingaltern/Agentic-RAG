@@ -32,7 +32,7 @@ from app.core.persist import atomic_write_bytes
 from app.services.documents_store import DocumentsStore
 from app.services.jobs_store import JobStore
 from app.adapters.chunker import split_chunks
-from app.adapters.parser import evaluate_parse_quality, parse_file
+from app.adapters.parser import evaluate_parse_quality, parse_file, reindex_tables
 
 logger = get_logger("ingestion")
 
@@ -231,6 +231,7 @@ class IngestionPipeline:
                     min_chunk_chars=self.config.cleaner.min_chunk_chars,
                 )
                 doc.text = cleaner.clean(doc.text)
+                reindex_tables(doc)   # P1-4：清洗删表后按 [TABLE] 顺序重对齐 tables JSON
                 if not doc.text.strip():
                     logger.warning("清洗后文档为空（%s）：全部段落被噪声/去重/质量过滤剔除，仍按空文档入库",
                                    filename,
@@ -294,6 +295,7 @@ class IngestionPipeline:
                     parent_target_tokens=self.config.chunker.parent_target_tokens,
                     child_target_tokens=self.config.chunker.child_target_tokens,
                     token_char_ratio=self.config.chunker.token_char_ratio,
+                    table_aware=self.config.chunker.table_aware.model_dump(),
                 )
                 parents = [c for c in chunks if c.parent_id is None]
                 batch_size = self.config.ingestion.embed_batch_size
