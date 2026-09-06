@@ -200,6 +200,7 @@ class DetectionResult:
 | 30002 | 向量化失败 |
 | 30003 | 解析失败（损坏文件/格式不支持） |
 | 30004 | 重排打分失败（bge_reranker，语义区别于向量化失败 30002） |
+| 30005 | 文档解析质量不达标（疑似扫描件/损坏文件；P0-1 质量门禁 `ingestion.quality_gate.mode=reject` 命中时） |
 | 21001 | 兜底：反思达到上限仍未找到可靠答案 |
 | 21002 | 全局请求超时 |
 | 43001 | 系统繁忙（并发查询信号量耗尽/超时，V5.1） |
@@ -500,6 +501,8 @@ logging:
 - 统一产出 `Document`：`text` 归一为 UTF-8；元数据写入 `metadata`：`source`（原文件名）、`page`（PDF/Word 页码）、`kind`（扩展名）。
 - PDF → 用 `pymupdf`（fitz）逐页提取；Word → `python-docx` 段落级；Excel → 每 sheet 每行判为一段文本，`metadata` 记录 `sheet` 与行号；PPT → `python-pptx`。
 - 失败（损坏/不支持）→  抛 `ParseError（code 30003），Job 标记 failed。
+- **解析探针（P0-1）**：`_parse_pdf` 逐页统计写入 `metadata["text_stats"] = {total_chars, page_count, pages_with_text}`（`pages_with_text`=有实质文本的页数）；`garbled_ratio`（U+FFFD 字符数 / 文本总字符数，无字符时为 0.0）在 `_build_document` 对全部解析器统一计算——txt/html/eml 的 `errors="replace"` 解码同样产生 U+FFFD——并入 `metadata["text_stats"]`（非 PDF 解析器按单页文档补齐该结构）。`text_stats` 仅作解析事实探针，不入 Chroma chunk metadata（`chroma_store._clean_metadata` 剔除 Chroma 无法存储的 dict 等非标量值）。
+- **质量检查纯函数（P0-1，P3-8 降级链复用）**：parser 模块级 `evaluate_parse_quality(text, text_stats, *, min_text_chars, max_garbled_ratio, min_pages_with_text_ratio) -> list[str]`，返回 flag 列表（空=通过）：`empty_text`（去首尾空白后文本少于 `min_text_chars`，含扫描件抽出空文本）/ `high_garbled`（`garbled_ratio` 超过 `max_garbled_ratio`）/ `few_pages_with_text`（仅 `page_count>1` 的多页 PDF 生效：`pages_with_text/page_count` 低于 `min_pages_with_text_ratio`）。
 
 ### 5.2 智能分块 `split_chunks`（父子块）
 - 参数：配置 `chunker.parent_target_tokens=512`、`child_target_tokens=128`、`token_char_ratio=1.8`（中文近数 `len(text)/1.8` 估算 token）。
@@ -644,6 +647,7 @@ POST /api/documents/upload (multipart file)
 - **S5 脱敏（V5.0）**：`ingestion.desensitize_enabled=true` 时，parse 之后、分块之前对全文执行
   `app/services/desensitize.desensitize_text`（身份证/手机号/银行卡 → `***`），默认关闭。
 - **幂等并发（V5.0）**：`_run` 内以 content_hash 为粒度加进程锁（`_lock_for`），幂等检查与写入原子化，杜绝 TOCTOU 双份入库。
+- **解析质量门禁（P0-1）**：`ingestion.quality_gate = {enabled: false, mode: reject|flag, min_text_chars: 30, max_garbled_ratio: 0.05, min_pages_with_text_ratio: 0.2}`（默认关闭=行为与现状完全一致）。启用时在 parse 之后、脱敏之前执行 5.1 的 `evaluate_parse_quality`：命中任一 flag 时 `mode=reject` → 抛 `QualityGateError`（30005，Job failed）；`mode=flag` → `doc.metadata["quality_flags"]` 打标 + warning 日志（含 flags 与 trace_id）继续入库；`mode` 非法值启动即抛 `SystemConfigError`（config field_validator）。
 
 ### 5.11 插件注册与装配（PluginRegistry + wire()）
 

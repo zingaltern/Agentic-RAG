@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.core.errors import SystemConfigError
@@ -161,6 +161,32 @@ class OrchestrationConfig(BaseModel):
     hopeless_score_threshold: float = 0.15
 
 
+class QualityGateConfig(BaseModel):
+    """解析质量门禁（P0-1，DEVELOPMENT.md 5.1/5.10；默认关闭：不改变现有入库行为）。
+
+    - mode=reject：命中任一 flag（empty_text/high_garbled/few_pages_with_text）
+      抛 QualityGateError（30005），Job failed；
+    - mode=flag：仅 doc.metadata["quality_flags"] 打标 + warning 日志，继续入库。
+    - mode 非法值在 field_validator 抛 SystemConfigError（pydantic v2 对非
+      ValueError 异常原样上抛）→ 启动即错（4.3，禁止静默降级）。
+    """
+
+    enabled: bool = False
+    mode: str = "reject"                     # reject | flag
+    min_text_chars: int = 30                 # 有效文本最小字符数（不足 → empty_text）
+    max_garbled_ratio: float = 0.05          # U+FFFD 乱码占比上限（超过 → high_garbled）
+    min_pages_with_text_ratio: float = 0.2   # 多页 PDF 有文本页占比下限（低于 → few_pages_with_text）
+
+    @field_validator("mode")
+    @classmethod
+    def _mode_must_be_reject_or_flag(cls, value: str) -> str:
+        if value not in ("reject", "flag"):
+            raise SystemConfigError(
+                f"ingestion.quality_gate.mode 必须为 reject 或 flag，实际为 {value!r}"
+            )
+        return value
+
+
 class IngestionConfig(BaseModel):
     max_file_size_mb: int = 50
     allowed_extensions: list[str] = ["pdf", "docx", "xlsx", "pptx", "md", "txt",
@@ -171,6 +197,7 @@ class IngestionConfig(BaseModel):
     # S2（V5.1）：zip 系格式解压防御上限（防止 zip 炸弹炸内存/CPU）
     zip_max_total_mb: int = 200
     zip_max_entries: int = 1000
+    quality_gate: QualityGateConfig = QualityGateConfig()   # P0-1：解析质量门禁（默认关）
 
 
 class CleanerConfig(BaseModel):

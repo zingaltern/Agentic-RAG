@@ -87,6 +87,12 @@ ingestion:
   max_queue_size: 64              # C5（V5.1）：入库队列上限，满时返回 43003
   zip_max_total_mb: 200           # S2（V5.1）：zip 解压总大小上限（防炸弹）
   zip_max_entries: 1000           # S2：zip 条目数上限
+  quality_gate:                   # P0-1：解析质量门禁（默认关，不改变现有入库行为）
+    enabled: false
+    mode: reject                  # reject=拒收（Job failed 30005）；flag=仅打标 metadata 继续入库
+    min_text_chars: 30            # 有效文本最小字符数（不足判 empty_text）
+    max_garbled_ratio: 0.05       # U+FFFD 乱码占比上限（超过判 high_garbled）
+    min_pages_with_text_ratio: 0.2  # 多页 PDF 有文本页占比下限（低于判 few_pages_with_text）
 
 cleaner:
   enabled: false                  # 数据清洗层开关（解析后、分块前），默认关不改变现有行为

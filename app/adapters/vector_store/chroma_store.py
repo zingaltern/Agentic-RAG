@@ -2,7 +2,8 @@
 
 - persist 目录由配置 vector_store.persist_dir 指定（SQLite 后端，单文件）。
 - 距离空间 cosine；相似度 score = 1 - distance（3.2：由实现决定算法并文档注明）。
-- Chroma 不允许 metadata 值为 None → 入库前剔除。
+- Chroma metadata 值类型受限（1.x 仅标量与同型标量 list）→ 入库前剔除 None 与
+  dict / 含非标量元素的 list（见 _clean_metadata）。
 - 附加适配器方法（非接口契约）：get_all_chunks / get_document_id_by_hash，
   供 BM25 索引与幂等去重使用。
 """
@@ -57,8 +58,21 @@ class ChromaStore(VectorStore):
 
     @staticmethod
     def _clean_metadata(metadata: dict) -> dict:
-        """Chroma metadata 值不允许 None，剔除后再入库。"""
-        return {k: v for k, v in metadata.items() if v is not None}
+        """Chroma metadata 值类型约束清洗（1.x 仅接受 str/int/float/bool 标量与同型标量 list）。
+
+        - None 一律剔除（Chroma 不允许）；
+        - dict / 含非标量元素的 list（如 P0-1 parser 探针 text_stats，经 chunker
+          整体继承 doc.metadata）Chroma 无法存储，剔除后入库——文档级事实仍以
+          parse 产出的 doc.metadata 为准，不因存储层裁剪而丢失判定依据。
+        """
+        def _storable(value) -> bool:
+            if value is None or isinstance(value, dict):
+                return False
+            if isinstance(value, list):
+                return all(isinstance(v, (str, int, float, bool)) for v in value)
+            return isinstance(value, (str, int, float, bool))
+
+        return {k: v for k, v in metadata.items() if _storable(v)}
 
     @staticmethod
     def _score(distance: float) -> float:

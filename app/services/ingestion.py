@@ -4,7 +4,8 @@ parse_file → split_chunks → (parent chunks) embed_documents(batch) → vecto
 - 后台单线程 Worker（ThreadPoolExecutor max_workers=2），不占 HTTP worker 线程。
 - 入库只存父块（5.10 明确 parent chunks）；子块文本供 W3 上下文回溯，本阶段不落库。
 - 幂等：content_hash 命中（Chroma 持久 + 内存双检）返回既有 document_id，不重复入库。
-- 失败：Job 标记 failed + error_code（ParseError→30003 / 向量化→30002 / 其他→50001）。
+- 失败：Job 标记 failed + error_code（ParseError→30003 / 向量化→30002 /
+  解析质量门禁 QualityGateError→30005 / 注入→40002 / 审核→40003 / 其他→50001）。
 """
 from __future__ import annotations
 
@@ -21,13 +22,14 @@ from app.core.errors import (
     EmbeddingError,
     InjectionError,
     ParseError,
+    QualityGateError,
 )
 from app.core.interfaces import VectorEngine, VectorStore
 from app.core.logging import get_logger, set_trace_id
 from app.services.documents_store import DocumentsStore
 from app.services.jobs_store import JobStore
 from app.adapters.chunker import split_chunks
-from app.adapters.parser import parse_file
+from app.adapters.parser import evaluate_parse_quality, parse_file
 
 logger = get_logger("ingestion")
 
@@ -157,6 +159,28 @@ class IngestionPipeline:
             doc = parse_file(io.BytesIO(raw), filename, config=self.config.ingestion)
             doc.metadata["kb_id"] = kb_id          # 入库时写 Chunk.metadata.kb_id（13.5）
 
+            # P0-1：解析质量门禁（parse 之后、脱敏之前；默认关闭=行为与现状完全一致）。
+            # reject 模式在此抛 QualityGateError，由本函数尾部错误映射统一置 Job failed
+            # （worker 线程与同步 ingest 同路径），不在此处自行吞掉异常。
+            gate = self.config.ingestion.quality_gate
+            if gate.enabled:
+                flags = evaluate_parse_quality(
+                    doc.text, doc.metadata.get("text_stats") or {},
+                    min_text_chars=gate.min_text_chars,
+                    max_garbled_ratio=gate.max_garbled_ratio,
+                    min_pages_with_text_ratio=gate.min_pages_with_text_ratio,
+                )
+                if flags:
+                    if gate.mode == "reject":
+                        raise QualityGateError(data={"quality_flags": flags})
+                    # flag 模式：打标（list[str]，Chroma metadata 可存储）+ warning 后继续入库
+                    doc.metadata["quality_flags"] = flags
+                    logger.warning(
+                        "解析质量门禁打标（flag 模式，继续入库）",
+                        extra={"extra_fields": {"job_id": job.job_id, "filename": filename,
+                                                "quality_flags": flags}},
+                    )
+
             # S5（13.11.1）：敏感数据脱敏（身份证/手机号/银行卡），默认关闭
             if self.config.ingestion.desensitize_enabled:
                 from app.services.desensitize import desensitize_text
@@ -273,6 +297,12 @@ class IngestionPipeline:
             # P-C：内容审核 reject（40003）
             self.jobs.update(job.job_id, status="failed", error_code=str(exc.code))
             logger.warning("入库失败：内容审核未通过", extra={"extra_fields": {"job_id": job.job_id, "error_code": exc.code}})
+        except QualityGateError as exc:
+            # P0-1：解析质量门禁 reject（30005，疑似扫描件/损坏文件）
+            self.jobs.update(job.job_id, status="failed", error_code=str(exc.code))
+            logger.warning("入库失败：解析质量不达标（疑似扫描件/损坏文件）",
+                           extra={"extra_fields": {"job_id": job.job_id, "error_code": exc.code,
+                                                   "quality_flags": (exc.data or {}).get("quality_flags")}})
         except Exception as exc:
             self.jobs.update(job.job_id, status="failed", error_code="50001")
             logger.exception("入库失败：未知错误", extra={"extra_fields": {"job_id": job.job_id}})
