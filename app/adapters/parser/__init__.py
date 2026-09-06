@@ -3,6 +3,8 @@
 契约（3.9）：`parse_file(file_stream: BinaryIO, filename: str) -> Document`
 - 支持 .pdf/.docx/.xlsx/.pptx/.md/.txt，text 归一为 UTF-8。
 - metadata 保留键：source（原文件名）、kind（扩展名）、page（int/None）、author（str/None）。
+- 解析探针（P0-1）：metadata["text_stats"] = {total_chars, page_count, pages_with_text,
+  garbled_ratio}（garbled_ratio 为 U+FFFD 乱码占比，全部解析器统一在 _build_document 计算）。
 - 损坏/不支持 → ParseError（code 30003）。
 """
 from __future__ import annotations
@@ -25,6 +27,9 @@ def _build_document(filename: str, raw: bytes, text: str, metadata: dict) -> Doc
     """按 2.3 约定生成 document_id（uuid4 hex 前 12 位）与 content_hash（sha256 原始字节）。
 
     content_hash 写入 metadata：Chunk 继承后可用于幂等去重检索（W2 5.10）。
+    P0-1 探针：garbled_ratio（U+FFFD 乱码占比）在此对全部解析器统一计算——
+    txt/html/eml 的 errors="replace" 解码同样产生 U+FFFD，必须纳入质量门禁视野；
+    text_stats 缺失时（非 PDF 解析器）按单页文档补齐。
     """
     content_hash = hashlib.sha256(raw).hexdigest()
     metadata = {
@@ -33,6 +38,13 @@ def _build_document(filename: str, raw: bytes, text: str, metadata: dict) -> Doc
         "content_hash": content_hash,
         **metadata,
     }
+    stats = metadata.setdefault("text_stats", {
+        "total_chars": len(text),
+        "page_count": 1,
+        "pages_with_text": 1 if text.strip() else 0,
+    })
+    garbled = text.count("\ufffd")
+    stats["garbled_ratio"] = (garbled / len(text)) if text else 0.0
     return Document(
         document_id=uuid4().hex[:12],
         filename=filename,
@@ -41,6 +53,35 @@ def _build_document(filename: str, raw: bytes, text: str, metadata: dict) -> Doc
         text=text,
         metadata=metadata,
     )
+
+
+def evaluate_parse_quality(text: str, text_stats: dict, *,
+                           min_text_chars: int, max_garbled_ratio: float,
+                           min_pages_with_text_ratio: float) -> list[str]:
+    """P0-1 解析质量检查（模块级纯函数，P3-8 解析器降级链复用）。
+
+    返回 flag 列表（空 = 通过）：
+    - empty_text：去首尾空白后文本少于 min_text_chars（含扫描件抽出空文本）；
+    - high_garbled：U+FFFD 乱码占比超过 max_garbled_ratio（text_stats 缺
+      garbled_ratio 时按当前文本现算兜底）；
+    - few_pages_with_text：仅对 page_count>1 的多页 PDF 生效——有实质文本页占比
+      pages_with_text/page_count 低于 min_pages_with_text_ratio（疑似扫描件大部分页无文本层）。
+    """
+    flags: list[str] = []
+    stats = text_stats or {}
+    if len((text or "").strip()) < min_text_chars:
+        flags.append("empty_text")
+    ratio = stats.get("garbled_ratio")
+    if ratio is None:
+        total = len(text or "")
+        ratio = (text or "").count("\ufffd") / total if total else 0.0
+    if ratio > max_garbled_ratio:
+        flags.append("high_garbled")
+    page_count = int(stats.get("page_count") or 0)
+    pages_with_text = int(stats.get("pages_with_text") or 0)
+    if page_count > 1 and (pages_with_text / page_count) < min_pages_with_text_ratio:
+        flags.append("few_pages_with_text")
+    return flags
 
 
 def _check_magic(ext: str, raw: bytes, filename: str, config: object | None = None) -> None:
@@ -181,6 +222,9 @@ def _parse_pdf(raw: bytes) -> tuple[str, dict]:
         parts: list[str] = []
         sections: list[tuple[str, int]] = []
         global_line = 0
+        # P0-1 探针：逐页统计（total_chars / pages_with_text），供解析质量门禁识别扫描件
+        total_chars = 0
+        pages_with_text = 0
         for page in pdf:
             page_text = _extract_page_with_tables(page)
             page_lines = page_text.split("\n")
@@ -192,10 +236,19 @@ def _parse_pdf(raw: bytes) -> tuple[str, dict]:
                 sections.append((heading, global_line + line_in_page))
             global_line += len(page_lines)
             parts.append(page_text)
+            total_chars += len(page_text)
+            if page_text.strip():
+                pages_with_text += 1
         metadata = {
             # 单页文档给出页码；多页文档页码按段归属留待 W2 细化（chunk 级 page 标注）
             "page": 1 if pdf.page_count == 1 else None,
             "author": (pdf.metadata or {}).get("author") or None,
+            # P0-1：解析探针（garbled_ratio 由 _build_document 统一补齐）
+            "text_stats": {
+                "total_chars": total_chars,
+                "page_count": pdf.page_count,
+                "pages_with_text": pages_with_text,
+            },
         }
         if sections:
             metadata["sections"] = sections   # T5：字号启发式章节标题

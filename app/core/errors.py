@@ -81,6 +81,13 @@ class RerankError(AppError):
     message = "重排打分失败"
 
 
+class QualityGateError(AppError):
+    """解析质量门禁命中（P0-1）：空文本/乱码/扫描件疑似，拒绝入库。"""
+
+    code = 30005
+    message = "文档解析质量不达标（疑似扫描件/损坏文件）"
+
+
 class ParseError(AppError):
     """解析失败（损坏文件/格式不支持）。"""
 
