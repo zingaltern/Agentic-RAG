@@ -404,6 +404,20 @@ class KbsConfig(BaseModel):
     persist_file: str = "data/kb.json"
 
 
+class IndexDnaConfig(BaseModel):
+    """索引 DNA 查询侧校验（P1-3，DEVELOPMENT.md 13.5；默认关闭）。
+
+    - enabled=false：不做校验（现状行为）；
+    - mode=audit（默认）：collection dna 与当前配置不一致 → warning 日志 +
+      响应标记 index_dna_mismatch=true，不拦截；
+    - mode=reject：命中抛 IndexDnaMismatchError（30006）。
+    存量无 dna 的 collection 视为 legacy：仅日志提示，不告警不拒绝。
+    """
+
+    enabled: bool = False
+    mode: str = "audit"                      # audit | reject
+
+
 class SystemConfig(BaseSettings):
     """系统唯一配置入口（4.2 完整 Schema）。
 
@@ -447,6 +461,7 @@ class SystemConfig(BaseSettings):
     logging: LoggingConfig = LoggingConfig()
     documents: DocumentsConfig = DocumentsConfig()
     kbs: KbsConfig = KbsConfig()
+    index_dna: IndexDnaConfig = IndexDnaConfig()   # P1-3：索引 DNA 查询侧校验（默认关）
 
     @model_validator(mode="after")
     def _validate_providers(self) -> "SystemConfig":

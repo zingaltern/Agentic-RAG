@@ -10,7 +10,7 @@ PIP_DEFAULT_TIMEOUT ?= 120
 # HuggingFace 模型下载镜像（首次加载嵌入模型联网下载用；可用环境变量覆盖）
 export HF_ENDPOINT ?= https://hf-mirror.com
 
-.PHONY: bootstrap run test eval review coverage integration demo-ingest demo-query docker-up docker-down clean
+.PHONY: bootstrap run test eval review coverage integration demo-ingest demo-query rebuild docker-up docker-down clean
 
 ## 首次：创建虚拟环境（python3.11 优先）并安装依赖（含 dev 依赖）
 bootstrap:
@@ -56,6 +56,11 @@ integration:
 ## 入库 demo 文档并检索验证（W2 验收）
 demo-ingest:
 	$(PYTHON) -m app.cli.demo_ingest
+
+## 索引全量重建（P1-3）：make rebuild KB=<kb_id>（需 P0-2 归档原件；重建期间暂停该库上传/查询）
+rebuild:
+	@test -n "$(KB)" || (echo "用法: make rebuild KB=<kb_id>"; exit 1)
+	$(PYTHON) -m app.cli.rebuild --kb $(KB) --yes
 
 ## 一轮问答冒烟（W3 交付后可用）
 demo-query:

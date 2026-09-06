@@ -207,3 +207,7 @@ documents:
 
 kbs:
   persist_file: ./data/kb.json
+
+index_dna:                        # P1-3：索引 DNA 查询侧校验（默认关；换 embedding/分块/清洗配置后提示重建）
+  enabled: false
+  mode: audit                     # audit=warning+响应标记；reject=拦截（30006）

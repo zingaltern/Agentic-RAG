@@ -140,6 +140,35 @@ class KbStore:
         with self._lock:
             return self._kbs.get(kb_id)
 
+    def update(self, kb_id: str, **fields) -> KbInfo:
+        """更新已存在库的可变字段（P1-3：collection 指针切换；P2-6 将扩展 pii 库级策略）。
+
+        - 仅允许白名单字段（collection/owner/scope/description），非法字段 ValueError；
+        - collection 切换为元数据级原子（单次 atomic_write_json），失败原样上抛由调用方处理；
+        - 触发 "update" 事件钩子。
+        """
+        allowed = {"collection", "owner", "scope", "description"}
+        unknown = set(fields) - allowed
+        if unknown:
+            raise ValueError(f"不允许更新的字段: {sorted(unknown)}")
+        with self._lock:
+            info = self._kbs.get(kb_id)
+            if info is None:
+                raise KeyError(f"知识库不存在: {kb_id!r}")
+            if "collection" in fields:
+                if not isinstance(fields["collection"], str) or not fields["collection"]:
+                    raise ValueError("collection 必须为非空字符串")
+                used = {i.collection for kid, i in self._kbs.items() if kid != kb_id}
+                if fields["collection"] in used:
+                    raise ValueError(f"collection 已被其它库占用: {fields['collection']!r}")
+            if "scope" in fields and fields["scope"] not in ("shared", "private"):
+                raise ValueError(f"非法 scope: {fields['scope']!r}")
+            for key, value in fields.items():
+                setattr(info, key, value)
+        self._persist()
+        self._notify("update", kb_id)
+        return info
+
     def exists(self, kb_id: str) -> bool:
         with self._lock:
             return kb_id in self._kbs
