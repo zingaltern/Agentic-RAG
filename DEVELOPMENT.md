@@ -502,6 +502,7 @@ logging:
 - 统一产出 `Document`：`text` 归一为 UTF-8；元数据写入 `metadata`：`source`（原文件名）、`page`（PDF/Word 页码）、`kind`（扩展名）。
 - PDF → 用 `pymupdf`（fitz）逐页提取；Word → `python-docx` 段落级；Excel → 每 sheet 每行判为一段文本，`metadata` 记录 `sheet` 与行号；PPT → `python-pptx`。
 - 失败（损坏/不支持）→  抛 `ParseError（code 30003），Job 标记 failed。
+- **表格一等公民（P1-4）**：PDF（`find_tables`）与 Word（按 body 文档流**保序**，修复旧实现表格追加在段落末尾的问题）解析时，表格以 `[TABLE]\n{markdown}\n[/TABLE]` 原子块进入正文，并登记 `metadata["tables"] = [{index, header, rows, page}]`（顺序对应正文第 N 个 [TABLE] 块）；xlsx 整文档即表，v1 不动。清洗后执行 `reindex_tables(doc)` 重对齐（cleaner 删表则丢弃对应 JSON + warning）。cleaner 对 [TABLE] 块内容豁免（normalize 白名单 + dedup/quality 跳过含表格段落）。
 - **解析探针（P0-1）**：`_parse_pdf` 逐页统计写入 `metadata["text_stats"] = {total_chars, page_count, pages_with_text}`（`pages_with_text`=有实质文本的页数）；`garbled_ratio`（U+FFFD 字符数 / 文本总字符数，无字符时为 0.0）在 `_build_document` 对全部解析器统一计算——txt/html/eml 的 `errors="replace"` 解码同样产生 U+FFFD——并入 `metadata["text_stats"]`（非 PDF 解析器按单页文档补齐该结构）。`text_stats` 仅作解析事实探针，不入 Chroma chunk metadata（`chroma_store._clean_metadata` 剔除 Chroma 无法存储的 dict 等非标量值）。
 - **质量检查纯函数（P0-1，P3-8 降级链复用）**：parser 模块级 `evaluate_parse_quality(text, text_stats, *, min_text_chars, max_garbled_ratio, min_pages_with_text_ratio) -> list[str]`，返回 flag 列表（空=通过）：`empty_text`（去首尾空白后文本少于 `min_text_chars`，含扫描件抽出空文本）/ `high_garbled`（`garbled_ratio` 超过 `max_garbled_ratio`）/ `few_pages_with_text`（仅 `page_count>1` 的多页 PDF 生效：`pages_with_text/page_count` 低于 `min_pages_with_text_ratio`）。
 
@@ -513,6 +514,7 @@ logging:
   3. 父块 `parent_id=None`；子块 `parent_id=父块chunk_id`。
   4. `chunk_id = sha256(document_id + str(order))[:16]`。
 - 检索命中子块时，编排层回溯其父块全文进入 LLM 上下文。
+- **表格原子块（P1-4，`chunker.table_aware`，默认关）**：`[TABLE]...[/TABLE]` 预合并为原子单元，不参与句子聚合、不与正文粘块——整表 ≤ 父块目标 → 独立父块（`metadata["chunk_type"]="table"`、`metadata["table_json"]`（对应 tables[index] 的 JSON，超 `json_max_bytes`(4096B) 截断+warning），不产子块；超限 → 按「语义行组」切（每组 ≤ `max_rows_per_chunk`(30) 行且强制携带完整表头，`metadata["table_part"]="2/3"`）。开启后 chunk metadata 剔除文档级探针键（`text_stats`/`tables`/`sections`）。
 
 ### 5.3 向量化（M-VP 本地 BGE v1.5）
 - 默认模型 `BAAI/bge-small-zh-v1.5`（稠密 512 维，中文优、体积 ~100MB、CPU 友好）。

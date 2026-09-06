@@ -35,6 +35,18 @@ _DEFAULT_NOISE_PATTERNS = (
 _MIN_CHUNK_CHARS = 20
 _MEANINGFUL_POS = {"n", "nr", "ns", "nt", "nz", "v", "vn", "a", "ad", "d", "m", "q", "eng"}
 
+# P1-4：[TABLE] 原子块（捕获组分割，保序保边界）
+_TABLE_BLOCK_RE = re.compile(r"(\[TABLE\]\n.*?\n\[/TABLE\])", flags=re.S)
+
+
+def _split_table_segments(text: str) -> list[tuple[bool, str]]:
+    """把文本切成 [(是否表格块, 内容)] 序列（拼接后与原文等价，P1-4 表格豁免用）。"""
+    out: list[tuple[bool, str]] = []
+    for part in _TABLE_BLOCK_RE.split(text):
+        if part:
+            out.append((part.startswith("[TABLE]"), part))
+    return out
+
 
 def _simhash(text: str, bits: int = 64) -> int:
     """简单词加权 simhash：分词 → 各 token 哈希 → 加权位累积 → 签名。"""
@@ -96,15 +108,27 @@ class DefaultCleaner(Cleaner):
     def clean(self, text: str) -> str:
         if not self.enabled:
             return text
-        if self.normalize:
-            text = self._normalize(text)
-        if self.noise:
-            text = self._strip_noise(text)
+        # P1-4：normalize / noise 仅作用于非 [TABLE] 段（表格内容白名单豁免——
+        # 全角转半角等改写会让 tables JSON 与正文错位，且单元格内容无噪声可言）
+        rebuilt: list[str] = []
+        for is_table, seg in _split_table_segments(text):
+            if is_table:
+                rebuilt.append(seg)
+                continue
+            if self.normalize:
+                seg = self._normalize_preserve_breaks(seg)
+            if self.noise:
+                seg = self._strip_noise(seg)
+            rebuilt.append(seg)
+        text = "".join(rebuilt)
         paragraphs = self._split_paragraphs(text)
         if self.dedup:
             paragraphs = self._dedup_paragraphs(paragraphs)
         if self.quality:
-            paragraphs = [p for p in paragraphs if _is_meaningful(p, self.min_chunk_chars)]
+            # P1-4：含 [TABLE] 的段落豁免质量过滤（双 \n 分段粒度下整页成一段，
+            # 不豁免会把表格整页当"过短/无实词"误杀）
+            paragraphs = [p for p in paragraphs
+                          if "[TABLE]" in p or _is_meaningful(p, self.min_chunk_chars)]
         return "\n\n".join(paragraphs).strip()
 
     # -- 步骤实现 --------------------------------------------------------------
@@ -115,6 +139,13 @@ class DefaultCleaner(Cleaner):
             text = text.replace(full, half)
         text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", text)
         return re.sub(r"[ \t\u3000]+", " ", text).strip()
+
+    @staticmethod
+    def _normalize_preserve_breaks(text: str) -> str:
+        """归一化但保留段首/段尾换行（P1-4：分段清洗时不得吞掉与 [TABLE] 块的边界换行）。"""
+        lead = text[:len(text) - len(text.lstrip("\n"))]
+        trail = text[len(text.rstrip("\n")):]
+        return lead + DefaultCleaner._normalize(text.strip("\n")) + trail
 
     def _strip_noise(self, text: str) -> str:
         lines = text.split("\n")
@@ -151,6 +182,9 @@ class DefaultCleaner(Cleaner):
         seen: list[tuple[int, int]] = []
         bits = 64
         for para in paragraphs:
+            if "[TABLE]" in para:
+                kept.append(para)   # P1-4：含表格段落豁免去重（simhash 会把表格页误判近重复）
+                continue
             sig = _simhash(para, bits)
             dup = False
             for prev_sig, prev_idx in seen:

@@ -80,12 +80,21 @@ class EmbeddingConfig(BaseModel):
     dimension: int = 0                       # 0 = 由模型自动识别（运行时回填实际维度）
 
 
+class TableAwareConfig(BaseModel):
+    """表格原子块（P1-4，DEVELOPMENT.md 5.2；默认关闭：[TABLE] 行按普通文本聚合）。"""
+
+    enabled: bool = False
+    max_rows_per_chunk: int = 30           # 超限大表按行组切，每组行数上限（强制带表头）
+    json_max_bytes: int = 4096             # table_json 字节上限（超限截断+warning）
+
+
 class ChunkerConfig(BaseModel):
     """父子分块参数（5.2）。"""
 
     parent_target_tokens: int = 512
     child_target_tokens: int = 128
     token_char_ratio: float = 1.8            # 中文 token≈len(text)/1.8 估算
+    table_aware: TableAwareConfig = TableAwareConfig()   # P1-4：表格原子块（默认关）
 
 
 class VectorStoreConfig(BaseModel):
