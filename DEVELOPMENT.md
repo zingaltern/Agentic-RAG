@@ -514,6 +514,7 @@ logging:
   3. 父块 `parent_id=None`；子块 `parent_id=父块chunk_id`。
   4. `chunk_id = sha256(document_id + str(order))[:16]`。
 - 检索命中子块时，编排层回溯其父块全文进入 LLM 上下文。
+- **标题硬边界 + 上下文前缀 + 页码溯源（P1-5，`chunker.hard_boundary`/`chunker.context_prefix`，默认关）**：① 硬边界——父块聚合遇 section 归属变更强制断开（标题行为新块首行），同 section 连续内容不误断；② 页码——PDF 解析记录 `metadata["page_spans"]=[[start_line, end_line, page], ...]`（pptx 以 slide 号为页码），chunk 按段落起始行查表写 `metadata["page"]`（查不到不写）；③ 前缀——`chunk.text = template.format(doc_title, section) [+ " (p页码)"] + "\n" + 原文`（模板默认 `{doc_title} > {section}`，无 section 降级为仅 doc_title；前缀不计入切块 token 目标、计入 embedding 输入，超 64 token 截断 + warning；父子块一致加前缀）。索引 DNA 指纹纳入三组配置（变更即需重建）。
 - **表格原子块（P1-4，`chunker.table_aware`，默认关）**：`[TABLE]...[/TABLE]` 预合并为原子单元，不参与句子聚合、不与正文粘块——整表 ≤ 父块目标 → 独立父块（`metadata["chunk_type"]="table"`、`metadata["table_json"]`（对应 tables[index] 的 JSON，超 `json_max_bytes`(4096B) 截断+warning），不产子块；超限 → 按「语义行组」切（每组 ≤ `max_rows_per_chunk`(30) 行且强制携带完整表头，`metadata["table_part"]="2/3"`）。开启后 chunk metadata 剔除文档级探针键（`text_stats`/`tables`/`sections`）。
 
 ### 5.3 向量化（M-VP 本地 BGE v1.5）
