@@ -296,6 +296,8 @@ class IngestionPipeline:
                     child_target_tokens=self.config.chunker.child_target_tokens,
                     token_char_ratio=self.config.chunker.token_char_ratio,
                     table_aware=self.config.chunker.table_aware.model_dump(),
+                    hard_boundary=self.config.chunker.hard_boundary.model_dump(),
+                    context_prefix=self.config.chunker.context_prefix.model_dump(),
                 )
                 parents = [c for c in chunks if c.parent_id is None]
                 batch_size = self.config.ingestion.embed_batch_size

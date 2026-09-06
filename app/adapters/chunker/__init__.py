@@ -112,13 +112,16 @@ def split_chunks(
     child_target_tokens: int = 128,
     token_char_ratio: float = 1.8,
     table_aware: dict | None = None,
+    hard_boundary: dict | None = None,
+    context_prefix: dict | None = None,
 ) -> list[Chunk]:
     """按父子分块规则产出一组 Chunk（纯函数；配置缺省值与 settings.yaml 一致）。
 
-    P1-4：table_aware={"enabled": True, "max_rows_per_chunk": int, "json_max_bytes": int}
-    时，[TABLE]...[/TABLE] 预合并为原子单元——整表独立父块（chunk_type=table +
-    table_json），超限按行组切（每组 ≤ max_rows_per_chunk 行且强制带完整表头）；
-    关闭/缺省时 [TABLE] 行按普通文本聚合（行为与旧版一致）。
+    P1-4：table_aware={"enabled", "max_rows_per_chunk", "json_max_bytes"}——[TABLE] 原子块。
+    P1-5：hard_boundary={"enabled"}——聚合遇 section 归属变更强制断块；
+          context_prefix={"enabled", "template", "include_page"}——chunk.text 加
+          `{doc_title} > {section}` 上下文前缀（不计切块 token、计 embedding，>64 token 截断），
+          并按 doc.metadata["page_spans"] 写 chunk 级 page。
     """
     text = (doc.text or "").strip()
     if not text:
@@ -128,6 +131,11 @@ def split_chunks(
     ta_enabled = bool(table_aware and table_aware.get("enabled"))
     max_rows = int((table_aware or {}).get("max_rows_per_chunk") or 30)
     json_max_bytes = int((table_aware or {}).get("json_max_bytes") or 4096)
+    hb_enabled = bool(hard_boundary and hard_boundary.get("enabled"))
+    cp_enabled = bool(context_prefix and context_prefix.get("enabled"))
+    cp_template = (context_prefix or {}).get("template") or "{doc_title} > {section}"
+    cp_include_page = bool((context_prefix or {}).get("include_page"))
+    doc_title = doc.title or doc.filename
 
     # T5：章节标题 → 逐行 section 归属（sections 为解析器产出的 [(title, 行号)]）
     line_section: list = []
@@ -140,18 +148,49 @@ def split_chunks(
             return None
         return line_section[line_no] if 0 <= line_no < len(line_section) else None
 
-    # P1-4：文档级探针键不随 chunk 落库（text_stats 是解析事实、tables 由 table_json 承载）
+    # P1-4/P1-5：文档级探针/映射键不随 chunk 落库（text_stats 解析事实、tables 由
+    # table_json 承载、sections 由 section 键承载、page_spans 由 page 键承载）
     base_meta = {k: v for k, v in doc.metadata.items()
-                 if k not in ("sections", "text_stats", "tables")}
+                 if k not in ("sections", "text_stats", "tables", "page_spans")}
+
+    tables_meta = doc.metadata.get("tables") or []
+    page_spans = doc.metadata.get("page_spans") or []   # P1-5：[[start_line, end_line, page], ...]
+
+    def page_of(line_no: int) -> int | None:
+        """P1-5：按段落起始行号查页码（查不到返回 None，不写 page 键）。"""
+        for s, e, pg in page_spans:
+            if s <= line_no <= e:
+                return pg
+        return None
+
+    def build_prefix(section: str | None, page: int | None) -> str | None:
+        """P1-5：上下文前缀（无 section 降级为仅 doc_title；>64 token 截断 + warning）。"""
+        if not cp_enabled:
+            return None
+        prefix = cp_template.format(doc_title=doc_title, section=section) if section else doc_title
+        if cp_include_page and page:
+            prefix = f"{prefix} (p{page})"
+        if _estimate_tokens(prefix, token_char_ratio) > 64:
+            prefix = prefix[:max(1, int(64 * token_char_ratio))].rstrip()
+            logger.warning(
+                "上下文前缀超 64 token 截断（防挤占嵌入模型输入上限）",
+                extra={"extra_fields": {"document_id": doc.document_id}},
+            )
+        return prefix
 
     def emit(text: str, parent_id: str | None, section: str | None,
-             extra: dict | None = None) -> str:
+             extra: dict | None = None, page: int | None = None) -> str:
         nonlocal order
         meta = dict(base_meta)
         if section is not None:
             meta["section"] = section         # T5：章节标题落库（可参与 filters 等值过滤）
+        if page is not None:
+            meta["page"] = page               # P1-5：chunk 级页码溯源
         if extra:
             meta.update(extra)
+        prefix = build_prefix(section, page)
+        if prefix:
+            text = f"{prefix}\n{text}"
         chunk = Chunk(
             chunk_id=_chunk_id(doc.document_id, order),
             document_id=doc.document_id,
@@ -164,14 +203,13 @@ def split_chunks(
         order += 1
         return chunk.chunk_id
 
-    tables_meta = doc.metadata.get("tables") or []
-
     def emit_table(block: str, start_line: int, ordinal: int) -> None:
         """P1-4：表格原子块 → 独立父块（不与正文聚合、不产子块）。
 
         整表 ≤ 父块目标 → 单块携带 table_json；超限 → 行组切（每组强制携带完整表头）。
         """
         section = section_of(start_line)
+        page = page_of(start_line)
         table_meta = tables_meta[ordinal] if ordinal < len(tables_meta) else None
         extra: dict = {"chunk_type": "table"}
         if table_meta is not None:
@@ -187,7 +225,7 @@ def split_chunks(
             extra["table_json"] = table_json
         rows = _markdown_lines(block)
         if _estimate_tokens(block, token_char_ratio) <= parent_target_tokens or len(rows) <= 1:
-            emit(block, None, section, extra)
+            emit(block, None, section, extra, page=page)
             return
         header_line, sep_line, data_lines = rows
         groups: list[list[str]] = [data_lines[i:i + max_rows]
@@ -198,7 +236,7 @@ def split_chunks(
             part_extra = dict(extra)
             if total > 1:
                 part_extra["table_part"] = f"{gi}/{total}"
-            emit("\n".join(part_lines), None, section, part_extra)
+            emit("\n".join(part_lines), None, section, part_extra, page=page)
 
     # 1) 以自然段落（换行分隔）聚合成父块（记录每段起始行号，用于 section 归属）；
     #    P1-4：table_aware 开启时 [TABLE]..[/TABLE] 行域预合并为表格原子单元
@@ -226,6 +264,7 @@ def split_chunks(
     current: list[str] = []
     current_start = 0
     current_tokens = 0
+    current_section: str | None = None
     table_ordinal = 0
     for line_no, para, is_table in items:
         if is_table:
@@ -236,6 +275,11 @@ def split_chunks(
             table_ordinal += 1
             continue
         para_tokens = _estimate_tokens(para, token_char_ratio)
+        # P1-5：标题硬边界——section 归属变更即断块（同 section 连续内容不受影响）
+        para_section = section_of(line_no)
+        if current and hb_enabled and para_section != current_section:
+            parents.append(("".join(current), current_start, False, -1))
+            current, current_tokens = [], 0
         if current and current_tokens + para_tokens > parent_target_tokens:
             parents.append(("".join(current), current_start, False, -1))
             current, current_tokens = [], 0
@@ -248,6 +292,7 @@ def split_chunks(
         else:
             if not current:
                 current_start = line_no
+                current_section = para_section
             current.append(para)
             current_tokens += para_tokens
     if current:
@@ -259,13 +304,14 @@ def split_chunks(
         if not parent_text:
             continue
         section = section_of(start_line)
+        page = page_of(start_line)
         if is_table:
             emit_table(parent_text, start_line, ordinal)
             continue
-        parent_chunk_id = emit(parent_text, None, section)
+        parent_chunk_id = emit(parent_text, None, section, page=page)
         if _estimate_tokens(parent_text, token_char_ratio) <= child_target_tokens:
             continue  # 父块本身已在子块目标内，不产出重复子块
         for group in _group_to_target(_split_sentences(parent_text), child_target_tokens, token_char_ratio):
-            emit(group, parent_chunk_id, section)
+            emit(group, parent_chunk_id, section, page=page)
 
     return chunks
