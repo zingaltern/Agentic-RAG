@@ -268,6 +268,7 @@ class IngestionConfig(BaseModel):
     quality_gate: QualityGateConfig = QualityGateConfig()   # P0-1：解析质量门禁（默认关）
     archive: ArchiveConfig = ArchiveConfig()                # P0-2：原件归档（默认关）
     pii: PiiConfig = PiiConfig()                            # P2-6：PII 全局策略（默认关；kb 级可覆盖）
+    parser_routing: dict = {}                               # P3-8：解析链路由（空=旧单实现路径；{"pdf":{"chain":["pymupdf"]}}）
 
 
 class CleanerConfig(BaseModel):
