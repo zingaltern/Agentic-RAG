@@ -201,6 +201,7 @@ class DetectionResult:
 | 30003 | 解析失败（损坏文件/格式不支持） |
 | 30004 | 重排打分失败（bge_reranker，语义区别于向量化失败 30002） |
 | 30005 | 文档解析质量不达标（疑似扫描件/损坏文件；P0-1 质量门禁 `ingestion.quality_gate.mode=reject` 命中时） |
+| 30006 | 索引配置与向量库不一致（P1-3 `index_dna.mode=reject` 命中；请执行 `python -m app.cli.rebuild --kb <id>` 重建） |
 | 21001 | 兜底：反思达到上限仍未找到可靠答案 |
 | 21002 | 全局请求超时 |
 | 43001 | 系统繁忙（并发查询信号量耗尽/超时，V5.1） |
@@ -648,6 +649,7 @@ POST /api/documents/upload (multipart file)
   `app/services/desensitize.desensitize_text`（身份证/手机号/银行卡 → `***`），默认关闭。
 - **幂等并发（V5.0）**：`_run` 内以 content_hash 为粒度加进程锁（`_lock_for`），幂等检查与写入原子化，杜绝 TOCTOU 双份入库。
 - **解析质量门禁（P0-1）**：`ingestion.quality_gate = {enabled: false, mode: reject|flag, min_text_chars: 30, max_garbled_ratio: 0.05, min_pages_with_text_ratio: 0.2}`（默认关闭=行为与现状完全一致）。启用时在 parse 之后、脱敏之前执行 5.1 的 `evaluate_parse_quality`：命中任一 flag 时 `mode=reject` → 抛 `QualityGateError`（30005，Job failed）；`mode=flag` → `doc.metadata["quality_flags"]` 打标 + warning 日志（含 flags 与 trace_id）继续入库；`mode` 非法值启动即抛 `SystemConfigError`（config field_validator）。
+- **索引 DNA（P1-3）**：`compute_index_dna(config)`（`app/core/index_dna.py` 纯函数）对 embedding.model_name/dimension/query_instruction + chunker 参数 + cleaner 配置做 sha256 规范化指纹（[:12]）；入库成功时写入 `chunk.metadata["index_dna"]` 与 `DocEntry.index_dna`，新 Chroma collection 建集合时 metadata 携带（存量无 dna 的 collection 视为 legacy）。任一相关配置变更即 dna 变化。
 - **原件归档（P0-2）**：`ingestion.archive = {enabled: false, dir: "./data/archive"}`（默认关闭）。启用时入库成功路径（幂等锁内、duplicate 判定之后）将**原始字节**原子写至 `{dir}/{kb_id}/{document_id}{ext}`（ext 只取 `Path(filename).suffix`；`core/persist.atomic_write_bytes` tmp+rename 原子写）→ `DocEntry.archive_path` 随 register 登记；写失败仅 warning 不回滚入库。**级联清理**：删除文档/删库时同步删除归档原件（被遗忘权）。归档是"换 embedding 全量重建（rebuild CLI）"、解析器升级重解析与审计取证的前置。
 
 ### 5.11 插件注册与装配（PluginRegistry + wire()）
@@ -972,6 +974,7 @@ V1.0 发布标准已达成：pytest 全绿（`-m "not integration"`，293 项，
 - 问答：`POST /api/query` 可选 `kb_id`（与 `collection` 二选一，`kb_id` 优先；缺省 `default`）；`filters` 仅限库内。
 - 隔离保障：检索双路（BM25/向量）都按 kb 的 collection 作用域执行；`KbStore` 校验查询/上传目标库存在，否则一律按参数错误拒绝。
 - 验收：隔离自动化用例全过（`tests/integration/test_kbs_isolation.py`）。
+- **索引 DNA 校验与重建（P1-3）**：查询侧（`/api/query` collection 解析后）比对 collection metadata dna 与当前配置——`index_dna = {enabled: false, mode: audit|reject}`；`audit`（默认）命中仅 warning + 响应标记 `index_dna_mismatch: true`；`reject` 抛 `IndexDnaMismatchError`（30006）；存量无 dna 视为 legacy 仅日志提示。重建：`python -m app.cli.rebuild --kb <id> [--yes]`——读 P0-2 归档原件 → 完整入库链写临时 collection（`rag_<id>__rebuild`）→ 校验文档数/dna → 切换 `KbInfo.collection` 指针 → 删旧集合与旧归档；**重建期间暂停上传与查询**（v1 单机语义，失败自动回滚指针并恢复索引快照）。
 
 ### 13.6 评测体系 v2 —— ✅ 已交付
 
