@@ -187,6 +187,18 @@ class QualityGateConfig(BaseModel):
         return value
 
 
+class ArchiveConfig(BaseModel):
+    """原件归档（P0-2，DEVELOPMENT.md 5.10；默认关闭：不改变现有入库行为）。
+
+    启用后入库成功路径将**原始字节**原子写至 {dir}/{kb_id}/{document_id}{ext}，
+    供换 embedding 全量重建（P1-3 rebuild CLI）、解析器升级重解析与审计取证使用；
+    写失败仅告警不回滚入库（归档尽力而为，archive_path 置 None 表示未归档）。
+    """
+
+    enabled: bool = False
+    dir: str = "./data/archive"
+
+
 class IngestionConfig(BaseModel):
     max_file_size_mb: int = 50
     allowed_extensions: list[str] = ["pdf", "docx", "xlsx", "pptx", "md", "txt",
@@ -198,6 +210,7 @@ class IngestionConfig(BaseModel):
     zip_max_total_mb: int = 200
     zip_max_entries: int = 1000
     quality_gate: QualityGateConfig = QualityGateConfig()   # P0-1：解析质量门禁（默认关）
+    archive: ArchiveConfig = ArchiveConfig()                # P0-2：原件归档（默认关）
 
 
 class CleanerConfig(BaseModel):

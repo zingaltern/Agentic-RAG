@@ -131,6 +131,7 @@ def get_document(document_id: str, request: Request = None,
         "chunk_count": entry.chunk_count,
         "kb_id": entry.kb_id,
         "created_at": entry.created_at,
+        "archive_path": entry.archive_path,   # P0-2：归档原件路径（None=未归档/归档关闭）
     })
 
 

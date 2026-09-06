@@ -13,6 +13,7 @@ import hashlib
 import io
 import threading
 import queue
+from pathlib import Path
 from uuid import uuid4
 
 from app.core.config import SystemConfig
@@ -26,6 +27,7 @@ from app.core.errors import (
 )
 from app.core.interfaces import VectorEngine, VectorStore
 from app.core.logging import get_logger, set_trace_id
+from app.core.persist import atomic_write_bytes
 from app.services.documents_store import DocumentsStore
 from app.services.jobs_store import JobStore
 from app.adapters.chunker import split_chunks
@@ -148,6 +150,29 @@ class IngestionPipeline:
         """
         job = job or self.jobs.create(filename, kb_id=kb_id)
         return self._run(raw, filename, job, kb_id=kb_id, collection=collection)
+
+    def _archive_original(self, raw: bytes, filename: str, kb_id: str, document_id: str) -> str | None:
+        """P0-2：原始字节归档（尽力而为），目标 `{archive.dir}/{kb_id}/{document_id}{ext}`。
+
+        - ext 只取 `Path(filename).suffix`：恶意文件名（如 "../../x"）的 suffix 为空串，
+          路径各段均来自受约束字段（kb_id 正则约束 / document_id 为 uuid hex），无路径穿越面；
+        - 写失败 warning 后返回 None（archive_path 置空 = 未归档），不影响入库主流程。
+        """
+        cfg = self.config.ingestion.archive
+        if not cfg.enabled:
+            return None
+        suffix = Path(filename).suffix
+        target = Path(cfg.dir) / kb_id / f"{document_id}{suffix}"
+        try:
+            atomic_write_bytes(target, raw)
+            return str(target)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "原件归档失败（继续入库，archive_path 置空）",
+                extra={"extra_fields": {"document_id": document_id, "archive_dir": cfg.dir,
+                                        "error": str(exc)}},
+            )
+            return None
 
     def _run(self, raw: bytes, filename: str, job: Job,
              kb_id: str = "default", collection: str | None = None) -> Job:
@@ -274,7 +299,9 @@ class IngestionPipeline:
                 if len(vectors) != len(parents):
                     raise EmbeddingError(f"向量数（{len(vectors)}）与块数（{len(parents)}）不一致")
                 self.vector_store.add_chunks(zip(parents, vectors), collection=collection)
-                self.documents.register(doc, chunk_count=len(parents))
+                # P0-2：原件归档（幂等锁内成功路径；写失败仅告警不回滚入库，归档尽力而为）
+                archive_path = self._archive_original(raw, filename, kb_id, doc.document_id)
+                self.documents.register(doc, chunk_count=len(parents), archive_path=archive_path)
                 self.jobs.update(job.job_id, status="success",
                                  document_id=doc.document_id, chunk_count=len(parents))
                 logger.info(

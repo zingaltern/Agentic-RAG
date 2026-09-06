@@ -33,6 +33,7 @@ class DocEntry:
     chunk_count: int = 0
     kb_id: str = "default"           # V5.1：所属知识库（权限由库继承）
     created_at: float = 0.0
+    archive_path: str | None = None  # P0-2：归档原件路径（None=未归档；旧数据兼容缺省）
 
 
 class DocumentsStore:
@@ -59,6 +60,7 @@ class DocumentsStore:
                     kb_id=item.get("kb_id", "default"),
                     chunk_count=item.get("chunk_count", 0),
                     created_at=item.get("created_at", 0.0),
+                    archive_path=item.get("archive_path"),
                 )
                 self._docs[entry.document_id] = entry
             for kb_id, content_hash, doc_id in raw.get("by_hash", []):
@@ -115,7 +117,8 @@ class DocumentsStore:
 
     # -- CRUD ------------------------------------------------------------------
 
-    def register(self, doc: Document, chunk_count: int) -> DocEntry:
+    def register(self, doc: Document, chunk_count: int,
+                 archive_path: str | None = None) -> DocEntry:
         kb_id = doc.metadata.get("kb_id", "default")
         entry = DocEntry(
             document_id=doc.document_id,
@@ -124,6 +127,7 @@ class DocumentsStore:
             kb_id=kb_id,
             chunk_count=chunk_count,
             created_at=time.time(),
+            archive_path=archive_path,   # P0-2：归档原件路径（None=未归档/归档关闭）
         )
         with self._lock:
             self._docs[entry.document_id] = entry
@@ -164,19 +168,33 @@ class DocumentsStore:
                 if doc_id == document_id:
                     del self._by_hash[key]
         self._persist()
+        self._remove_archive(entry.archive_path)   # P0-2：级联删归档原件（被遗忘权）
         return True
 
     def delete_by_kb(self, kb_id: str) -> int:
         """C7：删除知识库时清理其文档索引与幂等表（防止残留导致重建同名库后幂等误判）。"""
         with self._lock:
             removed = [did for did, e in self._docs.items() if e.kb_id == kb_id]
+            archive_paths = [e.archive_path for e in self._docs.values() if e.kb_id == kb_id]
             for did in removed:
                 del self._docs[did]
             for key in [k for k in self._by_hash if k[0] == kb_id]:
                 del self._by_hash[key]
         if removed:
             self._persist()
+        for path in archive_paths:   # P0-2：级联删归档原件（best-effort）
+            self._remove_archive(path)
         return len(removed)
+
+    @staticmethod
+    def _remove_archive(archive_path: str | None) -> None:
+        """P0-2：删除归档原件（缺失/失败仅告警不抛，删除主流程不受影响）。"""
+        if not archive_path:
+            return
+        try:
+            Path(archive_path).unlink(missing_ok=True)
+        except OSError as exc:
+            logger.warning("归档原件删除失败（忽略）：%s（%s）", archive_path, exc)
 
     @staticmethod
     def _to_dict(entry: DocEntry) -> dict:
