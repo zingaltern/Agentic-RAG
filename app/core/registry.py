@@ -126,7 +126,13 @@ def wire(config: "SystemConfig", components: bool = True, *,
     deps.embedding = embedding
 
     if vector_store is None:
-        vector_store = _instantiate("vector_store", config.vector_store.provider, config.vector_store.model_dump())
+        # P1-3：索引 DNA 随集合创建写入 metadata（新建集合生效，存量集合不受影响——
+        # get_or_create 对已存在集合忽略 metadata 参数，恰好是"存量不覆盖"语义）
+        from app.core.index_dna import compute_index_dna
+
+        vector_store = _instantiate("vector_store", config.vector_store.provider,
+                                    {**config.vector_store.model_dump(),
+                                     "index_dna": compute_index_dna(config)["dna"]})
     deps.vector_store = vector_store
 
     if retriever is None:

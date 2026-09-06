@@ -21,13 +21,16 @@ from app.core.interfaces import VectorStore
 
 class ChromaStore(VectorStore):
     def __init__(self, persist_dir: str = "./data/chroma", collection: str = "kb",
-                 batch_size: int = 64, **_: object):
+                 batch_size: int = 64, index_dna: str | None = None, **_: object):
         try:
             self._client = chromadb.PersistentClient(path=persist_dir)
         except Exception as exc:
             raise EmbeddingError(f"Chroma 初始化失败（{persist_dir}）: {exc}") from exc
         self._default_collection = collection
         self._batch_size = batch_size
+        # P1-3：索引 DNA——新建集合时写入 metadata（get_or_create 对已存在集合忽略此参数，
+        # 恰好满足"存量集合不被覆盖"语义）；None = 未启用 dna（legacy 语义）
+        self._index_dna = index_dna
         # C2：语料变更纪元——add_chunks/delete_document 递增，供 BM25 缓存做变更检测
         self._epoch: dict[str, int] = {}
         self._epoch_lock = threading.Lock()
@@ -50,11 +53,25 @@ class ChromaStore(VectorStore):
         return f"rag_{collection}"
 
     def _coll(self, collection: str):
-        """取集合，不存在则按 cosine 空间创建。"""
+        """取集合，不存在则按 cosine 空间创建（新建时 metadata 携带索引 DNA，P1-3）。"""
+        metadata = {"hnsw:space": "cosine"}
+        if self._index_dna:
+            metadata["index_dna"] = self._index_dna
         return self._client.get_or_create_collection(
             name=self._chroma_name(collection),
-            metadata={"hnsw:space": "cosine"},
+            metadata=metadata,
         )
+
+    def get_collection_dna(self, collection: str = "kb") -> str | None:
+        """附加适配器方法（非接口契约）：返回集合构建时的索引 DNA（P1-3）。
+
+        None = 集合不存在或为存量 legacy（建集合时尚无 DNA 机制）。只读，不建集合。
+        """
+        try:
+            coll = self._client.get_collection(name=self._chroma_name(collection))
+        except Exception:  # noqa: BLE001  集合不存在 → 视为 legacy
+            return None
+        return (coll.metadata or {}).get("index_dna")
 
     @staticmethod
     def _clean_metadata(metadata: dict) -> dict:

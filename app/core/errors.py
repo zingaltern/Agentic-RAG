@@ -88,6 +88,17 @@ class QualityGateError(AppError):
     message = "文档解析质量不达标（疑似扫描件/损坏文件）"
 
 
+class IndexDnaMismatchError(AppError):
+    """索引 DNA 不一致（P1-3）：向量库构建配置与当前配置不符，检索结果不可信。
+
+    index_dna.mode=reject 时抛出（code 30006）；请执行
+    `python -m app.cli.rebuild --kb <id>` 重建索引。
+    """
+
+    code = 30006
+    message = "索引配置与向量库不一致，请执行重建（python -m app.cli.rebuild --kb <id>）"
+
+
 class ParseError(AppError):
     """解析失败（损坏文件/格式不支持）。"""
 

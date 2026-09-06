@@ -25,6 +25,7 @@ from app.core.errors import (
     ParseError,
     QualityGateError,
 )
+from app.core.index_dna import compute_index_dna
 from app.core.interfaces import VectorEngine, VectorStore
 from app.core.logging import get_logger, set_trace_id
 from app.core.persist import atomic_write_bytes
@@ -50,6 +51,9 @@ class IngestionPipeline:
         self.vector_store = vector_store
         self.jobs = jobs
         self.documents = documents
+        # P1-3：索引 DNA——入库时写入 chunk.metadata 与 DocEntry（装配期计算一次，
+        # /api/plugins/switch 热切换重建 deps 时随新 config 重算）
+        self._index_dna = compute_index_dna(config)["dna"]
         # C5（V5.1）：有界队列 + 固定 worker（替代无界 ThreadPoolExecutor），
         # 队列满时 submit 拒绝并标记 Job failed（43003），防止大批量上传内存无限堆积
         self._queue: queue.Queue = queue.Queue(maxsize=config.ingestion.max_queue_size)
@@ -183,6 +187,7 @@ class IngestionPipeline:
         try:
             doc = parse_file(io.BytesIO(raw), filename, config=self.config.ingestion)
             doc.metadata["kb_id"] = kb_id          # 入库时写 Chunk.metadata.kb_id（13.5）
+            doc.metadata["index_dna"] = self._index_dna   # P1-3：dna 随 chunker 继承进 chunk metadata
 
             # P0-1：解析质量门禁（parse 之后、脱敏之前；默认关闭=行为与现状完全一致）。
             # reject 模式在此抛 QualityGateError，由本函数尾部错误映射统一置 Job failed

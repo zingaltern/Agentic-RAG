@@ -34,6 +34,7 @@ class DocEntry:
     kb_id: str = "default"           # V5.1：所属知识库（权限由库继承）
     created_at: float = 0.0
     archive_path: str | None = None  # P0-2：归档原件路径（None=未归档；旧数据兼容缺省）
+    index_dna: str | None = None     # P1-3：入库时的索引 DNA（None=存量 legacy）
 
 
 class DocumentsStore:
@@ -61,6 +62,7 @@ class DocumentsStore:
                     chunk_count=item.get("chunk_count", 0),
                     created_at=item.get("created_at", 0.0),
                     archive_path=item.get("archive_path"),
+                    index_dna=item.get("index_dna"),
                 )
                 self._docs[entry.document_id] = entry
             for kb_id, content_hash, doc_id in raw.get("by_hash", []):
@@ -128,6 +130,7 @@ class DocumentsStore:
             chunk_count=chunk_count,
             created_at=time.time(),
             archive_path=archive_path,   # P0-2：归档原件路径（None=未归档/归档关闭）
+            index_dna=doc.metadata.get("index_dna"),   # P1-3：入库时的索引 DNA
         )
         with self._lock:
             self._docs[entry.document_id] = entry
@@ -195,6 +198,37 @@ class DocumentsStore:
             Path(archive_path).unlink(missing_ok=True)
         except OSError as exc:
             logger.warning("归档原件删除失败（忽略）：%s（%s）", archive_path, exc)
+
+    # -- P1-3：重建支持（仅动索引元数据，不触碰归档原件） ------------------------
+
+    def forget_kb_index(self, kb_id: str) -> tuple[list[DocEntry], list[tuple[str, str, str]]]:
+        """P1-3 rebuild：移除某库全部索引条目与幂等映射，**保留归档原件**。
+
+        返回 (被移除条目快照, 被移除的 (kb_id, content_hash, document_id) 映射)——
+        两者配合 restore_entries 可完整回滚；归档文件不删除——
+        重建成功后由调用方按快照清理旧归档。
+        """
+        with self._lock:
+            removed = [e for e in self._docs.values() if e.kb_id == kb_id]
+            for e in removed:
+                del self._docs[e.document_id]
+            removed_hash = [[kb, h, doc_id] for (kb, h), doc_id in self._by_hash.items()
+                            if kb == kb_id]
+            for key in [k for k in self._by_hash if k[0] == kb_id]:
+                del self._by_hash[key]
+        if removed:
+            self._persist()
+        return removed, [(kb, h, d) for kb, h, d in removed_hash]
+
+    def restore_entries(self, entries: list[DocEntry],
+                        by_hash_pairs: list[tuple[str, str, str]] | None = None) -> None:
+        """P1-3 rebuild 回滚：按快照恢复索引条目与幂等映射（不恢复已删向量，见 rebuild CLI）。"""
+        with self._lock:
+            for e in entries:
+                self._docs[e.document_id] = e
+            for kb, h, doc_id in (by_hash_pairs or []):
+                self._by_hash[(kb, h)] = doc_id
+        self._persist()
 
     @staticmethod
     def _to_dict(entry: DocEntry) -> dict:
