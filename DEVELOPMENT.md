@@ -648,8 +648,7 @@ POST /api/documents/upload (multipart file)
   队列满时 `submit` 拒绝，Job 标记 `failed`（error_code=`43003`「入库队列已满，请稍后重试」），
   路由层据此返回契约包（HTTP 200 + body code，不静默排队）。
 - 说明：**解析/向量化全程不占用 HTTP worker 阻塞线程**；/query 时才同步走各模块。
-- **S5 脱敏（V5.0）**：`ingestion.desensitize_enabled=true` 时，parse 之后、分块之前对全文执行
-  `app/services/desensitize.desensitize_text`（身份证/手机号/银行卡 → `***`），默认关闭。
+- **S5 脱敏（V5.0，P2-6 两级化重构）**：PII 处理两级设计——检测打标 + 按策略脱敏。`app/services/desensitize.detect_pii(text) -> [{type: id_card|phone|bank_card, count, sample_hash}]`（**不含原文**，sample_hash 为首个命中 sha256 前 8 位）；`desensitize_text(text, mode="mask", types=None)`：mask=`***`（现行为）/ replace=`[身份证]` 等占位符 / delete=移除。配置两级：全局 `ingestion.pii = {enabled: false, mode: mask, types: [...]}`；库级覆盖 `KbInfo.pii`（kb.json 兼容，创建/更新 API 接受），**生效优先级 kb.pii > ingestion.pii > 不处理**（kb.pii {enabled:false} 显式关闭全局）。命中文档 `metadata["pii_types"]` 记录类型集合（仅打标）。执行点与顺序不变（parse 之后、清洗之前）。**兼容**：旧 `desensitize_enabled` 与新 `pii.enabled` 同开时新逻辑优先 + warning，旧开关标记 deprecated（两个周期后移除）。
 - **幂等并发（V5.0）**：`_run` 内以 content_hash 为粒度加进程锁（`_lock_for`），幂等检查与写入原子化，杜绝 TOCTOU 双份入库。
 - **解析质量门禁（P0-1）**：`ingestion.quality_gate = {enabled: false, mode: reject|flag, min_text_chars: 30, max_garbled_ratio: 0.05, min_pages_with_text_ratio: 0.2}`（默认关闭=行为与现状完全一致）。启用时在 parse 之后、脱敏之前执行 5.1 的 `evaluate_parse_quality`：命中任一 flag 时 `mode=reject` → 抛 `QualityGateError`（30005，Job failed）；`mode=flag` → `doc.metadata["quality_flags"]` 打标 + warning 日志（含 flags 与 trace_id）继续入库；`mode` 非法值启动即抛 `SystemConfigError`（config field_validator）。
 - **索引 DNA（P1-3）**：`compute_index_dna(config)`（`app/core/index_dna.py` 纯函数）对 embedding.model_name/dimension/query_instruction + chunker 参数 + cleaner 配置做 sha256 规范化指纹（[:12]）；入库成功时写入 `chunk.metadata["index_dna"]` 与 `DocEntry.index_dna`，新 Chroma collection 建集合时 metadata 携带（存量无 dna 的 collection 视为 legacy）。任一相关配置变更即 dna 变化。
