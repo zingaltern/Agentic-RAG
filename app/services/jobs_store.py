@@ -44,7 +44,7 @@ class JobStore:
                         status=item.get("status", "pending"), document_id=item.get("document_id"),
                         chunk_count=item.get("chunk_count", 0),
                         error_code=item.get("error_code"), kb_id=item.get("kb_id"),
-                        created_at=item.get("created_at", 0.0), updated_at=item.get("updated_at", 0.0),
+                        created_at=item.get("created_at", 0.0), updated_at=item.get("updated_at", 0.0), stage_timings=item.get("stage_timings") or {},
                     )
                     self._jobs[job.job_id] = job
                     if job.status in ("pending", "running"):
@@ -69,7 +69,8 @@ class JobStore:
         return {"job_id": job.job_id, "filename": job.filename, "status": job.status,
                 "document_id": job.document_id, "chunk_count": job.chunk_count,
                 "error_code": job.error_code, "kb_id": job.kb_id,
-                "created_at": job.created_at, "updated_at": job.updated_at}
+                "created_at": job.created_at, "updated_at": job.updated_at,
+                "stage_timings": job.stage_timings}
 
     # -- CRUD -------------------------------------------------------------------
 

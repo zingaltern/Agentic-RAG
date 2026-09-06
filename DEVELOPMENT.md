@@ -851,6 +851,8 @@ V1.0 发布标准已达成：pytest 全绿（`-m "not integration"`，293 项，
 - `/api/health` 每种组件探测（嵌入模型已加载、Chroma 可连、LLM 通）。
 - Prometheus 指标：各接口延迟分位、检索耗时、`reflection_iterations_count`、幻觉率、入库队列深度。
 - 日志：JSON 结构化、`trace_id` 全链路贯穿。
+- **阶段级指标（P2-7）**：`/api/metrics`（admin 权限，Prometheus exposition 文本）——`rag_ingest_stage_seconds{stage}`（histogram：parse/clean/chunk/embed/index）、`rag_ingest_total{result}`（success/failed/duplicate/rejected，按 error_code 分 label）、`rag_ingest_queue_depth`（gauge）、`rag_query_total{result}`。零新依赖（core/metrics.py 自实现）。
+- **建议告警阈值（P2-7）**：入库失败率 >5%（5min 窗口）、队列深度持续 >80% 容量、/api/query 5xx 突增。无 Prometheus 部署时可人工 curl /api/metrics 观测。
 
 ### 10.3 环境部署文档
 - `README.md` 写明：准备 DeepSeek key、首启动自动下载模型、`make run`/`make test`、`/ui` 路径。

@@ -20,7 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.api import documents, health, jobs, kbs, plugins, query, users
+from app.api import documents, health, jobs, kbs, metrics, plugins, query, users
 from app.api.auth import TokenAuth, require_auth, router as auth_router
 from app.api.auth import _LoginGuard
 from app.api.utils import fail
@@ -177,6 +177,7 @@ def create_app(settings_path: str = DEFAULT_SETTINGS_PATH,
     app.include_router(plugins.router, dependencies=[Depends(require_auth)])
     app.include_router(kbs.router, dependencies=[Depends(require_auth)])
     app.include_router(users.router, dependencies=[Depends(require_auth)])
+    app.include_router(metrics.router, dependencies=[Depends(require_auth)])
     app.include_router(auth_router, dependencies=[Depends(require_auth)])
 
     app.mount("/ui", StaticFiles(directory=str(WEB_DIR), html=True), name="ui")
