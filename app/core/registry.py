@@ -222,7 +222,7 @@ def wire(config: "SystemConfig", components: bool = True, *,
     # C4：pipeline 可注入复用（热切换时避免重建 worker 线程/重载模型）
     deps.pipeline = pipeline if pipeline is not None else IngestionPipeline(
         config=config, embedding=embedding, vector_store=vector_store,
-        jobs=deps.jobs, documents=deps.documents,
+        jobs=deps.jobs, documents=deps.documents, kbs=deps.kbs,   # P2-6：解析库级 pii 策略
     )
     deps.orchestration = OrchestrationService(
         config=config, retriever=retriever, reranker=deps.reranker,
