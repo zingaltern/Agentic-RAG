@@ -60,6 +60,7 @@ make desktop        # Electron 桌面（内置拉起后端）【W8 落地】
 - **BGE 中文查询指令**：只对 `embed_query` 加 `query_instruction` 前缀（`embed_documents` 不加）。
 - **`filters`/`collection` 必须贯穿** Retriever→VectorStore（BM25 与向量双路过滤）与整个反思循环。
 - **分块计量（V5.2）**：`chunker.measure=auto` 用引擎真实分词器计数（中文≈1.0 字符/token；旧 `token_char_ratio=1.8` 会把 512 token 当 922 字符，父块被 BGE 上限截断）；父块内以 `\n` 连接保留行结构，不得 `"".join` 行粘连；改计量口径须重建存量库（DNA `pipeline_version` 检测）。
+- **清洗层（V5.2）**：`cleaner.paragraph_mode=auto` 修复"整篇=一段"导致 dedup/quality 失效；`normalize_punct` 默认关（不改写中文标点）；代码/JSON/CSV/表格类走 `cleaner.exempt_kinds` 豁免 quality/dedup；安全阀 `max_drop_ratio`/`dedup_max_paragraphs` 防整篇清空与 O(n²)。
 - 上传走异步 Job；`/api/query` 全同步并设有全局超时；单点号注意 `max_reflection_iterations`。
 - 默认嵌入模型 `BAAI/bge-small-zh-v1.5`（512 维），更换只改配置不改代码。
 - 第二阶段（第 13 章）增量坑位：

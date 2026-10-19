@@ -290,13 +290,19 @@ class IngestionPipeline:
                 cleaner = DefaultCleaner(
                     enabled=True,
                     normalize=self.config.cleaner.normalize,
+                    normalize_punct=self.config.cleaner.normalize_punct,
                     noise=self.config.cleaner.noise,
                     dedup=self.config.cleaner.dedup,
                     quality=self.config.cleaner.quality,
                     dedup_threshold=self.config.cleaner.dedup_threshold,
                     min_chunk_chars=self.config.cleaner.min_chunk_chars,
+                    paragraph_mode=self.config.cleaner.paragraph_mode,
+                    max_drop_ratio=self.config.cleaner.max_drop_ratio,
+                    dedup_max_paragraphs=self.config.cleaner.dedup_max_paragraphs,
+                    exempt_kinds=tuple(self.config.cleaner.exempt_kinds),
                 )
-                doc.text = cleaner.clean(doc.text)
+                # V5.2：传 kind 供按类型豁免（代码/JSON/CSV/表格类跳过 quality/dedup）
+                doc.text = cleaner.clean(doc.text, kind=doc.metadata.get("kind"))
                 reindex_tables(doc)   # P1-4：清洗删表后按 [TABLE] 顺序重对齐 tables JSON
                 if not doc.text.strip():
                     logger.warning("清洗后文档为空（%s）：全部段落被噪声/去重/质量过滤剔除，仍按空文档入库",

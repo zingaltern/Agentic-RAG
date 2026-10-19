@@ -35,15 +35,23 @@ def _chunker_fingerprint(chunker: Any) -> dict:
 
 
 def _cleaner_fingerprint(cleaner: Any) -> dict:
-    """影响正文内容的 cleaner 配置（enabled 关闭时参数无效应，但仍纳入指纹以便追溯）。"""
+    """影响正文内容的 cleaner 配置（enabled 关闭时参数无效应，但仍纳入指纹以便追溯）。
+
+    V5.2：新增 paragraph_mode/normalize_punct/安全阀/豁免类型（均改变清洗产物）。
+    """
     return {
         "enabled": cleaner.enabled,
         "normalize": cleaner.normalize,
+        "normalize_punct": getattr(cleaner, "normalize_punct", False),
         "noise": cleaner.noise,
         "dedup": cleaner.dedup,
         "quality": cleaner.quality,
         "dedup_threshold": cleaner.dedup_threshold,
         "min_chunk_chars": cleaner.min_chunk_chars,
+        "paragraph_mode": getattr(cleaner, "paragraph_mode", "auto"),
+        "max_drop_ratio": getattr(cleaner, "max_drop_ratio", 0.5),
+        "dedup_max_paragraphs": getattr(cleaner, "dedup_max_paragraphs", 5000),
+        "exempt_kinds": list(getattr(cleaner, "exempt_kinds", [])),
     }
 
 

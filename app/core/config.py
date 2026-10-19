@@ -339,12 +339,30 @@ class CleanerConfig(BaseModel):
     """数据清洗层（解析后、分块前，app/adapters/cleaner）。默认关闭：不改现有入库行为。"""
 
     enabled: bool = False
-    normalize: bool = True       # 全半角/空白/控制字符归一
+    normalize: bool = True       # 宽度归一（全角字母数字/表意空格/控制字符）
+    normalize_punct: bool = False  # V5.2：中文标点→半角 ASCII（。→. 等；默认关，避免改写中文排版）
     noise: bool = True           # 页码/页眉页脚/模板串去噪
     dedup: bool = True           # 段落级 simhash 近重复去重
     quality: bool = True         # 质量过滤（过短/无实词）
     dedup_threshold: float = 0.9
     min_chunk_chars: int = 20
+    # V5.2：分段与安全阀
+    paragraph_mode: str = "auto"   # auto=空行优先/无空行按行 | blank=仅空行 | line=按行
+    max_drop_ratio: float = 0.5    # 质量过滤删除占比超限则整体跳过（防把整篇当废话清空）
+    dedup_max_paragraphs: int = 5000  # 段落数超限跳过 dedup（防 O(n²) 卡死超大文档）
+    exempt_kinds: list[str] = [    # 代码/结构化类文档豁免 quality/dedup（防误杀）
+        "py", "js", "mjs", "cjs", "ts", "tsx", "jsx", "java", "go", "rs", "c", "h",
+        "cpp", "hpp", "cs", "rb", "php", "kt", "swift", "sh", "sql", "vue", "css", "scss",
+        "yaml", "yml", "toml", "ini", "xml", "json", "jsonl", "csv", "tsv", "xlsx", "xls",
+    ]
+
+    @field_validator("paragraph_mode")
+    @classmethod
+    def _paragraph_mode_valid(cls, value: str) -> str:
+        if value not in ("auto", "blank", "line"):
+            raise SystemConfigError(
+                f"cleaner.paragraph_mode 必须为 auto/blank/line，实际为 {value!r}")
+        return value
 
 
 class InjectionConfig(BaseModel):

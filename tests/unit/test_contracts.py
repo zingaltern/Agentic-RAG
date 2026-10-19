@@ -82,7 +82,8 @@ def test_detector_contract():
 
 
 def test_cleaner_contract():
-    assert _params(Cleaner.clean) == ["text"]
+    # V5.2：kind 为可选类型参数（按类型豁免），缺省 None 时行为与旧版一致
+    assert _params(Cleaner.clean) == ["text", "kind"]
 
 
 def test_llm_contract():

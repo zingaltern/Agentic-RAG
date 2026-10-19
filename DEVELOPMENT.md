@@ -512,6 +512,20 @@ ingestion:
     index_in_text: true          # 正文前置 [CODE_INDEX] 符号索引块
     max_symbols: 500             # 单文件符号数上限
 
+cleaner:                         # 数据清洗层（解析后、分块前；默认关不改变现有行为）
+  enabled: false
+  normalize: true                # 宽度归一（全角字母数字/表意空格/控制字符）
+  normalize_punct: false         # V5.2：中文标点→半角 ASCII（。→. 等；默认关）
+  noise: true                    # 页码/页眉页脚/模板串去噪
+  dedup: true                    # 段落级 simhash 近重复去重
+  quality: true                  # 质量过滤（过短/无实词）
+  dedup_threshold: 0.9
+  min_chunk_chars: 20
+  paragraph_mode: auto           # V5.2：auto=空行优先/无空行按行 | blank | line
+  max_drop_ratio: 0.5            # V5.2：质量过滤删除占比超限则整体跳过
+  dedup_max_paragraphs: 5000     # V5.2：段落数超限跳过 dedup（防 O(n²)）
+  # exempt_kinds：代码/结构化类（py/json/csv/…）豁免 quality/dedup（默认表见 config.py）
+
 documents:                       # V5.0：文档索引持久化（D1）
   persist_file: ./data/documents.json
 
@@ -699,6 +713,7 @@ POST /api/documents/upload (multipart file)
 - **幂等并发（V5.0）**：`_run` 内以 content_hash 为粒度加进程锁（`_lock_for`），幂等检查与写入原子化，杜绝 TOCTOU 双份入库。
 - **解析质量门禁（P0-1）**：`ingestion.quality_gate = {enabled: false, mode: reject|flag, min_text_chars: 30, max_garbled_ratio: 0.05, min_pages_with_text_ratio: 0.2}`（默认关闭=行为与现状完全一致）。启用时在 parse 之后、脱敏之前执行 5.1 的 `evaluate_parse_quality`：命中任一 flag 时 `mode=reject` → 抛 `QualityGateError`（30005，Job failed）；`mode=flag` → `doc.metadata["quality_flags"]` 打标 + warning 日志（含 flags 与 trace_id）继续入库；`mode` 非法值启动即抛 `SystemConfigError`（config field_validator）。
 - **空结果策略（V5.2）**：分块后 0 块（空文件/纯扫描件无文本层/清洗过滤殆尽）时，`ingestion.empty_result=reject`（默认）→ 抛 `EmptyDocumentError`（30007），Job failed 且日志含原因（parse 空文本 / cleaner 过滤），杜绝"成功入库 0 块"的静默失败；`allow` 维持旧行为（success + chunk_count=0 + warning）。
+- **数据清洗层（V5.2 增强，默认 `cleaner.enabled=false` 时全部无副作用）**：① 分段 `paragraph_mode=auto`——空行优先；整篇无空行（PDF/纯行文本）且 ≥3 行时按行细分，修复"整篇=一段"导致 dedup/quality 失效；`[TABLE]` 原子块始终独立成段；② 归一拆两档——宽度归一（全角字母数字/表意空格，默认开）与中文标点→半角（`normalize_punct`，默认关，避免改写中文排版）；③ 按类型豁免 `clean(kind=...)`——代码/JSON/CSV/表格类（`cleaner.exempt_kinds`）跳过 quality/dedup，防误杀；④ 安全阀——`max_drop_ratio`（质量过滤删除占比超限整体跳过 + warning）、`dedup_max_paragraphs`（超限跳过去重，防 O(n²)）。清洗产物变化由索引 DNA 检测。
 - **索引 DNA（P1-3）**：`compute_index_dna(config)`（`app/core/index_dna.py` 纯函数）对 embedding.model_name/dimension/query_instruction + chunker 参数（含 `measure`）+ cleaner 配置 + `pipeline_version`（V5.2=2，解析/分块行为版本）做 sha256 规范化指纹（[:12]）；入库成功时写入 `chunk.metadata["index_dna"]` 与 `DocEntry.index_dna`，新 Chroma collection 建集合时 metadata 携带（存量无 dna 的 collection 视为 legacy）。任一相关配置变更即 dna 变化。
 - **原件归档（P0-2）**：`ingestion.archive = {enabled: false, dir: "./data/archive"}`（默认关闭）。启用时入库成功路径（幂等锁内、duplicate 判定之后）将**原始字节**原子写至 `{dir}/{kb_id}/{document_id}{ext}`（ext 只取 `Path(filename).suffix`；`core/persist.atomic_write_bytes` tmp+rename 原子写）→ `DocEntry.archive_path` 随 register 登记；写失败仅 warning 不回滚入库。**级联清理**：删除文档/删库时同步删除归档原件（被遗忘权）。归档是"换 embedding 全量重建（rebuild CLI）"、解析器升级重解析与审计取证的前置。
 
@@ -1388,7 +1403,7 @@ V1.0 发布标准已达成：pytest 全绿（`-m "not integration"`，基线 599
 
 | 期 | 内容 | 状态 |
 |---|---|---|
-| P-A | 数据清洗层 `adapters/cleaner/`（归一/去噪/段落 simhash 去重/质量过滤），`cleaner.enabled=false` 默认关 | ✅ 已交付（15.5） |
+| P-A | 数据清洗层 `adapters/cleaner/`（归一/去噪/段落 simhash 去重/质量过滤；V5.2 增分段策略/标点开关/类型豁免/安全阀），`cleaner.enabled=false` 默认关 | ✅ 已交付（15.5；V5.2 增强） |
 | P-B | 解析增强：PDF 表格保真（find_tables → Markdown）、PARSERS 注册表、HTML/EML 格式、OCR 预留接口 | ✅ 已交付（15.5） |
 | P-C | 入库安全：提示注入扫描（默认审计标记、可选拦截）+ 内容审核层（内置可编辑词表，默认关） | ✅ 已交付（规格见 `docs/specs/数据清洗与格式_开发要点.md` P-C 与 15.5 决策） |
 | P-D | 真 Agentic：**结构化 Agent**（工具注册表 + 规划器，复用现有组件为工具），单独立项，需 `make eval` 基线验证不回退 | 📋 规划 |

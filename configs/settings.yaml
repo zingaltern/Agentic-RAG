@@ -135,12 +135,17 @@ ingestion:
 
 cleaner:
   enabled: false                  # 数据清洗层开关（解析后、分块前），默认关不改变现有行为
-  normalize: true
+  normalize: true                 # 宽度归一（全角字母数字/表意空格/控制字符）
+  normalize_punct: false          # V5.2：中文标点→半角 ASCII（。→. 等；默认关）
   noise: true
   dedup: true
   quality: true
   dedup_threshold: 0.9
   min_chunk_chars: 20
+  paragraph_mode: auto            # V5.2：auto=空行优先/无空行按行 | blank | line
+  max_drop_ratio: 0.5             # V5.2：质量过滤删除占比超限则整体跳过
+  dedup_max_paragraphs: 5000      # V5.2：段落数超限跳过 dedup（防 O(n²)）
+  # exempt_kinds：代码/结构化类文档豁免 quality/dedup（内置默认表，见 config.py）
 
 injection:                        # P-C：入库侧提示注入扫描（默认关，不改变现有入库行为）
   enabled: false

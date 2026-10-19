@@ -178,7 +178,7 @@ def test_docx_table_in_document_order():
 # -- cleaner 表格豁免 --------------------------------------------------------------------
 
 def test_cleaner_normalize_whitelist_and_quality_exempt():
-    cleaner = DefaultCleaner(enabled=True, normalize=True, noise=False,
+    cleaner = DefaultCleaner(enabled=True, normalize=True, normalize_punct=True, noise=False,
                              dedup=False, quality=True, min_chunk_chars=20)
     text = ("这是足够长的一段正文内容，包含很多实词和说明文字，确保质量过滤可以通过。\n"
             "[TABLE]\n| 字段　说明 |\n|---|---|\n| 年假　五天 |\n[/TABLE]")

@@ -122,10 +122,12 @@ class Cleaner(ABC):
 
     输入输出均为纯文本（Document.text），无副作用、无状态；
     由 DefaultCleaner 提供规则实现，可扩展第三方清洗器（如 OCR 前置预处理）。
+    V5.2：`kind` 为扩展名类型（如 code/json/csv），可选——实现可按类型豁免过滤；
+    缺省 None 时行为与旧版一致。
     """
 
     @abstractmethod
-    def clean(self, text: str) -> str: ...
+    def clean(self, text: str, kind: str | None = None) -> str: ...
 
 
 class HallucinationDetector(ABC):
