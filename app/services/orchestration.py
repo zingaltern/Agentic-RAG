@@ -471,6 +471,7 @@ class OrchestrationService:
                                             "trace_id": get_trace_id()}},
                 )
                 return Answer(text=FALLBACK_TEXT, iterations=iteration,
+                              contexts=self._full_contexts(top) if capture_contexts else [],
                               debug_trace=trace if debug else [],
                               code=21001, message="首轮未检索到相关依据",
                               elapsed_ms=round((time.perf_counter() - start) * 1000))
@@ -483,11 +484,13 @@ class OrchestrationService:
                     clarify = self._build_clarification(normalized, top)
                     if clarify:
                         return Answer(text=clarify, iterations=iteration,
+                                      contexts=self._full_contexts(top) if capture_contexts else [],
                                       debug_trace=trace if debug else [],
                                       code=ClarifyError.code,
                                       message="需要澄清：请明确您的意图",
                                       need_clarify=True, elapsed_ms=elapsed_ms)
                 return Answer(text=FALLBACK_TEXT, iterations=iteration,
+                              contexts=self._full_contexts(top) if capture_contexts else [],
                               debug_trace=trace if debug else [],
                               code=21001, message="反思达到上限仍未找到可靠答案",
                               elapsed_ms=elapsed_ms)

@@ -33,6 +33,8 @@ make eval           # 验证集评测（default/docs 自建 107 + complex 难度
 make review         # 外部基准测试集评测（CMRC 2018，独立 kb cmrc；reports/review-*.md；BASELINE=… 可对比）
 make perf           # 性能基准（规模点 50/150/300 文档：入库吞吐/延迟分位/Hit@5 曲线；BASELINE=… 可对比）
 python -m app.cli.doctor [--kb <id>] [--fix]   # 索引一致性巡检（幽灵文档/孤儿向量/幂等映射/归档缺失）
+make eval-quality   # 质量评测 smoke（IR；JUDGE=1 仅 judge，REAL=1 真实生成；D3 holdout 前只观测不阻断）
+make frontend-test  # 前端最小单测（node --test，零新增依赖）
 python -m app.cli.rageval --kb default   # 评测（按库；--all-kbs 全库；--in-process 进程内）
 # —— 第二阶段（第 13 章）——
 cd frontend && npm install && npm run dev     # Web 前端（vite，proxy → :8000）
@@ -71,7 +73,7 @@ make desktop        # Electron 桌面（内置拉起后端）【W8 落地】
 
 ## 测试要求
 
-- 完成任何功能后必须 `make test` 全绿（基线 599 项，2026-10-19 收集口径，含覆盖率门禁 ≥80%）；新模块补齐对应单测（对照 DEVELOPMENT 第 8.1 矩阵）。
+- 完成任何功能后必须 `make test` 全绿（收集口径以当前 `make test` 为准；历史基线 599 项；含覆盖率门禁 ≥80%）；新模块补齐对应单测（对照 DEVELOPMENT 第 8.1 矩阵）。
 - 评测回归（两层评测策略，DEVELOPMENT 8.4/8.5：验证集与测试集分离）：
   验证集 `tests/eval/qa_pairs/`（default/docs 自建 107 条 + complex 难度分层 90 条）经 `make eval` 出报告（13.1 度量协议，改检索/改写/检测等影响指标的功能必须前后对比；complex 按 variant 逐层看通过率，首轮基线存档后不回退）；
   外部测试集 `tests/review/`（首个 CMRC 2018，独立 kb `cmrc`，160 条）经 `make review` 出报告——量真实效果、看趋势 Δ，不设"全绿"门禁；

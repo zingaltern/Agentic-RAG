@@ -4,7 +4,15 @@
  * 设置页「连接外部后端」（localStorage external_base）优先覆盖（桌面经 userData IPC 持久化）。
  * V5.1：登录 Token（localStorage auth_token）持久化，API Key 机制已移除。
  */
-export const BASE_URL = import.meta.env.VITE_API_BASE || ''
+// 静态访问 import.meta.env.VITE_API_BASE，保证 Vite 构建期能替换；
+// try/catch 仅用于兼容 Node 单测环境（无 Vite 时 import.meta.env 不存在）。
+let baseUrl = ''
+try {
+  baseUrl = import.meta.env.VITE_API_BASE || ''
+} catch {
+  baseUrl = ''
+}
+export const BASE_URL = baseUrl
 
 export function getBaseUrl() {
   try {
