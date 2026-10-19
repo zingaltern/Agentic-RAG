@@ -52,12 +52,12 @@ def _build_document(filename: str, raw: bytes, text: str, metadata: dict) -> Doc
     )
 
 def _decode_text(raw: bytes) -> str:
-    """文本类解码回退链：utf-8-sig → gbk → utf-8(errors=replace)（16.1）。
+    """文本类解码回退链：utf-8-sig → gb18030 → utf-8(errors=replace)（16.1；V5.2 起 .md/.txt 也走此链）。
 
-    代码/JSON 常见 GBK 编码的中文注释；前两级严格解码失败才用替换字符兜底
-    （替换字符计入 garbled_ratio，由质量门禁暴露）。
+    代码/JSON 常见 GBK 编码的中文注释；gb18030 为 gbk 超集（覆盖 GBK/GB2312 全部字符），
+    前两级严格解码失败才用替换字符兜底（替换字符计入 garbled_ratio，由质量门禁暴露）。
     """
-    for encoding in ("utf-8-sig", "gbk"):
+    for encoding in ("utf-8-sig", "gb18030"):
         try:
             return raw.decode(encoding)
         except UnicodeDecodeError:

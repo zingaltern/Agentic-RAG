@@ -116,3 +116,49 @@ def test_paragraph_grouping():
     parents = [c for c in chunks if c.parent_id is None]
     assert len(parents) == 1
     assert "短段落0。" in parents[0].text and "短段落4。" in parents[0].text
+
+
+# -- V5.2：精确计量 / 换行保留 / 中英切句 -------------------------------------------
+
+
+def test_token_counter_exact_limit_and_newline_preserved():
+    """注入计数器（1 字符=1 token）时：父块硬保证 ≤ 目标；块内以换行保留行结构。"""
+    text = "\n".join(f"第{i}行内容。" + "补充说明" * 8 for i in range(40))
+    chunks = split_chunks(_doc(text), token_counter=len)
+    parents = [c for c in chunks if c.parent_id is None]
+    assert len(parents) >= 2
+    assert all(len(p.text) <= PARENT_TOKENS for p in parents), "精确口径下父块不得超过目标"
+    assert "\n" in parents[0].text, "父块必须保留行结构（不得行粘连）"
+
+
+def test_token_counter_used_over_ratio():
+    """计量确实生效：中文近 1 字符/token 时，精确口径父块数必须多于旧 ratio 口径。"""
+    text = "\n".join(f"第{i}段。" + "内容" * 60 for i in range(30))
+    by_ratio = [c for c in split_chunks(_doc(text)) if c.parent_id is None]
+    by_exact = [c for c in split_chunks(_doc(text), token_counter=len) if c.parent_id is None]
+    assert len(by_exact) > len(by_ratio)
+
+
+def test_token_counter_returns_none_falls_back_to_ratio():
+    """计数器返回 None（引擎不支持语义）→ 回退 ratio 估算，不抛错。"""
+    chunks = split_chunks(_doc("年假需提前三天申请。"), token_counter=lambda _t: None)
+    assert len(chunks) == 1
+
+
+def test_token_counter_raises_falls_back_to_ratio():
+    """计数器异常 → 回退 ratio 估算（不阻塞入库）。"""
+    def bad(_text: str) -> int:
+        raise RuntimeError("counter boom")
+
+    chunks = split_chunks(_doc("年假需提前三天申请。"), token_counter=bad)
+    assert len(chunks) == 1
+
+
+def test_english_sentence_split_no_decimal_break():
+    """英文断句：句末标点 + 空白才断（3.14/版本号不误切）。"""
+    from app.adapters.chunker import _split_sentences
+
+    parts = _split_sentences("Version 2.1 is stable. The value is 3.14 exactly! Next one?")
+    assert len(parts) == 3
+    assert any("3.14" in p for p in parts)
+    assert parts[0].strip().startswith("Version 2.1")

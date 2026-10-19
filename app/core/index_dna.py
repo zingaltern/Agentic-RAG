@@ -16,6 +16,10 @@ import hashlib
 import json
 from typing import Any
 
+# V5.2：解析/分块行为版本——行为变更（计量口径/行拼接/句子切分等）时递增，
+# 保证存量 collection 被 dna 检测为"需重建"，避免新旧块形态混在一处。
+PIPELINE_VERSION = 2
+
 
 def _chunker_fingerprint(chunker: Any) -> dict:
     """影响块形态的 chunker 参数（P1-4/P1-5：表格原子块/硬边界/上下文前缀均改变块形态）。"""
@@ -23,6 +27,7 @@ def _chunker_fingerprint(chunker: Any) -> dict:
         "parent_target_tokens": chunker.parent_target_tokens,
         "child_target_tokens": chunker.child_target_tokens,
         "token_char_ratio": chunker.token_char_ratio,
+        "measure": getattr(chunker, "measure", "auto"),   # V5.2：auto=精确计数（改变块形态）
         "table_aware": chunker.table_aware.model_dump(),
         "hard_boundary": chunker.hard_boundary.model_dump(),
         "context_prefix": chunker.context_prefix.model_dump(),
@@ -50,6 +55,7 @@ def compute_index_dna(config: Any) -> dict:
     """
     embedding = config.embedding
     fingerprint = {
+        "pipeline_version": PIPELINE_VERSION,
         "embedding_model": embedding.model_name,
         "embedding_dim": embedding.dimension,
         "embedding_query_instruction": embedding.query_instruction,

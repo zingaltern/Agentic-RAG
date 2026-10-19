@@ -158,7 +158,7 @@ A/B 库内容互不可见；`/api/kbs` 建库（name 自动 slug 化生成 kb_id
   - 进程内评测（Stub LLM）的 Faithfulness 恒 0%（Stub 答案与上下文不匹配属预期），真 DeepSeek 模式约 69%。
   - LLM 生成的规范化总结句对幻觉检测阈值达标率有限，阈值可在 `configs/settings.yaml` 调整。
   - **定位边界**：当前为检索侧自我修正循环（Iterative/Self-Correcting RAG），无规划器/工具调用（真 Agentic 见 `DEVELOPMENT.md` 第 15 章演进路线 P-D）。
-  - **格式边界**：支持 PDF / Word(.doc/.docx) / Excel(.xls/.xlsx) / PPT(.ppt/.pptx) / Markdown / 文本 / HTML / 邮件(.eml/.msg) / CSV 与 TSV / 代码与配置类（29 种扩展名，tree-sitter AST 符号提取） / JSON 与 JSONL（第 16 章）；其中 `.doc/.ppt` 需服务端安装 LibreOffice（未装时明确报错并给安装指引）；图片 OCR 仅预留接口未接引擎（15.2）。
+  - **格式边界**：支持 PDF / Word(.doc/.docx) / Excel(.xls/.xlsx) / PPT(.ppt/.pptx) / Markdown / 文本 / HTML / 邮件(.eml) / CSV 与 TSV / 代码与配置类（29 种扩展名，tree-sitter AST 符号提取） / JSON 与 JSONL（第 16 章）；其中 `.doc/.ppt` 需服务端安装 LibreOffice（未装时明确报错并给安装指引）；`.msg`（Outlook 二进制格式）暂不支持解析，会返回明确提示"请导出为 .eml"；图片 OCR 仅预留接口未接引擎（15.2）。
   - **安全现状**：解析安全✅（魔数校验+zip 炸弹防御）；提示注入✅（入库侧扫描，默认 audit 打标、可配 reject 40002；生成阶段另有 SYSTEM_PROMPT 约束）；内容审核✅（`adapters/content_moderation/`，词表可编辑，默认关，可 reject 40003）；PII 脱敏两级可配（`ingestion.pii` 全局 + `KbInfo.pii` 库级覆盖，默认关）（15.3）。
   - **数据清洗层**：`cleaner.enabled` 默认关；开启后入库前执行归一/去噪/段落去重/质量过滤（15.4 P-A）。
 

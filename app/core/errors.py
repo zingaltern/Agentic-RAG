@@ -106,6 +106,13 @@ class ParseError(AppError):
     message = "文档解析失败"
 
 
+class EmptyDocumentError(AppError):
+    """未提取到有效文本（V5.2）：解析/清洗后 0 块，empty_result=reject 时抛出（30007）。"""
+
+    code = 30007
+    message = "未提取到有效文本（空文档/扫描件无文本层/清洗后为空）"
+
+
 class ReflectionLimitError(AppError):
     """兜底：反思达到上限仍未找到可靠答案。"""
 

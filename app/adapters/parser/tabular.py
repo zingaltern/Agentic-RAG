@@ -14,8 +14,13 @@ from app.core.errors import ParseError
 _MAX_ROWS = 200_000        # 行数上限（超大表防内存膨胀，与 max_file_size_mb 配合）
 
 
+def _max_rows(config: object | None) -> int:
+    """V5.2：行数上限从 `ingestion.tabular_max_rows` 读取（与 xlsx/xls 统一口径）。"""
+    return int(getattr(config, "tabular_max_rows", _MAX_ROWS)) if config is not None else _MAX_ROWS
+
+
 def _parse_delimited(raw: bytes, config: object | None, delimiter: str) -> tuple[str, dict]:
-    """按给定分隔符解析表格文本；空文件 → 空文本（沿用既有语义）。"""
+    """按给定分隔符解析表格文本；空文件 → 空文本（沿用既有语义）；超行数上限截断 + 打标。"""
     text = _decode_text(raw)
     if not text.strip():
         return "", {"page": None, "author": None}
@@ -24,11 +29,12 @@ def _parse_delimited(raw: bytes, config: object | None, delimiter: str) -> tuple
     except csv.Error as exc:
         raise ParseError(f"表格文本解析失败（CSV/TSV）: {exc}") from exc
 
+    limit = _max_rows(config)
     lines: list[str] = []
     header: list[str] = []
     truncated = False
     for index, row in enumerate(rows):
-        if len(lines) >= _MAX_ROWS:
+        if len(lines) >= limit:
             truncated = True
             break
         cells = [cell.strip() for cell in row]
@@ -39,11 +45,13 @@ def _parse_delimited(raw: bytes, config: object | None, delimiter: str) -> tuple
             header = cells
         lines.append("\t".join(cells))
     if truncated:
-        lines.append(f"…（已截断，共 {_MAX_ROWS} 行）")
+        lines.append(f"…（已截断，共 {limit} 行）")
 
     meta: dict = {"page": None, "author": None}
     if header:
         meta["columns"] = header          # 首行作为列名登记（正文仍保持逐行制表符形态）
+    if truncated:
+        meta["truncated"] = True
     return "\n".join(lines), meta
 
 

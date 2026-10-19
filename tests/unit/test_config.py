@@ -167,3 +167,26 @@ def test_allowed_providers_table():
     """provider 白名单与 DEVELOPMENT 4.2 注释一致。"""
     assert ALLOWED_PROVIDERS["embedding"] == {"local_bge_v15", "bge_m3", "remote_api"}
     assert ALLOWED_PROVIDERS["llm"] == {"deepseek", "ollama", "openai_compat"}
+
+
+def test_chunker_measure_validator(tmp_path):
+    """V5.2：chunker.measure 非法值启动即抛 SystemConfigError。"""
+    path = _write_config(tmp_path, extra="chunker:\n  measure: fast\n")
+    with pytest.raises(SystemConfigError):
+        load_config(str(path))
+
+
+def test_empty_result_validator(tmp_path):
+    """V5.2：ingestion.empty_result 非法值启动即抛 SystemConfigError。"""
+    path = _write_config(tmp_path, extra="ingestion:\n  empty_result: skip\n")
+    with pytest.raises(SystemConfigError):
+        load_config(str(path))
+
+
+def test_v52_defaults_present():
+    """V5.2 新配置默认值：max_pages / tabular_max_rows / empty_result / measure。"""
+    cfg = load_config(DEFAULT_SETTINGS_PATH)
+    assert cfg.chunker.measure == "auto"
+    assert cfg.ingestion.empty_result == "reject"
+    assert cfg.ingestion.max_pages == 2000
+    assert cfg.ingestion.tabular_max_rows == 200_000

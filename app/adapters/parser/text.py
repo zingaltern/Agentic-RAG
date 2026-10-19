@@ -16,23 +16,35 @@ def _extract_markdown_sections(text: str) -> list[tuple[str, int]]:
     return sections
 
 def _parse_text(raw: bytes, config: object | None = None) -> tuple[str, dict]:
-    """txt/md：按 UTF-8 解码，非 UTF-8 字节以替换字符归一（5.1）。"""
-    try:
-        text = raw.decode("utf-8")
-    except UnicodeDecodeError:
-        text = raw.decode("utf-8", errors="replace")
+    """txt/md：走统一解码回退链（utf-8-sig → gb18030 → replace，V5.2 修复 GBK 老文档乱码）。"""
+    from app.adapters.parser.common import _decode_text
+
+    text = _decode_text(raw)
     meta: dict = {"page": None, "author": None}
     sections = _extract_markdown_sections(text)
     if sections:
         meta["sections"] = sections        # T5：章节标题（title, 行号）
     return text, meta
 
+
+def _parse_msg(raw: bytes, config: object | None = None) -> tuple[str, dict]:
+    """Outlook .msg（OLE2 复合文档）：当前版本不支持解析，给出明确指引（V5.2）。
+
+    白名单保留 .msg 的目的是给出比"格式不支持（40001）"更明确的错误与导出建议，
+    而非静默失败或误报"二进制冒充文本"。
+    """
+    raise ParseError(
+        "Outlook .msg 为 OLE2 二进制格式，当前版本不支持解析；"
+        "请在 Outlook 中「另存为 → Internet 邮件(.eml)」后上传")
+
 def _parse_html(raw: bytes, config: object | None = None) -> tuple[str, dict]:
     """HTML：标准库 html.parser 提取正文文本（去 script/style/注释），零新增依赖。"""
     from html.parser import HTMLParser
 
     class _TextExtractor(HTMLParser):
-        SKIP_TAGS = {"script", "style", "noscript", "template"}
+        # V5.2：加入导航/页脚/表单等噪声容器（正文抽取更干净；内容不变的小改）
+        SKIP_TAGS = {"script", "style", "noscript", "template",
+                     "nav", "footer", "header", "aside", "form", "button", "svg", "iframe"}
 
         def __init__(self):
             super().__init__()

@@ -68,6 +68,20 @@ def test_dna_stable_and_sensitive():
     assert compute_index_dna(changed3)["dna"] != a["dna"], "改清洗配置 dna 必须变化"
 
 
+def test_dna_includes_pipeline_version_and_measure():
+    """V5.2：DNA 纳入 pipeline_version（行为版本）与 chunker.measure（计量口径）。"""
+    from app.core.index_dna import PIPELINE_VERSION
+
+    config = load_config()
+    base = compute_index_dna(config)
+    assert base["pipeline_version"] == PIPELINE_VERSION
+    assert base["chunker"]["measure"] == "auto"
+
+    changed = load_config()
+    changed.chunker.measure = "ratio"
+    assert compute_index_dna(changed)["dna"] != base["dna"], "改计量口径 dna 必须变化"
+
+
 # -- collection metadata 与 legacy 容忍 -------------------------------------------
 
 def test_new_collection_stamps_dna(deps):

@@ -23,6 +23,14 @@ class VectorEngine(ABC):
     def embed_query(self, text: str) -> list[float]:
         """向量化查询（嵌入模型如需要，需自动加查询指令前缀，见 5.3）。"""
 
+    def count_tokens(self, text: str) -> int | None:
+        """【可选能力 V5.2】精确 token 计数（分块目标测量用）。
+
+        默认 None=不支持 → 分块回退 token_char_ratio 估算；实现可覆写为真实分词器计数。
+        返回 None 或抛异常时调用方（chunker）一律回退估算，不阻塞入库。
+        """
+        return None
+
 
 class VectorStore(ABC):
     """向量库（3.2）。"""

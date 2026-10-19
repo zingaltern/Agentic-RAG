@@ -22,6 +22,7 @@ from app.core.domain import Job
 from app.core.errors import (
     ContentModerationError,
     EmbeddingError,
+    EmptyDocumentError,
     InjectionError,
     ParseError,
     QualityGateError,
@@ -359,6 +360,13 @@ class IngestionPipeline:
                     )
                     return self.jobs.get(job.job_id) or job
 
+                # V5.2：分块 token 计量——measure=auto 时优先用引擎真实分词器（精确），
+                # 引擎不支持（默认实现返回 None）或异常由 chunker 内部自动回退 ratio 估算。
+                counter = None
+                if self.config.chunker.measure == "auto":
+                    candidate = getattr(self.embedding, "count_tokens", None)
+                    if callable(candidate):
+                        counter = candidate
                 chunks = split_chunks(
                     doc,
                     parent_target_tokens=self.config.chunker.parent_target_tokens,
@@ -367,9 +375,21 @@ class IngestionPipeline:
                     table_aware=self.config.chunker.table_aware.model_dump(),
                     hard_boundary=self.config.chunker.hard_boundary.model_dump(),
                     context_prefix=self.config.chunker.context_prefix.model_dump(),
+                    token_counter=counter,
                 )
                 _stage("chunk")   # P2-7
                 parents = [c for c in chunks if c.parent_id is None]
+                # V5.2：空结果策略——0 块默认拒收（30007），杜绝"成功入库 0 块"的静默失败
+                if not parents:
+                    if self.config.ingestion.empty_result == "reject":
+                        raise EmptyDocumentError(data={
+                            "filename": filename,
+                            "reason": "解析/清洗后无有效文本（空文件/扫描件无文本层/全部段落被过滤）",
+                        })
+                    logger.warning(
+                        "分块后 0 块（empty_result=allow，按旧行为入库）",
+                        extra={"extra_fields": {"job_id": job.job_id, "filename": filename}},
+                    )
                 batch_size = self.config.ingestion.embed_batch_size
                 vectors: list[list[float]] = []
                 for start in range(0, len(parents), batch_size):
@@ -414,6 +434,12 @@ class IngestionPipeline:
             logger.warning("入库失败：解析质量不达标（疑似扫描件/损坏文件）",
                            extra={"extra_fields": {"job_id": job.job_id, "error_code": exc.code,
                                                    "quality_flags": (exc.data or {}).get("quality_flags")}})
+        except EmptyDocumentError as exc:
+            # V5.2：0 块拒收（30007；空文件/扫描件/清洗过滤殆尽）
+            self.jobs.update(job.job_id, status="failed", error_code=str(exc.code))
+            logger.warning("入库失败：未提取到有效文本",
+                           extra={"extra_fields": {"job_id": job.job_id, "error_code": exc.code,
+                                                   "detail": exc.data}})
         except Exception as exc:
             self.jobs.update(job.job_id, status="failed", error_code="50001")
             logger.exception("入库失败：未知错误", extra={"extra_fields": {"job_id": job.job_id}})
@@ -421,7 +447,7 @@ class IngestionPipeline:
             final = self.jobs.get(job.job_id) or job
             if final.status == "failed":
                 code = final.error_code or "50001"
-                result = "rejected" if code in ("30005", "40002", "40003") else "failed"
+                result = "rejected" if code in ("30005", "30007", "40002", "40003") else "failed"
                 metrics.inc_counter("rag_ingest_total",
                                     {"result": result, "error_code": code},
                                     help_text="入库结果计数（P2-7）")

@@ -25,7 +25,8 @@ embedding:
 chunker:                           # 父子分块（DEVELOPMENT.md 5.2）
   parent_target_tokens: 512
   child_target_tokens: 128
-  token_char_ratio: 1.8
+  token_char_ratio: 1.8            # 仅 ratio 口径/回退使用（中文约 1.0 字符/token）
+  measure: auto                    # V5.2：auto=优先引擎 count_tokens（精确）；ratio=强制估算
   table_aware:                     # P1-4：表格原子块（默认关；[TABLE] 行按普通文本聚合）
     enabled: false
     max_rows_per_chunk: 30         # 超限大表按行组切，每组行数上限（强制带表头）
@@ -103,6 +104,9 @@ ingestion:
   max_queue_size: 64              # C5（V5.1）：入库队列上限，满时返回 43003
   zip_max_total_mb: 200           # S2（V5.1）：zip 解压总大小上限（防炸弹）
   zip_max_entries: 1000           # S2：zip 条目数上限
+  max_pages: 2000                 # V5.2：单文档解析页数上限（PDF 超限截断 + 打标）
+  tabular_max_rows: 200000        # V5.2：表格类（xlsx/xls/csv/tsv）行数上限（超限截断 + 打标）
+  empty_result: reject            # V5.2：0 块拒收（30007）| allow=旧行为（success + 0 块）
   quality_gate:                   # P0-1：解析质量门禁（默认关，不改变现有入库行为）
     enabled: false
     mode: reject                  # reject=拒收（Job failed 30005）；flag=仅打标 metadata 继续入库

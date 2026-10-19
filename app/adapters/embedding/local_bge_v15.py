@@ -84,3 +84,20 @@ class LocalBGEV15Embedding(LocalModelAdapter, VectorEngine):
             raise
         except Exception as exc:
             raise EmbeddingError(f"查询向量化失败: {exc}") from exc
+
+    # -- 可选能力（V5.2：分块精确计量） ----------------------------------------
+
+    def count_tokens(self, text: str) -> int | None:
+        """真实分词器 token 计数（不含 special tokens）；不可用/异常返回 None（调用方回退估算）。"""
+        if not text:
+            return 0
+        try:
+            self._ensure_model()
+            tokenizer = getattr(self._model, "tokenizer", None)
+            if tokenizer is None:
+                return None
+            encoded = tokenizer(text, add_special_tokens=False)
+            ids = encoded.get("input_ids") if hasattr(encoded, "get") else None
+            return len(ids) if ids is not None else None
+        except Exception:  # noqa: BLE001 计量失败不阻塞入库（chunker 回退 ratio）
+            return None

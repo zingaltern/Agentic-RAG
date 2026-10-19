@@ -209,6 +209,7 @@ class DetectionResult:
 | 30004 | 重排打分失败（bge_reranker，语义区别于向量化失败 30002） |
 | 30005 | 文档解析质量不达标（疑似扫描件/损坏文件；P0-1 质量门禁 `ingestion.quality_gate.mode=reject` 命中时） |
 | 30006 | 索引配置与向量库不一致（P1-3 `index_dna.mode=reject` 命中；请执行 `python -m app.cli.rebuild --kb <id>` 重建） |
+| 30007 | 未提取到有效文本（V5.2：解析/清洗后 0 块且 `ingestion.empty_result=reject`；空文件/纯图片扫描件/全部段落被过滤） |
 | 21001 | 兜底：反思达到上限仍未找到可靠答案 |
 | 21002 | 全局请求超时 |
 | 43001 | 系统繁忙（并发查询信号量耗尽/超时，V5.1） |
@@ -248,6 +249,14 @@ class VectorEngine(ABC):
     @abstractmethod
     def embed_query(self, text: str) -> list[float]:
         """向量化查询（嵌入模型如需要，需自动加查询指令前缀，见 5.3）。"""
+
+    def count_tokens(self, text: str) -> int | None:
+        """【可选能力，V5.2】精确 token 计数（分块目标测量用）。
+
+        默认返回 None（不支持）→ 分块回退 token_char_ratio 估算；
+        本地 BGE 实现覆写为真实分词器计数。新增引擎实现可选择性覆写，不破坏契约。
+        """
+        return None
 ```
 
 **对齐硬约束**：`embed_documents` 与 `embed_query` 输出向量维度必须恒等于 `dimension`，且所有块同维。启动时若配置维度与模型实际维度不符 → 启动即报错 `SystemConfigError`。
@@ -422,7 +431,8 @@ embedding:
 chunker:                     # 父子分块（5.2）
   parent_target_tokens: 512
   child_target_tokens: 128
-  token_char_ratio: 1.8
+  token_char_ratio: 1.8      # 仅 ratio/回退口径使用（中文约 1.0 字符/token，见 5.2）
+  measure: auto              # auto=优先引擎 count_tokens（精确）；ratio=强制估算（旧口径）
 
 vector_store:
   provider: chroma
@@ -486,6 +496,9 @@ ingestion:
   max_queue_size: 64             # V5.1：入库队列上限，满时返回 43003
   zip_max_total_mb: 200          # V5.1：zip 系格式解压总大小上限（防炸弹 S2）
   zip_max_entries: 1000          # V5.1：zip 条目数上限（防炸弹 S2）
+  max_pages: 2000                # V5.2：单文档解析页数上限（PDF 超限截断 + 打标，防超大 PDF 拖垮解析）
+  empty_result: reject           # V5.2：解析/清洗后无有效文本（0 块）→ reject=拒收（30007）| allow=旧行为
+  tabular_max_rows: 200000       # V5.2：表格类（xlsx/xls/csv/tsv）行数上限（超限截断 + 打标）
   # desensitize_enabled: false   # S5：脱敏开关（config.py 默认 false，settings.yaml 未显式配置）
   json_flatten:                  # 16.1：JSON/JSONL 路径扁平化上限（防超深/超大结构爆炸）
     max_items: 5000              # 单文档最多产出多少行（超出截断 + 尾部标记）
@@ -519,22 +532,34 @@ logging:
 ## 第 5 章 详细实现设计
 
 ### 5.1 文档解析 `parse_file`
-- 格式：`.pdf/.docx/.xlsx/.pptx/.md/.txt` + `.html/.htm/.eml/.msg`（P-B）+ 代码/JSON/CSV/旧版 Office（第 16 章）；全量白名单见 `ingestion.allowed_extensions`（大小 <= `max_file_size_mb`）。
+- 格式：`.pdf/.docx/.xlsx/.pptx/.md/.txt` + `.html/.htm/.eml`（P-B）+ 代码/JSON/CSV/旧版 Office（第 16 章）+ `.msg`（V5.2：仅作明确报错提示，见下）；全量白名单见 `ingestion.allowed_extensions`（大小 <= `max_file_size_mb`）。
 - 统一产出 `Document`：`text` 归一为 UTF-8；元数据写入 `metadata`：`source`（原文件名）、`page`（PDF/Word 页码）、`kind`（扩展名）。
 - PDF → 用 `pymupdf`（fitz）逐页提取；Word → `python-docx` 段落级；Excel → 每 sheet 每行判为一段文本，`metadata` 记录 `sheet` 与行号；PPT → `python-pptx`。
 - 失败（损坏/不支持）→  抛 `ParseError（code 30003），Job 标记 failed。
 - **表格一等公民（P1-4）**：PDF（`find_tables`）与 Word（按 body 文档流**保序**，修复旧实现表格追加在段落末尾的问题）解析时，表格以 `[TABLE]\n{markdown}\n[/TABLE]` 原子块进入正文，并登记 `metadata["tables"] = [{index, header, rows, page}]`（顺序对应正文第 N 个 [TABLE] 块）；xlsx 整文档即表，v1 不动。清洗后执行 `reindex_tables(doc)` 重对齐（cleaner 删表则丢弃对应 JSON + warning）。cleaner 对 [TABLE] 块内容豁免（normalize 白名单 + dedup/quality 跳过含表格段落）。
 - **解析器降级链（P3-8，`ingestion.parser_routing`，默认空=现状）**：`ParserSpec(name, extensions, fn, priority)` 注册表（`PARSER_REGISTRY`，旧 `PARSERS` dict 由注册表展开保留兼容）；路由 `{"pdf": {"chain": ["pymupdf", "ocr_dummy"]}}`（key 为不带点的扩展名，链按序尝试）。链内逐实现尝试：抛错或空文本（复用 P0-1 `evaluate_parse_quality` 的 `min_text_chars`）→ warning（含 parser 名）降级下一实现；链尽失败按 P0-1 mode 处理（reject → 30005，否则 30003）。成功后 `metadata["parser"]` / `metadata["parser_version"]` 溯源；**空路由配置走旧单实现路径，零差异**。新格式接入 SOP（四动作，其余阶段零改动）：①实现函数（签名 `fn(raw: bytes, config: IngestionConfig | None = None) -> tuple[str, dict]`） → ②注册 ParserSpec → ③`ingestion.allowed_extensions` 加扩展名 → ④`parser_routing` 加链一行 → 补单测。模块划分见 16.0。`ocr_dummy` 占位 spec 已注册（保持抛错，不入默认链，用于验证挂载机制）。
 - **解析探针（P0-1）**：`_parse_pdf` 逐页统计写入 `metadata["text_stats"] = {total_chars, page_count, pages_with_text}`（`pages_with_text`=有实质文本的页数）；`garbled_ratio`（U+FFFD 字符数 / 文本总字符数，无字符时为 0.0）在 `_build_document` 对全部解析器统一计算——txt/html/eml 的 `errors="replace"` 解码同样产生 U+FFFD——并入 `metadata["text_stats"]`（非 PDF 解析器按单页文档补齐该结构）。`text_stats` 仅作解析事实探针，不入 Chroma chunk metadata（`chroma_store._clean_metadata` 剔除 Chroma 无法存储的 dict 等非标量值）。
+- **解析健壮性（V5.2，复杂/危险文档兜底）**：
+  - **加密 PDF**：pymupdf 检出 `needs_pass/is_encrypted` → 明确 `ParseError`（"PDF 已加密，请解除口令后上传"），不误报"文件损坏"；
+  - **文本回退**：dict 抽取为空但 `get_text("text")` 有内容（异常排版 PDF）→ 回退纯文本抽取，不丢页；
+  - **页数上限**：`ingestion.max_pages`（默认 2000）截断 + `text_stats["truncated_pages"]=true` 打标 + warning；
+  - **文本解码链**：`.md/.txt` 与代码/JSON 统一走 `_decode_text`（utf-8-sig → gb18030 → replace），GBK/GB18030 老文档不再整篇乱码；
+  - **HTML 去噪标签**：解析跳过 `script/style/noscript/template/nav/footer/header/aside/form/button/svg/iframe`；
+  - **`.msg` 明确不支持**：OLE2 检出后抛 `ParseError` 并提示"请导出为 `.eml`"（不静默、不误报二进制伪造）；`.eml` 正常支持（15.2 口径同步）；
+  - **OOXML 实体膨胀防御**：`docx/xlsx/pptx` 预检各 XML 部件含 `<!ENTITY` → 直接拒绝（防 billion laughs/XXE）；
+  - **表格类行数上限**：`ingestion.tabular_max_rows`（默认 200000）对 xlsx/xls/csv/tsv 统一生效，超限截断 + 尾部标记 + `metadata["truncated"]=true`。
 - **质量检查纯函数（P0-1，P3-8 降级链复用）**：parser 模块级 `evaluate_parse_quality(text, text_stats, *, min_text_chars, max_garbled_ratio, min_pages_with_text_ratio) -> list[str]`，返回 flag 列表（空=通过）：`empty_text`（去首尾空白后文本少于 `min_text_chars`，含扫描件抽出空文本）/ `high_garbled`（`garbled_ratio` 超过 `max_garbled_ratio`）/ `few_pages_with_text`（仅 `page_count>1` 的多页 PDF 生效：`pages_with_text/page_count` 低于 `min_pages_with_text_ratio`）。
 
 ### 5.2 智能分块 `split_chunks`（父子块）
-- 参数：配置 `chunker.parent_target_tokens=512`、`child_target_tokens=128`、`token_char_ratio=1.8`（中文近数 `len(text)/1.8` 估算 token）。
+- 参数：`chunker.parent_target_tokens=512`、`child_target_tokens=128`、`measure=auto|ratio`、`token_char_ratio=1.8`（仅 ratio 口径与回退使用）。
+- **token 计量（V5.2 关键修复）**：`measure=auto` 时优先使用引擎可选能力 `count_tokens`（BGE 真实分词器；中文实测 ≈1.0 字符/token）——旧 ratio=1.8 口径把 512 token 当 922 字符，父块被模型 512 上限静默截断（实测约 39% 文本）；引擎不支持/异常/返回 None 时自动回退 ratio 估算，`measure=ratio` 可强制旧口径（行为可回退）。
 - 规则：
-  1. 以自然段落/章节为切割单元；段落超目标则继续按 `。！？；` 句子切；禁止在词中断。
-  2. 每产出**父块**（≤ 512 tokens）必要完整；父块再按 `child_target_tokens` 切**子块**（≤128 tokens）。
+  1. 以自然段落/行聚合为父块，块内以 `\n` 连接（保留行结构；V5.2 修复 `"".join` 行粘连）；段落超目标按 `。！？；` 与英文 `.?!`（空白后断句，防小数/版本号误切）继续切句；禁止在词中断。
+  2. 每产出**父块**（按实际计量口径 ≤ parent_target_tokens，硬保证）；父块再按 `child_target_tokens` 切**子块**（≤ child 目标）。
   3. 父块 `parent_id=None`；子块 `parent_id=父块chunk_id`。
-  4. `chunk_id = sha256(document_id + str(order))[:16]`。
+  4. 父块本身 ≤ 子块目标时不再产出重复子块。
+  5. `chunk_id = sha256(document_id + ":" + str(order))[:16]`。
+- 计量口径变化会改变块形态 → 索引 DNA 含 `pipeline_version`（V5.2=2）；存量库需 `python -m app.cli.rebuild --kb <id>` 重建对齐（13.5）。
 - 检索命中子块时，编排层回溯其父块全文进入 LLM 上下文。
 - **标题硬边界 + 上下文前缀 + 页码溯源（P1-5，`chunker.hard_boundary`/`chunker.context_prefix`，默认关）**：① 硬边界——父块聚合遇 section 归属变更强制断开（标题行为新块首行），同 section 连续内容不误断；② 页码——PDF 解析记录 `metadata["page_spans"]=[[start_line, end_line, page], ...]`（pptx 以 slide 号为页码），chunk 按段落起始行查表写 `metadata["page"]`（查不到不写）；③ 前缀——`chunk.text = template.format(doc_title, section) [+ " (p页码)"] + "\n" + 原文`（模板默认 `{doc_title} > {section}`，无 section 降级为仅 doc_title；前缀不计入切块 token 目标、计入 embedding 输入，超 64 token 截断 + warning；父子块一致加前缀）。索引 DNA 指纹纳入三组配置（变更即需重建）。
 - **表格原子块（P1-4，`chunker.table_aware`，默认关）**：`[TABLE]...[/TABLE]` 预合并为原子单元，不参与句子聚合、不与正文粘块——整表 ≤ 父块目标 → 独立父块（`metadata["chunk_type"]="table"`、`metadata["table_json"]`（对应 tables[index] 的 JSON，超 `json_max_bytes`(4096B) 截断+warning），不产子块；超限 → 按「语义行组」切（每组 ≤ `max_rows_per_chunk`(30) 行且强制携带完整表头，`metadata["table_part"]="2/3"`）。开启后 chunk metadata 剔除文档级探针键（`text_stats`/`tables`/`sections`）。
@@ -673,7 +698,8 @@ POST /api/documents/upload (multipart file)
 - **S5 脱敏（V5.0，P2-6 两级化重构）**：PII 处理两级设计——检测打标 + 按策略脱敏。`app/services/desensitize.detect_pii(text) -> [{type: id_card|phone|bank_card, count, sample_hash}]`（**不含原文**，sample_hash 为首个命中 sha256 前 8 位）；`desensitize_text(text, mode="mask", types=None)`：mask=`***`（现行为）/ replace=`[身份证]` 等占位符 / delete=移除。配置两级：全局 `ingestion.pii = {enabled: false, mode: mask, types: [...]}`；库级覆盖 `KbInfo.pii`（kb.json 兼容，创建/更新 API 接受），**生效优先级 kb.pii > ingestion.pii > 不处理**（kb.pii {enabled:false} 显式关闭全局）。命中文档 `metadata["pii_types"]` 记录类型集合（仅打标）。执行点与顺序不变（parse 之后、清洗之前）。**兼容**：旧 `desensitize_enabled` 与新 `pii.enabled` 同开时新逻辑优先 + warning，旧开关标记 deprecated（两个周期后移除）。
 - **幂等并发（V5.0）**：`_run` 内以 content_hash 为粒度加进程锁（`_lock_for`），幂等检查与写入原子化，杜绝 TOCTOU 双份入库。
 - **解析质量门禁（P0-1）**：`ingestion.quality_gate = {enabled: false, mode: reject|flag, min_text_chars: 30, max_garbled_ratio: 0.05, min_pages_with_text_ratio: 0.2}`（默认关闭=行为与现状完全一致）。启用时在 parse 之后、脱敏之前执行 5.1 的 `evaluate_parse_quality`：命中任一 flag 时 `mode=reject` → 抛 `QualityGateError`（30005，Job failed）；`mode=flag` → `doc.metadata["quality_flags"]` 打标 + warning 日志（含 flags 与 trace_id）继续入库；`mode` 非法值启动即抛 `SystemConfigError`（config field_validator）。
-- **索引 DNA（P1-3）**：`compute_index_dna(config)`（`app/core/index_dna.py` 纯函数）对 embedding.model_name/dimension/query_instruction + chunker 参数 + cleaner 配置做 sha256 规范化指纹（[:12]）；入库成功时写入 `chunk.metadata["index_dna"]` 与 `DocEntry.index_dna`，新 Chroma collection 建集合时 metadata 携带（存量无 dna 的 collection 视为 legacy）。任一相关配置变更即 dna 变化。
+- **空结果策略（V5.2）**：分块后 0 块（空文件/纯扫描件无文本层/清洗过滤殆尽）时，`ingestion.empty_result=reject`（默认）→ 抛 `EmptyDocumentError`（30007），Job failed 且日志含原因（parse 空文本 / cleaner 过滤），杜绝"成功入库 0 块"的静默失败；`allow` 维持旧行为（success + chunk_count=0 + warning）。
+- **索引 DNA（P1-3）**：`compute_index_dna(config)`（`app/core/index_dna.py` 纯函数）对 embedding.model_name/dimension/query_instruction + chunker 参数（含 `measure`）+ cleaner 配置 + `pipeline_version`（V5.2=2，解析/分块行为版本）做 sha256 规范化指纹（[:12]）；入库成功时写入 `chunk.metadata["index_dna"]` 与 `DocEntry.index_dna`，新 Chroma collection 建集合时 metadata 携带（存量无 dna 的 collection 视为 legacy）。任一相关配置变更即 dna 变化。
 - **原件归档（P0-2）**：`ingestion.archive = {enabled: false, dir: "./data/archive"}`（默认关闭）。启用时入库成功路径（幂等锁内、duplicate 判定之后）将**原始字节**原子写至 `{dir}/{kb_id}/{document_id}{ext}`（ext 只取 `Path(filename).suffix`；`core/persist.atomic_write_bytes` tmp+rename 原子写）→ `DocEntry.archive_path` 随 register 登记；写失败仅 warning 不回滚入库。**级联清理**：删除文档/删库时同步删除归档原件（被遗忘权）。归档是"换 embedding 全量重建（rebuild CLI）"、解析器升级重解析与审计取证的前置。
 
 ### 5.11 插件注册与装配（PluginRegistry + wire()）
@@ -1049,7 +1075,7 @@ V1.0 发布标准已达成：pytest 全绿（`-m "not integration"`，基线 599
 - 问答：`POST /api/query` 可选 `kb_id`（与 `collection` 二选一，`kb_id` 优先；缺省 `default`）；`filters` 仅限库内。
 - 隔离保障：检索双路（BM25/向量）都按 kb 的 collection 作用域执行；`KbStore` 校验查询/上传目标库存在，否则一律按参数错误拒绝。
 - 验收：隔离自动化用例全过（`tests/integration/test_kbs_isolation.py`）。
-- **索引 DNA 校验与重建（P1-3）**：查询侧（`/api/query` collection 解析后）比对 collection metadata dna 与当前配置——`index_dna = {enabled: false, mode: audit|reject}`；`audit`（默认）命中仅 warning + 响应标记 `index_dna_mismatch: true`；`reject` 抛 `IndexDnaMismatchError`（30006）；存量无 dna 视为 legacy 仅日志提示。重建：`python -m app.cli.rebuild --kb <id> [--yes]`——读 P0-2 归档原件 → 完整入库链写临时 collection（`rag_<id>__rebuild`）→ 校验文档数/dna → 切换 `KbInfo.collection` 指针 → 删旧集合与旧归档；**重建期间暂停上传与查询**（v1 单机语义，失败自动回滚指针并恢复索引快照）。
+- **索引 DNA 校验与重建（P1-3）**：查询侧（`/api/query` collection 解析后）比对 collection metadata dna 与当前配置——`index_dna = {enabled: false, mode: audit|reject}`；`audit`（默认）命中仅 warning + 响应标记 `index_dna_mismatch: true`；`reject` 抛 `IndexDnaMismatchError`（30006）；存量无 dna 视为 legacy 仅日志提示。重建：`python -m app.cli.rebuild --kb <id> [--yes]`——读 P0-2 归档原件 → 完整入库链写临时 collection（`rag_<id>__rebuild`）→ 校验文档数/dna → 切换 `KbInfo.collection` 指针 → 删旧集合与旧归档；**重建期间暂停上传与查询**（v1 单机语义，失败自动回滚指针并恢复索引快照）。**V5.2**：DNA 增 `pipeline_version`（解析/分块行为版本），升级后存量 collection 被 audit 标记，需 rebuild 对齐（建议随 V5.2 一次性重建）。
 
 ### 13.6 评测体系 v2 —— ✅ 已交付
 
@@ -1342,7 +1368,7 @@ V1.0 发布标准已达成：pytest 全绿（`-m "not integration"`，基线 599
 | 格式 | 状态 |
 |---|---|
 | PDF / Word(.docx) / Excel(.xlsx) / PPT(.pptx) / Markdown / 文本 | ✅ 已支持（`parser/` 注册表分发，5.1） |
-| HTML / 邮件(.eml/.msg) | ✅ 已支持（标准库实现，零新增依赖） |
+| HTML / 邮件(.eml) | ✅ 已支持（标准库实现，零新增依赖）；**`.msg`（Outlook OLE2）不解析**：白名单保留以返回明确错误（"请导出为 .eml"），V5.2 |
 | 代码文件（py/js/ts/java/go/…，含 yaml/toml/ini/xml 配置类） | ✅ 已支持（16.1 + 16.5）：tree-sitter AST 符号提取（15 种语言 grammar），无 grammar 回退纯文本 |
 | JSON / JSONL | ✅ 已支持（16.3，路径扁平化，纯标准库） |
 | CSV / TSV | ✅ 已支持（16.4，标准库 csv，与 xlsx 同口径） |

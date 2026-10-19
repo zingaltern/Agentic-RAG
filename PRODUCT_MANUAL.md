@@ -93,7 +93,7 @@ make docker-up    # ③ Docker：容器化部署（可选，需已配 .env）
 ### 上手三步
 
 1. **建库（可选）**：知识库管理 → 新建，如"公司制度"。
-2. **传文档**：文档管理 → 选目标知识库 → 「选择文件上传」（可多选，≤50MB，支持 pdf/docx/xlsx/pptx/doc/xls/ppt/md/txt/html/eml/msg/json/jsonl/csv/tsv 及常见代码与配置文件；`.doc/.ppt` 需服务端安装 LibreOffice，未安装时会上报明确提示）。
+2. **传文档**：文档管理 → 选目标知识库 → 「选择文件上传」（可多选，≤50MB，支持 pdf/docx/xlsx/pptx/doc/xls/ppt/md/txt/html/eml/json/jsonl/csv/tsv 及常见代码与配置文件；`.doc/.ppt` 需服务端安装 LibreOffice，未安装时会上报明确提示；Outlook `.msg` 暂不支持，请先导出为 `.eml`）。
 3. **提问**：问答控制台 → 选库 → 输入问题回车。回答中的 `[1]` 角标可点击核对来源；勾选「展示反思过程」可看 AI 内部思考步骤（普通用户可忽略）。
 
 > 库里没有相关内容时，它会诚实回答"暂未找到相关依据"——不是出错，换个问法或上传相关文档即可。

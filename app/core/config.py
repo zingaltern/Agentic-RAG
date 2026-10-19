@@ -107,10 +107,18 @@ class ChunkerConfig(BaseModel):
 
     parent_target_tokens: int = 512
     child_target_tokens: int = 128
-    token_char_ratio: float = 1.8            # 中文 token≈len(text)/1.8 估算
+    token_char_ratio: float = 1.8            # 仅 ratio 口径/回退使用（中文约 1.0 字符/token）
+    measure: str = "auto"                    # auto=优先引擎 count_tokens（精确）；ratio=强制估算
     table_aware: TableAwareConfig = TableAwareConfig()   # P1-4：表格原子块（默认关）
     hard_boundary: HardBoundaryConfig = HardBoundaryConfig()     # P1-5：标题硬边界（默认关）
     context_prefix: ContextPrefixConfig = ContextPrefixConfig()  # P1-5：上下文前缀（默认关）
+
+    @field_validator("measure")
+    @classmethod
+    def _measure_valid(cls, value: str) -> str:
+        if value not in ("auto", "ratio"):
+            raise SystemConfigError(f"chunker.measure 必须为 auto 或 ratio，实际为 {value!r}")
+        return value
 
 
 class VectorStoreConfig(BaseModel):
@@ -306,6 +314,10 @@ class IngestionConfig(BaseModel):
     # S2（V5.1）：zip 系格式解压防御上限（防止 zip 炸弹炸内存/CPU）
     zip_max_total_mb: int = 200
     zip_max_entries: int = 1000
+    # V5.2：解析健壮性 —— 页数上限 / 表格行数上限 / 空结果策略
+    max_pages: int = 2000                                # PDF 页数上限（超限截断 + text_stats 打标）
+    tabular_max_rows: int = 200_000                      # xlsx/xls/csv/tsv 行数上限（超限截断 + 打标）
+    empty_result: str = "reject"                         # reject=0 块拒收（30007）| allow=旧行为
     quality_gate: QualityGateConfig = QualityGateConfig()   # P0-1：解析质量门禁（默认关）
     archive: ArchiveConfig = ArchiveConfig()                # P0-2：原件归档（默认关）
     pii: PiiConfig = PiiConfig()                            # P2-6：PII 全局策略（默认关；kb 级可覆盖）
@@ -313,6 +325,14 @@ class IngestionConfig(BaseModel):
     json_flatten: JsonFlattenConfig = JsonFlattenConfig()   # 16.3：JSON/JSONL 扁平化上限
     code_symbols: CodeSymbolsConfig = CodeSymbolsConfig()   # 16.5：代码 AST 符号提取（tree-sitter）
     office_convert: OfficeConvertConfig = OfficeConvertConfig()  # 16.2：.doc/.ppt 转换开关
+
+    @field_validator("empty_result")
+    @classmethod
+    def _empty_result_valid(cls, value: str) -> str:
+        if value not in ("reject", "allow"):
+            raise SystemConfigError(
+                f"ingestion.empty_result 必须为 reject 或 allow，实际为 {value!r}")
+        return value
 
 
 class CleanerConfig(BaseModel):
