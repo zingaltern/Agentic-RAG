@@ -712,6 +712,12 @@ POST /api/documents/upload (multipart file)
 - **S5 脱敏（V5.0，P2-6 两级化重构）**：PII 处理两级设计——检测打标 + 按策略脱敏。`app/services/desensitize.detect_pii(text) -> [{type: id_card|phone|bank_card, count, sample_hash}]`（**不含原文**，sample_hash 为首个命中 sha256 前 8 位）；`desensitize_text(text, mode="mask", types=None)`：mask=`***`（现行为）/ replace=`[身份证]` 等占位符 / delete=移除。配置两级：全局 `ingestion.pii = {enabled: false, mode: mask, types: [...]}`；库级覆盖 `KbInfo.pii`（kb.json 兼容，创建/更新 API 接受），**生效优先级 kb.pii > ingestion.pii > 不处理**（kb.pii {enabled:false} 显式关闭全局）。命中文档 `metadata["pii_types"]` 记录类型集合（仅打标）。执行点与顺序不变（parse 之后、清洗之前）。**兼容**：旧 `desensitize_enabled` 与新 `pii.enabled` 同开时新逻辑优先 + warning，旧开关标记 deprecated（两个周期后移除）。
 - **幂等并发（V5.0）**：`_run` 内以 content_hash 为粒度加进程锁（`_lock_for`），幂等检查与写入原子化，杜绝 TOCTOU 双份入库。
 - **解析质量门禁（P0-1）**：`ingestion.quality_gate = {enabled: false, mode: reject|flag, min_text_chars: 30, max_garbled_ratio: 0.05, min_pages_with_text_ratio: 0.2}`（默认关闭=行为与现状完全一致）。启用时在 parse 之后、脱敏之前执行 5.1 的 `evaluate_parse_quality`：命中任一 flag 时 `mode=reject` → 抛 `QualityGateError`（30005，Job failed）；`mode=flag` → `doc.metadata["quality_flags"]` 打标 + warning 日志（含 flags 与 trace_id）继续入库；`mode` 非法值启动即抛 `SystemConfigError`（config field_validator）。
+- **增量/全量更新（V5.2）**：
+  - **文档级增量更新**：`mode=upsert` 按 `(kb_id, filename)` 定位旧版本 → 新版本完整入库（parse→chunk→embed→写新 document_id chunks）→ `DocumentsStore.replace` 原子替换索引（版本 +1）→ 删除旧版本向量与归档（先写后删，查询不中断）。旧版本清理失败仅 warning，由 `doctor` 巡检兜底。
+  - **强制重建**：`force=true` 跳过 content_hash 幂等短路（同内容也重建），用于修复 0 块文档/解析器升级后的重解析。
+  - **全量重建**：`python -m app.cli.rebuild --kb <id>`（P1-3，读归档原件按当前配置重建整个集合，含失败回滚）。
+  - **一致性巡检**：`python -m app.cli.doctor [--kb <id>] [--fix]`——核对 `documents.json` ↔ Chroma ↔ 归档：幽灵文档（索引有/向量无）、孤儿向量（向量有/索引无）、幂等映射错位、归档缺失；默认只读，`--fix` 安全修复前三类。
+  - **索引字段**：`DocEntry` 增 `version`/`updated_at`/`content_hash`（旧 `documents.json` 缺省兼容）。
 - **空结果策略（V5.2）**：分块后 0 块（空文件/纯扫描件无文本层/清洗过滤殆尽）时，`ingestion.empty_result=reject`（默认）→ 抛 `EmptyDocumentError`（30007），Job failed 且日志含原因（parse 空文本 / cleaner 过滤），杜绝"成功入库 0 块"的静默失败；`allow` 维持旧行为（success + chunk_count=0 + warning）。
 - **数据清洗层（V5.2 增强，默认 `cleaner.enabled=false` 时全部无副作用）**：① 分段 `paragraph_mode=auto`——空行优先；整篇无空行（PDF/纯行文本）且 ≥3 行时按行细分，修复"整篇=一段"导致 dedup/quality 失效；`[TABLE]` 原子块始终独立成段；② 归一拆两档——宽度归一（全角字母数字/表意空格，默认开）与中文标点→半角（`normalize_punct`，默认关，避免改写中文排版）；③ 按类型豁免 `clean(kind=...)`——代码/JSON/CSV/表格类（`cleaner.exempt_kinds`）跳过 quality/dedup，防误杀；④ 安全阀——`max_drop_ratio`（质量过滤删除占比超限整体跳过 + warning）、`dedup_max_paragraphs`（超限跳过去重，防 O(n²)）。清洗产物变化由索引 DNA 检测。
 - **索引 DNA（P1-3）**：`compute_index_dna(config)`（`app/core/index_dna.py` 纯函数）对 embedding.model_name/dimension/query_instruction + chunker 参数（含 `measure`）+ cleaner 配置 + `pipeline_version`（V5.2=2，解析/分块行为版本）做 sha256 规范化指纹（[:12]）；入库成功时写入 `chunk.metadata["index_dna"]` 与 `DocEntry.index_dna`，新 Chroma collection 建集合时 metadata 携带（存量无 dna 的 collection 视为 legacy）。任一相关配置变更即 dna 变化。
@@ -745,12 +751,20 @@ class PluginRegistry:
 ```
 
 ### 6.2 POST /api/documents/upload
-- `multipart/form-data` 字段 `file`。
+- `multipart/form-data` 字段：`file`（必填）、`kb_id`（缺省 `default`）、
+  `mode`（V5.2：`add`（默认，现行为）| `upsert`（按 (kb_id, filename) 视为同一逻辑文档，新版本替换旧版本））、
+  `force`（V5.2：`true` 时跳过 content_hash 幂等短路，强制重建入库——修复场景）。
 - 返回：
 
 ```json
-{ "code": 0, "message": "ok", "data": { "job_id": "ab12cd34", "status": "pending" } }
+{ "code": 0, "message": "ok", "data": {
+   "job_id": "ab12cd34", "status": "pending", "kb_id": "default",
+   "replaced_document_id": "doc_old1234" } }
 ```
+- `replaced_document_id` 仅在本次将被替换（upsert 命中同名旧版本 / force 命中同内容旧版本）时返回；
+  重复上传且未 `force` 时仍返回 `duplicate=true`（不创建 Job）。
+- 更新语义（先写后删）：新版本解析/分块/向量全部成功后才替换索引并删除旧版本向量与归档，
+  更新期间查询不中断；版本号 `version` 在 `GET /api/documents*` 可见；失败时旧版本保持可用。
 
 ### 6.3 GET /api/jobs/{job_id}
 
@@ -758,8 +772,9 @@ class PluginRegistry:
 { "code": 0, "message": "ok", "data": {
    "job_id": "ab12cd34", "status": "success",
    "document_id": "doc_12ab34cd", "chunk_count": 120,
-   "error_code": null } }
+   "error_code": null, "replaced_document_id": null } }
 ```
+- `replaced_document_id`（V5.2）：增量更新替换掉的旧版本 id（无替换为 null）。
 
 ### 6.4 POST /api/query
 
@@ -803,9 +818,9 @@ class PluginRegistry:
 | GET | `/api/documents/{id}` | 单文档元数据（P0-2：含 `archive_path` 归档路径） |
 | DELETE | `/api/documents/{id}` | 删除文档（级联清向量块；**按文档所属库解析 collection**，V5.0 修 P0-1；P0-2：级联删除归档原件） |
 
-> 文档索引持久化：`data/documents.json`（V5.0，含 content_hash 幂等索引）；启动时索引为空且 Chroma 有数据
-> → 自动全量重建（消除重启后幽灵文档）。P0-2：删除文档 / 批量删除 / 删库级联时同步删除归档原件
-> （`DocEntry.archive_path`，best-effort；归档开关默认关）。
+> 文档索引持久化：`data/documents.json`（V5.0，含 content_hash 幂等索引；V5.2 增 `version`/`updated_at`/`content_hash`
+> 字段，旧文件缺省兼容）；启动时索引为空且 Chroma 有数据 → 自动全量重建（消除重启后幽灵文档）。
+> P0-2：删除文档 / 批量删除 / 删库级联时同步删除归档原件（`DocEntry.archive_path`，best-effort；归档开关默认关）。
 
 ### 6.6 插件
 | 方法 | 路径 | 入参 | 说明 |
@@ -1335,6 +1350,7 @@ V1.0 发布标准已达成：pytest 全绿（`-m "not integration"`，基线 599
 | `cd frontend && npm run build` | 重建 SPA（静态托管实时生效） |
 | `cd frontend && npm run test:desktop` | Electron 壳测试（11 用例） |
 | `python -m app.cli.rageval --base-url http://127.0.0.1:8000 --all-kbs --baseline reports/<最新>` | 真实 DeepSeek 评测 + 基线对比 |
+| `python -m app.cli.doctor [--kb <id>] [--fix]` | V5.2：索引三方一致性巡检（幽灵文档/孤儿向量/幂等映射/归档缺失） |
 
 ### 14.3 当前实测指标（2026-08-11 存档，历史基线）
 

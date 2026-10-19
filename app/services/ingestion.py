@@ -76,11 +76,12 @@ class IngestionPipeline:
             if item[0] is None:        # C4：shutdown 哨兵（首元素 None）
                 self._queue.task_done()
                 break
-            raw, filename, job, kb_id, collection = item
+            raw, filename, job, kb_id, collection, replace_document_id, force = item
             metrics.set_gauge("rag_ingest_queue_depth", self._queue.qsize(),
                               help_text="入库队列当前深度（P2-7）")
             try:
-                self._run(raw, filename, job, kb_id=kb_id, collection=collection)
+                self._run(raw, filename, job, kb_id=kb_id, collection=collection,
+                          replace_document_id=replace_document_id, force=force)
             except Exception:
                 self.jobs.update(job.job_id, status="failed", error_code="50001")
             finally:
@@ -98,13 +99,13 @@ class IngestionPipeline:
         self._closing = True
         while True:
             try:
-                raw, filename, job, kb_id, collection = self._queue.get_nowait()
+                raw, filename, job, kb_id, collection, _replace_id, _force = self._queue.get_nowait()
                 self.jobs.update(job.job_id, status="failed", error_code=INTERRUPTED_CODE)
                 self._queue.task_done()
             except queue.Empty:
                 break
         for _ in self._workers:
-            self._queue.put((None, None, None, None, None))
+            self._queue.put((None, None, None, None, None, None, None))
         for worker in self._workers:
             worker.join(timeout=timeout)
 
@@ -134,11 +135,14 @@ class IngestionPipeline:
     # -- 提交/执行 -------------------------------------------------------------
 
     def submit(self, raw: bytes, filename: str, job: Job,
-               kb_id: str = "default", collection: str | None = None) -> bool:
+               kb_id: str = "default", collection: str | None = None,
+               replace_document_id: str | None = None, force: bool = False) -> bool:
         """异步提交入库任务（HTTP 线程立即返回）。
 
         C5：队列满时拒绝提交，Job 标记 failed（error_code=43003），返回 False。
         C4：pipeline 关闭中（热切换/退出）拒绝新提交并标记 50003，防止 job 永久 pending。
+        V5.2：replace_document_id——增量更新时被替换的旧版本（成功入库后删除旧块）；
+              force——同内容强制重新入库（修复 0 块/配置变更场景）。
         """
         if self._closing:
             from app.services.jobs_store import INTERRUPTED_CODE
@@ -146,20 +150,24 @@ class IngestionPipeline:
             self.jobs.update(job.job_id, status="failed", error_code=INTERRUPTED_CODE)
             return False
         try:
-            self._queue.put_nowait((raw, filename, job, kb_id, collection))
+            self._queue.put_nowait((raw, filename, job, kb_id, collection,
+                                    replace_document_id, force))
             return True
         except queue.Full:
             self.jobs.update(job.job_id, status="failed", error_code="43003")
             return False
 
     def ingest(self, raw: bytes, filename: str, job: Job | None = None,
-               kb_id: str = "default", collection: str | None = None) -> Job:
+               kb_id: str = "default", collection: str | None = None,
+               replace_document_id: str | None = None, force: bool = False) -> Job:
         """同步入库（demo-ingest / 单测用），返回更新后的 Job。
 
         kb_id/collection：13.5 多知识库作用域；collection 缺省按 kb 解析（default → "kb"）。
+        V5.2：replace_document_id / force 语义同 submit。
         """
         job = job or self.jobs.create(filename, kb_id=kb_id)
-        return self._run(raw, filename, job, kb_id=kb_id, collection=collection)
+        return self._run(raw, filename, job, kb_id=kb_id, collection=collection,
+                         replace_document_id=replace_document_id, force=force)
 
     def _resolve_pii_policy(self, kb_id: str) -> dict | None:
         """P2-6：解析生效的 PII 策略（kb 库级 > 全局 > 旧开关兼容）；None=不处理。
@@ -230,7 +238,8 @@ class IngestionPipeline:
             return None
 
     def _run(self, raw: bytes, filename: str, job: Job,
-             kb_id: str = "default", collection: str | None = None) -> Job:
+             kb_id: str = "default", collection: str | None = None,
+             replace_document_id: str | None = None, force: bool = False) -> Job:
         # worker 线程无请求上下文，生成独立 trace_id 贯穿本 Job 日志
         set_trace_id(uuid4().hex[:12])
         collection = collection or self.config.vector_store.collection
@@ -353,7 +362,7 @@ class IngestionPipeline:
                 # 幂等防线（API 层快速返回 duplicate 之外的第二道检查，防并发重复入库；按库隔离）
                 existing = self.find_document_id_by_hash(doc.content_hash,
                                                          collection=collection, kb_id=kb_id)
-                if existing:
+                if existing and not force:
                     entry = self.documents.get(existing)
                     self.jobs.update(job.job_id, status="success", document_id=existing,
                                      chunk_count=entry.chunk_count if entry else 0)
@@ -365,6 +374,11 @@ class IngestionPipeline:
                                                 "collection": collection}},
                     )
                     return self.jobs.get(job.job_id) or job
+                # V5.2 增量更新：force 命中同内容既有文档 → 强制重建并替换旧版本
+                if force and existing and not replace_document_id:
+                    replace_document_id = existing
+                old_entry = (self.documents.get(replace_document_id)
+                             if replace_document_id else None)
 
                 # V5.2：分块 token 计量——measure=auto 时优先用引擎真实分词器（精确），
                 # 引擎不支持（默认实现返回 None）或异常由 chunker 内部自动回退 ratio 估算。
@@ -407,7 +421,33 @@ class IngestionPipeline:
                 self.vector_store.add_chunks(zip(parents, vectors), collection=collection)
                 # P0-2：原件归档（幂等锁内成功路径；写失败仅告警不回滚入库，归档尽力而为）
                 archive_path = self._archive_original(raw, filename, kb_id, doc.document_id)
-                self.documents.register(doc, chunk_count=len(parents), archive_path=archive_path)
+                # V5.2：增量更新——先写新版本（已完成），再替换元数据，最后清旧版本，
+                # 保证替换期间查询始终有可用数据（先写后删）
+                if old_entry is not None:
+                    self.documents.replace(old_entry.document_id, doc,
+                                           chunk_count=len(parents), archive_path=archive_path)
+                    replaced_id: str | None = old_entry.document_id
+                else:
+                    self.documents.register(doc, chunk_count=len(parents), archive_path=archive_path)
+                    replaced_id = None
+                self.jobs.update(job.job_id, status="success",
+                                 document_id=doc.document_id, chunk_count=len(parents),
+                                 stage_timings=stage_timings, replaced_document_id=replaced_id)
+                if old_entry is not None:
+                    # 旧版本清理（尽力而为；失败仅告警，`python -m app.cli.doctor` 可巡检）
+                    try:
+                        self.vector_store.delete_document(old_entry.document_id, collection=collection)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("旧版本向量清理失败（可执行 doctor 巡检）：%s（%s）",
+                                       old_entry.document_id, exc)
+                    self.documents.remove_archive(old_entry.archive_path)
+                    logger.info(
+                        "增量更新：旧版本已被替换",
+                        extra={"extra_fields": {"job_id": job.job_id,
+                                                "new_document_id": doc.document_id,
+                                                "replaced_document_id": replaced_id,
+                                                "collection": collection}},
+                    )
                 _stage("index")   # P2-7
                 self.jobs.update(job.job_id, status="success",
                                  document_id=doc.document_id, chunk_count=len(parents),

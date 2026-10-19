@@ -24,9 +24,16 @@ class BatchDeleteRequest(BaseModel):
 @router.post("/upload")
 async def upload(file: UploadFile = File(...),
                  kb_id: str = Form(default="default"),          # 13.5：目标知识库（缺省 default）
+                 mode: str = Form(default="add"),               # V5.2：add=新增 | upsert=同名替换
+                 force: bool = Form(default=False),             # V5.2：同内容强制重入库（修复场景）
                  request: Request = None,
                  deps: Dependencies = Depends(get_deps)) -> dict:
-    """上传 → 校验 → content_hash 幂等（按库）→ 创建 Job → 异步入库（5.10）。C4（V5.1）：上传速率限制（43002）。"""
+    """上传 → 校验 → （可增量更新）→ content_hash 幂等（按库）→ 创建 Job → 异步入库（5.10）。
+
+    V5.2：`mode=upsert` 时按 (kb_id, filename) 视为同一逻辑文档——新版本先入库成功，
+    再删除旧版本向量/归档（更新期间查询不中断）；`force=true` 跳过幂等短路强制重建。
+    C4（V5.1）：上传速率限制（43002）。
+    """
     if request is not None:
         limiter = request.app.state.rate_limiters["upload"]
         client = request.client.host if request.client else "unknown"
@@ -38,6 +45,8 @@ async def upload(file: UploadFile = File(...),
         raise InternalError("上传流水线尚未装配")
     if deps.kbs is None or not deps.kbs.exists(kb_id):
         raise ValidationError(f"知识库不存在: {kb_id!r}")
+    if mode not in ("add", "upsert"):
+        raise ValidationError(f"mode 非法（add|upsert）: {mode!r}")
     if request is not None:
         from app.api.auth import get_authorizer
 
@@ -65,12 +74,21 @@ async def upload(file: UploadFile = File(...),
     content_hash = compute_content_hash(raw)
     collection = deps.kbs.collection_of(kb_id)
     existing = deps.pipeline.find_document_id_by_hash(content_hash, collection=collection, kb_id=kb_id)
-    if existing:
+    # V5.2：upsert 定位同库同名旧版本（同内容命中既有文档时不重复替换）
+    replace_id: str | None = None
+    if mode == "upsert" and deps.documents is not None:
+        same_name = deps.documents.by_filename(kb_id, filename)
+        if same_name is not None and same_name.document_id != existing:
+            replace_id = same_name.document_id
+    if existing and not force:
         # 幂等：重复上传返回既有 document_id，不重复入库（2.2；按库作用域）
         return ok({"duplicate": True, "document_id": existing, "kb_id": kb_id})
+    if existing and force:
+        replace_id = existing          # 强制重入库：同内容也重建并以新版本替换
 
     job = deps.jobs.create(filename, kb_id=kb_id)
-    deps.pipeline.submit(raw, filename, job, kb_id=kb_id, collection=collection)
+    deps.pipeline.submit(raw, filename, job, kb_id=kb_id, collection=collection,
+                         replace_document_id=replace_id, force=force)
     # S6 审计（13.11.1）：含 user_id/kb_id/文件名摘要，不含完整敏感文本与 key
     from app.api.auth import current_user
     from app.core.logging import get_logger, get_trace_id
@@ -83,10 +101,15 @@ async def upload(file: UploadFile = File(...),
             "filename_summary": filename[:80],
             "size_bytes": len(raw),
             "job_id": job.job_id,
+            "mode": mode,
+            "replaced_document_id": replace_id,
             "trace_id": get_trace_id(),
         }},
     )
-    return ok({"job_id": job.job_id, "status": job.status, "kb_id": kb_id})
+    payload: dict = {"job_id": job.job_id, "status": job.status, "kb_id": kb_id}
+    if replace_id:
+        payload["replaced_document_id"] = replace_id
+    return ok(payload)
 
 
 @router.get("")
@@ -131,6 +154,8 @@ def get_document(document_id: str, request: Request = None,
         "chunk_count": entry.chunk_count,
         "kb_id": entry.kb_id,
         "created_at": entry.created_at,
+        "version": entry.version,           # V5.2：逻辑文档版本
+        "updated_at": entry.updated_at,     # V5.2：最近更新时间
         "archive_path": entry.archive_path,   # P0-2：归档原件路径（None=未归档/归档关闭）
     })
 

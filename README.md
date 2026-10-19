@@ -135,7 +135,7 @@ make desktop   # 依赖：.venv（make bootstrap）、frontend 依赖（make fro
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/api/health` | 组件健康（embedding/vector_store/llm） |
-| POST | `/api/documents/upload` | 上传入库（可选表单字段 `kb_id`，缺省 default） |
+| POST | `/api/documents/upload` | 上传入库（可选表单字段 `kb_id`；V5.2：`mode=upsert` 同文件名增量替换、`force=true` 强制重入库） |
 | GET/DELETE | `/api/documents/{id}` | 文档元数据 / 删除（级联清向量块） |
 | GET | `/api/jobs/{job_id}` | 上传任务状态轮询 |
 | POST | `/api/query` | 问答（可选 `kb_id`，与 `collection` 二选一，kb_id 优先） |

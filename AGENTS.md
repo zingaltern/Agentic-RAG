@@ -32,6 +32,7 @@ make test           # 跑全部单测（含覆盖率门禁 ≥80%）
 make eval           # 验证集评测（default/docs 自建 107 + complex 难度分层 90 = 197 条；reports/eval-*.md）
 make review         # 外部基准测试集评测（CMRC 2018，独立 kb cmrc；reports/review-*.md；BASELINE=… 可对比）
 make perf           # 性能基准（规模点 50/150/300 文档：入库吞吐/延迟分位/Hit@5 曲线；BASELINE=… 可对比）
+python -m app.cli.doctor [--kb <id>] [--fix]   # 索引一致性巡检（幽灵文档/孤儿向量/幂等映射/归档缺失）
 python -m app.cli.rageval --kb default   # 评测（按库；--all-kbs 全库；--in-process 进程内）
 # —— 第二阶段（第 13 章）——
 cd frontend && npm install && npm run dev     # Web 前端（vite，proxy → :8000）

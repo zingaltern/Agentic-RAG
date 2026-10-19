@@ -51,6 +51,7 @@ class Job:
     created_at: float = 0.0
     updated_at: float = 0.0
     stage_timings: dict = field(default_factory=dict)   # P2-7：阶段耗时 ms（parse/clean/chunk/embed/index）
+    replaced_document_id: str | None = None  # V5.2：增量更新替换掉的旧版本 document_id
 
 
 @dataclass
