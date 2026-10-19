@@ -54,7 +54,21 @@ def test_load_real_settings_defaults():
     assert cfg.llm.provider == "deepseek"
     assert cfg.llm.model == "deepseek-chat"
     assert cfg.orchestration.max_reflection_iterations == 3
-    assert cfg.ingestion.allowed_extensions == ["pdf", "docx", "xlsx", "pptx", "md", "txt", "html", "htm", "eml", "msg"]
+    # 第 16 章：新增旧版 Office（doc/xls/ppt）、JSON/JSONL、代码与配置类扩展名
+    assert cfg.ingestion.allowed_extensions == [
+        "pdf", "docx", "xlsx", "pptx", "doc", "xls", "ppt",
+        "md", "txt", "html", "htm", "eml", "msg", "json", "jsonl", "csv", "tsv",
+        "py", "js", "mjs", "cjs", "ts", "tsx", "jsx", "java", "go", "rs", "c", "h",
+        "cpp", "hpp", "cs", "rb", "php", "kt", "swift", "sh", "sql", "vue",
+        "css", "scss", "yaml", "yml", "toml", "ini", "xml"]
+    assert cfg.ingestion.json_flatten.max_items == 5000
+    assert cfg.ingestion.json_flatten.max_depth == 12
+    assert cfg.ingestion.office_convert.enabled is True
+    assert cfg.ingestion.office_convert.soffice_path == ""
+    assert cfg.ingestion.office_convert.timeout_seconds == 60
+    assert cfg.ingestion.code_symbols.enabled is True
+    assert cfg.ingestion.code_symbols.index_in_text is True
+    assert cfg.ingestion.code_symbols.max_symbols == 500
 
 
 def test_chunker_section_defaults():

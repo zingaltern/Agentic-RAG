@@ -169,14 +169,25 @@ class OrchestrationService:
         return [ScoredChunk(chunk=by_id[cid].chunk, score=score, notion="rrf") for cid, score in ordered]
 
     def _rewrite_variants(self, query: str, feedback: EvaluationResult) -> list[tuple[str, str]]:
-        """改写产出 1~3 变体（rule 返回 str → 单变体；llm 返回 list → 多变体）。"""
+        """改写产出 1~3 变体（08-Q1：兼容 str / list[str] / list[dict{"text","path"}]）。
+
+        dict 变体的 path 由改写器指定（hyde→vector，其余缺省 hybrid）；
+        检索路径贯穿 filters/collection（13.3.3 不变）。
+        """
         raw = self.rewriter.rewrite(query, feedback)
         if isinstance(raw, str):
             raw = [raw]
-        variants = [v for v in raw if v and v.strip()]
+        variants: list[tuple[str, str]] = []
+        for item in raw:
+            if isinstance(item, dict):
+                text = (item.get("text") or "").strip()
+                if text:
+                    variants.append((text, item.get("path") or "hybrid"))
+            elif isinstance(item, str) and item.strip():
+                variants.append((item, "hybrid"))
         if not variants:
-            variants = [query]
-        return [(v, "hybrid") for v in variants]
+            variants = [(query, "hybrid")]
+        return variants
 
     def _switch_path(self, query: str) -> list[tuple[str, str]]:
         """13.3.3-1 换路：query 与上轮相同 → 去停用词重切 / BM25-only / 向量-only。"""

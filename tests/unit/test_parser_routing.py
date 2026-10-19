@@ -10,6 +10,7 @@ import io
 import pytest
 
 from app.adapters.parser import (
+    CODE_EXTENSIONS,
     PARSER_REGISTRY,
     PARSERS,
     ParserSpec,
@@ -21,15 +22,15 @@ from app.core.config import load_config
 from app.core.errors import ParseError, QualityGateError
 
 
-def _bad(raw: bytes) -> tuple[str, dict]:
+def _bad(raw: bytes, config=None) -> tuple[str, dict]:
     raise ParseError("模拟损坏文件")
 
 
-def _good(raw: bytes) -> tuple[str, dict]:
+def _good(raw: bytes, config=None) -> tuple[str, dict]:
     return "备用实现解析出的正文内容，长度充足且包含足够的字符以通过解析质量检查的最小字符数要求。", {}
 
 
-def _short(raw: bytes) -> tuple[str, dict]:
+def _short(raw: bytes, config=None) -> tuple[str, dict]:
     return "短", {}
 
 
@@ -101,11 +102,19 @@ def test_empty_routing_keeps_legacy_path():
 # -- PARSERS 兼容展开与 ocr_dummy 挂载 ----------------------------------------------------
 
 def test_parsers_compat_expansion_from_registry():
-    """PARSERS 由注册表按扩展名展开：10 个键与旧映射一致。"""
-    assert set(PARSERS) == {".pdf", ".docx", ".xlsx", ".pptx",
-                            ".md", ".txt", ".html", ".htm", ".eml", ".msg"}
+    """PARSERS 由注册表按扩展名展开：既有 10 键 + 第 16 章新格式（代码/JSON/旧版 Office）。"""
+    assert set(PARSERS) == ({".pdf", ".docx", ".xlsx", ".pptx",
+                             ".md", ".txt", ".html", ".htm", ".eml", ".msg",
+                             ".json", ".jsonl", ".csv", ".tsv",
+                             ".doc", ".xls", ".ppt"}
+                            | set(CODE_EXTENSIONS))
     assert PARSERS[".pdf"].__name__ == "_parse_pdf"
     assert PARSERS[".eml"].__name__ == "_parse_eml"
+    assert PARSERS[".py"].__name__ == "_parse_code_python"
+    assert PARSERS[".js"].__name__ == "_parse_code_javascript"
+    assert PARSERS[".yaml"].__name__ == "_parse_code_text"   # 未接 grammar → 纯文本实现
+    assert PARSERS[".xls"].__name__ == "_parse_xls"
+    assert PARSERS[".csv"].__name__ == "_parse_csv"
 
 
 def test_ocr_dummy_mountable_via_chain():

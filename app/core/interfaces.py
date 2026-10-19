@@ -75,10 +75,17 @@ class Evaluator(ABC):
 
 
 class QueryRewriter(ABC):
-    """查询改写器（3.6）。"""
+    """查询改写器（3.6；P1-3.2/08 批次演进返回类型）。
+
+    rewrite 允许返回：
+    - str：单变体（rule 回退）；
+    - list[str]：多变体（LLM 改写，13.3.2）；
+    - list[dict]：带检索路径的多策略变体（{"text": str, "path": "hybrid|vector"}，
+      08 批次：hyde 变体走 vector）。编排层按类型适配，生产者按需选择形式。
+    """
 
     @abstractmethod
-    def rewrite(self, query: str, feedback: EvaluationResult) -> str: ...
+    def rewrite(self, query: str, feedback: EvaluationResult) -> str | list: ...
 
 
 class QueryNormalizer(ABC):
