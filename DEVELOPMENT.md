@@ -957,12 +957,32 @@ class PluginRegistry:
 - 报告 `reports/perf-{ts}.md`（逐规模点表格）；`--baseline reports/perf-<基线>.md` 对比 Δ。
 - 暖机（模型加载/索引构建）显式排除，与 rageval 同口径；`make perf` 不作硬门禁，首轮基线存档后看趋势。
 
+### 8.6 质量评测基础设施（P0-P2 落地，2026-10-19）
+
+> 设计稿：`docs/specs/测试与评测体系设计.md`。定位是**补充**而非替换 8.3/8.4：
+> `make eval` 仍是检索/兜底回归门禁；质量评测先观测，人工校准通过后才升级为门禁。
+
+- **工具**：`app/eval/`（纯函数指标 `metrics.py`、统一 schema `schema.py`、LLM judge `judge.py`）、
+  `app/cli/eval_quality.py`、`make eval-quality`（默认 fresh/Stub；`JUDGE=1` 仅判分，`REAL=1` 才真实生成）；
+  前端最小单测 `make frontend-test`（`node --test`，零新增依赖）。
+- **数据**：`tests/quality/datasets/smoke_quality.jsonl`（30 条自动转换的 smoke，**非人工校准真值**）；
+  统一 schema 字段见 `app/eval/schema.py`；旧 `golden/golden_answer/expected_doc` 自动兼容。
+- **指标**：IR（Hit@k/Recall@k/Precision@k/MRR/nDCG）、兜底正确率、Bootstrap 95% CI；`app/eval/metrics.py`
+  另提供 claim Faithfulness、引用 P/R/F1（函数已提供，尚未接入 CLI 报告）；judge 仅作试点，
+  需按设计稿 6.4/6.5 做人工校准。
+- **rageval P0 修复**：进程内 `elapsed_ms` 正确读取；入库文件过滤隐藏/不支持扩展（`.DS_Store`）；
+  基线 diff 支持 `通过率` 计数比且只取首库表；新增 `--export-jsonl`（含完整 contexts/gold，仅进程内）；
+  `orchestration.run(capture_contexts=True)` 返回不截断的评测上下文（默认关，API 行为不变）。
+- **门禁**：`make test`/CI 保持硬门禁；`make eval-quality` 报告落 `reports/eval-quality-{ts}.md`，
+  人工校准与 D3 holdout 完成前不作发布阻断。2026-10-19 已跑通 30 条 smoke（真实 LLM+judge，
+  同族自评偏差、用例偏简单，仅作链路验证）。
+
 ---
 
 ## 第 9 章 开发计划与验收
 
 **MVP（W1~W4）与 Phase2（W5~W8）均已交付并验收通过**（详见第 13 章交付状态）。
-V1.0 发布标准已达成：pytest 全绿（`-m "not integration"`，基线 599 项，2026-10-19 收集口径）、`/ui` 与 SPA 闭环
+V1.0 发布标准已达成：pytest 全绿（`-m "not integration"`，收集口径以当前 `make test` 为准；历史基线 599 项）、`/ui` 与 SPA 闭环
 （上传→问→看引用→删）、`rageval` 可运行且报告非空（`reports/` 存档 20+ 份）。
 
 ---
@@ -1342,7 +1362,7 @@ V1.0 发布标准已达成：pytest 全绿（`-m "not integration"`，基线 599
 |---|---|
 | `make bootstrap` | venv + 依赖 |
 | `make run` | 启动后端（8000） |
-| `make test` | 全量单测（`-m "not integration"`，基线 599 项，2026-10-19 收集口径） |
+| `make test` | 全量单测（`-m "not integration"`，收集口径以当前 `make test` 为准；历史基线 599 项） |
 | `make eval` | 进程内评测（Stub LLM）并存档报告 |
 | `make review` | 外部基准测试集评测（CMRC 2018 → 独立 kb `cmrc`，`--fresh-kb` 全新入库；`BASELINE=reports/review-<基线>.md` 可对比）并存档报告 |
 | `make perf` | 性能基准（规模点 50/150/300 文档：入库吞吐 + 查询延迟分位 + Hit@5 规模曲线；`BASELINE=reports/perf-<基线>.md` 可对比） |

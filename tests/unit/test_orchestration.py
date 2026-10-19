@@ -239,3 +239,47 @@ def test_collection_passes_through():
     svc.run("年假怎么申请", collection="docs")
     assert retriever.calls, "必须执行检索"
     assert all(c["collection"] == "docs" for c in retriever.calls), "collection 必须贯穿检索"
+
+
+def test_fallback_capture_contexts():
+    """P0：兜底路径也应返回完整上下文（供质量评测判断检索证据）。"""
+    cfg = load_config()
+    cfg.orchestration.hopeless_shortcut = True
+    retriever = _Retriever([_scored("无关内容", source="公告.md")])
+    svc = _build(retriever, _Evaluator([EvaluationResult(False, 0.0, "below_threshold")]),
+                 _Rewriter([]), _Detector(), _LLM(), config=cfg)
+    answer = svc.run("域外问题", capture_contexts=True)
+    assert answer.code == 21001
+    assert answer.contexts and answer.contexts[0]["text"] == "无关内容"
+    assert answer.contexts[0]["filename"] == "公告.md"
+
+
+def test_reflection_limit_fallback_capture_contexts():
+    """P0：反思上限兜底同样携带检索上下文（供质量评测判断检索证据）。"""
+    cfg = load_config()
+    cfg.orchestration.max_reflection_iterations = 1
+    cfg.orchestration.hopeless_shortcut = False
+    retriever = _Retriever([_scored("无关内容", source="公告.md")])
+    svc = _build(retriever, _Evaluator([
+        EvaluationResult(False, 0.1, "below_threshold"),
+        EvaluationResult(False, 0.1, "below_threshold"),
+    ]), _Rewriter(["年假申请"]), _Detector(), _LLM(), config=cfg)
+    answer = svc.run("年假怎么申请", capture_contexts=True, allow_clarify=False)
+    assert answer.code == 21001
+    assert answer.contexts and answer.contexts[0]["filename"] == "公告.md"
+
+
+def test_capture_contexts_opt_in():
+    """P0：默认不返回完整上下文；capture_contexts=True 时返回不截断的评测上下文。"""
+    retriever = _Retriever([_scored("年假需提前申请", source="员工手册.md")])
+    svc = _build(retriever, _Evaluator([EvaluationResult(True, 0.9, "ok")]),
+                 _Rewriter([]), _Detector(), _LLM())
+    plain = svc.run("年假怎么申请")
+    assert plain.contexts == [], "默认不填充，避免响应膨胀"
+
+    svc = _build(retriever, _Evaluator([EvaluationResult(True, 0.9, "ok")]),
+                 _Rewriter([]), _Detector(), _LLM())
+    captured = svc.run("年假怎么申请", capture_contexts=True)
+    assert captured.contexts[0]["text"] == "年假需提前申请"
+    assert captured.contexts[0]["filename"] == "员工手册.md"
+    assert captured.contexts[0]["chunk_id"]
