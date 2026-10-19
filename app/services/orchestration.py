@@ -127,6 +127,7 @@ class Answer:
     message: str = "ok"
     need_clarify: bool = False      # A2：主动澄清（21003）时置真
     elapsed_ms: int = 0
+    contexts: list[dict] = field(default_factory=list)   # P0：评测用完整上下文（capture_contexts=True）
 
 
 class OrchestrationService:
@@ -283,6 +284,25 @@ class OrchestrationService:
             })
         return out
 
+    @staticmethod
+    def _full_contexts(context: list[ScoredChunk]) -> list[dict]:
+        """P0 评测出口：完整上下文（不截断）+ chunk_id，供质量评测/离线分析使用。
+
+        仅 capture_contexts=True 时填充，不影响 API 响应体积与默认行为。
+        """
+        out: list[dict] = []
+        for item in context:
+            meta = item.chunk.metadata
+            out.append({
+                "chunk_id": item.chunk.chunk_id,
+                "document_id": item.chunk.document_id,
+                "filename": meta.get("source") or item.chunk.document_id,
+                "page": meta.get("page"),
+                "text": item.chunk.text,
+                "score": round(item.score, 4),
+            })
+        return out
+
     # -- 主流程 --------------------------------------------------------------
 
     def run(self, query: str, filters: dict | None = None,
@@ -290,7 +310,8 @@ class OrchestrationService:
             top_k: int | None = None, debug: bool = False,
             history: list[dict] | None = None,
             web_search: bool = False,
-            allow_clarify: bool = True) -> Answer:
+            allow_clarify: bool = True,
+            capture_contexts: bool = False) -> Answer:
         start = time.perf_counter()
         # 预热（幂等，已加载时零成本）：模型加载属装配开销，不计入请求/检索预算，
         # 避免冷启动首次请求误触发 21002
@@ -429,6 +450,7 @@ class OrchestrationService:
                 return Answer(
                     text=answer_text,
                     sources=self._sources(context),
+                    contexts=self._full_contexts(context) if capture_contexts else [],
                     iterations=iteration,
                     hallucination=detection,
                     debug_trace=trace if debug else [],
