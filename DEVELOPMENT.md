@@ -90,10 +90,17 @@ rag_kb/
 ├── tests/
 │   ├── unit/                 # 单测（含 auth/plugins/desensitize/kbs/…）
 │   ├── integration/          # 真实 BGE 全链路（-m integration）
-│   └── eval/                 # qa_pairs/{default,docs}/*.jsonl（107 条）
+│   ├── eval/                 # qa_pairs/{default,docs,complex}/*.jsonl（107+90 条）
+│   ├── review/               # 外部基准测试集（CMRC 2018，make review）
+│   └── eval_suite/           # 独立冻结基准集（120 条，第二道门禁）
 ├── data/                     # 运行期数据：chroma/ kb.json documents.json
-├── reports/                  # eval 报告存档（13.1 度量协议）
-├── docs/review-followup.md   # 专业评审跟进清单
+├── reports/                  # eval/review/perf 报告存档（13.1 度量协议；gitignore）
+├── docs/                     # 文档体系（唯一入口 docs/README.md）
+│   ├── README.md             # 文档索引与归档约定
+│   ├── review-followup.md    # 专业评审跟进清单
+│   ├── RAG系统介绍.html       # 功能与特殊场景处理一览（介绍页）
+│   ├── specs/                # 方案/规格类输入文档（在线侧输入处理 / 数据清洗与格式）
+│   └── dev-tasks/            # 批次开发指令（02~08，规格先行）
 ├── pyproject.toml
 ├── .env.example               # 环境变量样例（不含真实密钥）
 ├── Makefile                  # make bootstrap / run / test / eval / desktop
@@ -471,12 +478,26 @@ orchestration:
 
 ingestion:
   max_file_size_mb: 50
-  allowed_extensions: [pdf, docx, xlsx, pptx, md, txt]
+  allowed_extensions: [pdf, docx, xlsx, pptx, doc, xls, ppt, md, txt, html, htm, eml, msg,
+                       json, jsonl, csv, tsv,
+                       py, js, mjs, cjs, ts, tsx, jsx, java, go, rs, c, h, cpp, hpp, cs,
+                       rb, php, kt, swift, sh, sql, vue, css, scss, yaml, yml, toml, ini, xml]
   embed_batch_size: 64
   max_queue_size: 64             # V5.1：入库队列上限，满时返回 43003
   zip_max_total_mb: 200          # V5.1：zip 系格式解压总大小上限（防炸弹 S2）
   zip_max_entries: 1000          # V5.1：zip 条目数上限（防炸弹 S2）
   # desensitize_enabled: false   # S5：脱敏开关（config.py 默认 false，settings.yaml 未显式配置）
+  json_flatten:                  # 16.1：JSON/JSONL 路径扁平化上限（防超深/超大结构爆炸）
+    max_items: 5000              # 单文档最多产出多少行（超出截断 + 尾部标记）
+    max_depth: 12                # 最大递归深度（超出以 <max-depth> 占位）
+  office_convert:                # 16.2：旧版 .doc/.ppt 经 LibreOffice 转换后复用 docx/pptx 解析
+    enabled: true
+    soffice_path: ""             # 空 = 自动探测 soffice/libreoffice（PATH）
+    timeout_seconds: 60          # 单次转换超时；超时/失败 → ParseError 30003
+  code_symbols:                  # 16.5：代码 AST 符号提取（tree-sitter；缺 grammar 自动回退纯文本）
+    enabled: true                # false = 代码退化为纯文本解码
+    index_in_text: true          # 正文前置 [CODE_INDEX] 符号索引块
+    max_symbols: 500             # 单文件符号数上限
 
 documents:                       # V5.0：文档索引持久化（D1）
   persist_file: ./data/documents.json
@@ -498,12 +519,12 @@ logging:
 ## 第 5 章 详细实现设计
 
 ### 5.1 文档解析 `parse_file`
-- 格式：`.pdf/.docx/.xlsx/.pptx/.md/.txt`（大小 <= `max_file_size_mb`）。
+- 格式：`.pdf/.docx/.xlsx/.pptx/.md/.txt` + `.html/.htm/.eml/.msg`（P-B）+ 代码/JSON/CSV/旧版 Office（第 16 章）；全量白名单见 `ingestion.allowed_extensions`（大小 <= `max_file_size_mb`）。
 - 统一产出 `Document`：`text` 归一为 UTF-8；元数据写入 `metadata`：`source`（原文件名）、`page`（PDF/Word 页码）、`kind`（扩展名）。
 - PDF → 用 `pymupdf`（fitz）逐页提取；Word → `python-docx` 段落级；Excel → 每 sheet 每行判为一段文本，`metadata` 记录 `sheet` 与行号；PPT → `python-pptx`。
 - 失败（损坏/不支持）→  抛 `ParseError（code 30003），Job 标记 failed。
 - **表格一等公民（P1-4）**：PDF（`find_tables`）与 Word（按 body 文档流**保序**，修复旧实现表格追加在段落末尾的问题）解析时，表格以 `[TABLE]\n{markdown}\n[/TABLE]` 原子块进入正文，并登记 `metadata["tables"] = [{index, header, rows, page}]`（顺序对应正文第 N 个 [TABLE] 块）；xlsx 整文档即表，v1 不动。清洗后执行 `reindex_tables(doc)` 重对齐（cleaner 删表则丢弃对应 JSON + warning）。cleaner 对 [TABLE] 块内容豁免（normalize 白名单 + dedup/quality 跳过含表格段落）。
-- **解析器降级链（P3-8，`ingestion.parser_routing`，默认空=现状）**：`ParserSpec(name, extensions, fn, priority)` 注册表（`PARSER_REGISTRY`，旧 `PARSERS` dict 由注册表展开保留兼容）；路由 `{"pdf": {"chain": ["pymupdf", "ocr_dummy"]}}`（key 为不带点的扩展名，链按序尝试）。链内逐实现尝试：抛错或空文本（复用 P0-1 `evaluate_parse_quality` 的 `min_text_chars`）→ warning（含 parser 名）降级下一实现；链尽失败按 P0-1 mode 处理（reject → 30005，否则 30003）。成功后 `metadata["parser"]` / `metadata["parser_version"]` 溯源；**空路由配置走旧单实现路径，零差异**。新格式接入 SOP（四动作，其余阶段零改动）：①实现函数 → ②注册 ParserSpec → ③`ingestion.allowed_extensions` 加扩展名 → ④`parser_routing` 加链一行 → 补单测。`ocr_dummy` 占位 spec 已注册（保持抛错，不入默认链，用于验证挂载机制）。
+- **解析器降级链（P3-8，`ingestion.parser_routing`，默认空=现状）**：`ParserSpec(name, extensions, fn, priority)` 注册表（`PARSER_REGISTRY`，旧 `PARSERS` dict 由注册表展开保留兼容）；路由 `{"pdf": {"chain": ["pymupdf", "ocr_dummy"]}}`（key 为不带点的扩展名，链按序尝试）。链内逐实现尝试：抛错或空文本（复用 P0-1 `evaluate_parse_quality` 的 `min_text_chars`）→ warning（含 parser 名）降级下一实现；链尽失败按 P0-1 mode 处理（reject → 30005，否则 30003）。成功后 `metadata["parser"]` / `metadata["parser_version"]` 溯源；**空路由配置走旧单实现路径，零差异**。新格式接入 SOP（四动作，其余阶段零改动）：①实现函数（签名 `fn(raw: bytes, config: IngestionConfig | None = None) -> tuple[str, dict]`） → ②注册 ParserSpec → ③`ingestion.allowed_extensions` 加扩展名 → ④`parser_routing` 加链一行 → 补单测。模块划分见 16.0。`ocr_dummy` 占位 spec 已注册（保持抛错，不入默认链，用于验证挂载机制）。
 - **解析探针（P0-1）**：`_parse_pdf` 逐页统计写入 `metadata["text_stats"] = {total_chars, page_count, pages_with_text}`（`pages_with_text`=有实质文本的页数）；`garbled_ratio`（U+FFFD 字符数 / 文本总字符数，无字符时为 0.0）在 `_build_document` 对全部解析器统一计算——txt/html/eml 的 `errors="replace"` 解码同样产生 U+FFFD——并入 `metadata["text_stats"]`（非 PDF 解析器按单页文档补齐该结构）。`text_stats` 仅作解析事实探针，不入 Chroma chunk metadata（`chroma_store._clean_metadata` 剔除 Chroma 无法存储的 dict 等非标量值）。
 - **质量检查纯函数（P0-1，P3-8 降级链复用）**：parser 模块级 `evaluate_parse_quality(text, text_stats, *, min_text_chars, max_garbled_ratio, min_pages_with_text_ratio) -> list[str]`，返回 flag 列表（空=通过）：`empty_text`（去首尾空白后文本少于 `min_text_chars`，含扫描件抽出空文本）/ `high_garbled`（`garbled_ratio` 超过 `max_garbled_ratio`）/ `few_pages_with_text`（仅 `page_count>1` 的多页 PDF 生效：`pages_with_text/page_count` 低于 `min_pages_with_text_ratio`）。
 
@@ -810,10 +831,11 @@ class PluginRegistry:
 - 真实 Chroma + 本地 BGE→资源 + DeepSeek（或 Mock），跑通：上传→入库→问答→检测→删除全链路（pytest「integration」标记）。
 - 断点提示：集成测试不加 `llm` 依赖，失败时不追究 LLM（先验证链路）。
 
-### 8.3 评测（`app/cli/rageval.py` + `tests/eval/qa_pairs.json`）
-- `qa_pairs.json`：`[{query, golden_answer, source_doc}]`，至少 20 条起步，覆盖"有答案/无答案/改"的场景。
+### 8.3 评测（`app/cli/rageval.py` + `tests/eval/qa_pairs/<kb>/*.jsonl`）
+- 用例：分库 jsonl（`{id, type, query, expected_sources, golden_answer, expected_behavior}`），契约与扩充方式见 `tests/eval/README.md`；default/docs 自建 107 条，覆盖"有答案/无答案/防编造"等场景。
 - 指标：`ContextPrecision / ContextRecall / Faithfulness / AnswerRelevancy / Hit@5`。
 - 输出 Markdown 报告（逐条 + 聚合）到 `reports/eval-{timestamp}.md`。
+- no_answer 判据（13.6 修订）：`code=0 且回答含"未找到相关依据"类文案 ∨ code=21001`（`rageval.py` 单一常量）。
 
 ### 8.4 外部基准测试集（`make review`，两层评测策略，2026-08-30 新增）
 
@@ -822,7 +844,7 @@ class PluginRegistry:
 
 | 层 | 命令 | 数据 | 作用 |
 |---|---|---|---|
-| 验证集 | `make eval` | `tests/eval/qa_pairs/{default,docs}/` 自建 107 条（语料 `tests/eval/sample_data/`） | 开发回归门禁（13.1 度量协议：改动后不回退） |
+| 验证集 | `make eval` | `tests/eval/qa_pairs/` 自建 197 条（default/docs 107 + complex 90；语料 `tests/eval/sample_data/`） | 开发回归门禁（13.1 度量协议：改动后不回退） |
 | 测试集 | `make review` | `tests/review/` 外部公开数据集（首个：CMRC 2018，CC BY-SA 4.0，独立 kb `cmrc`） | 度量 RAG 真实效果（Hit@1/Hit@5、ContextPrecision/Recall、兜底率） |
 
 - 数据来源、用例（测试对）结构与再生成方式见 `tests/review/README.md`；原始数据集下载到 `tests/review/raw/`（gitignore，不入库）。
@@ -831,12 +853,60 @@ class PluginRegistry:
 - 报告输出 `reports/review-{ts}.md`；基线对比 `--baseline reports/review-<基线>.md`（判据与口径与 8.3/13.6 单一实现一致）。
 - 判读纪律：`make review` 指标**只看趋势不看单点**——首轮运行结果存档为基线，后续改动对比 Δ；不作为 `make test`/`make eval` 之外的硬门禁（外部集无"全绿"预期，如实记录）。
 
+### 8.5 验证体系 v2：复杂度分层验证集 + 性能基准（2026-08-30 新增）
+
+> 针对「验证语料全是 <2KB 纯文本、题面过于直白」的复杂度盲区，将验证体系升级为
+> 四道门禁，覆盖**体量 / 复杂度 / 难度 / 准确性 / 性能**五个维度。
+
+| 门禁 | 命令 | 覆盖维度 | 判据纪律 |
+|---|---|---|---|
+| 单元回归 | `make test` | 代码逻辑 | 全绿 + 覆盖率 ≥80%（硬门禁） |
+| 准确性验证集 | `make eval` | 准确性 + 复杂度 + 难度 | default/docs 库保持全绿；**complex 库按难度分层看逐层通过率**，首轮基线存档、后续不回退 |
+| 外部测试集 | `make review` | 真实分布准确性 | 只看趋势 Δ（8.4） |
+| 性能基准 | `make perf` | 体量 + 性能 | 首轮基线存档，后续对比 Δ；不设绝对门禁 |
+
+#### 8.5.1 complex 难度分层验证集（kb `complex`）
+
+- 生成器：`python -m app.cli.build_eval_stress`（固定 seed 可复现；纯用既有依赖
+  pymupdf/python-docx/openpyxl/python-pptx/标准库，**不新增第三方依赖**），
+  产物落 `tests/eval/sample_data/complex/` 与 `tests/eval/qa_pairs/complex/qa_pairs.jsonl`（随仓库提交）。
+- 语料（43 份，虚构企业"云帆科技"域，事实可核验）：多页 **PDF**（含表格）、**DOCX**（含真实表格）、
+  **XLSX**、**PPTX**、**HTML**、**EML 邮件线程**、**长文 Markdown**（≥3000 字埋点事实）、
+  **噪声 TXT**（错别字/OCR 空格/广告行/样板重复）、近重复文档对与完全重复文档。
+  噪声比例必须低于解析质量门阈值（garbled 检测不触发 30005/30003）。
+- 测试对（~90 条），`type` 沿用 8.3 四类，`variant` 为难度分层标签，报告"特征分布"逐层出通过率：
+
+| variant | 考察点 | type |
+|---|---|---|
+| `direct` | 单文档事实题（实体明确） | direct |
+| `paraphrase` | 口语化/错字改写 | rewrite |
+| `multi_doc` | 跨 2 文档综合（expected_sources=2） | direct |
+| `table` | 仅能从表格（PDF/DOCX/XLSX）作答的数值题 | direct |
+| `noisy` | 噪声文档中的事实 | direct |
+| `long_doc` | 长文档埋点事实 | direct |
+| `cross_fmt` | 同一事实族分布在不同格式文档 | direct |
+| `oov` | 域外（期望 21001 兜底） | no_answer |
+| `no_invent` | 域内相关但无据 | no_invent |
+
+- 生成器必须**回环自检**：单测用项目自身解析器解析生成的 PDF/DOCX/XLSX/PPTX，
+  断言事实文本可抽出且魔数合法（否则入库即 30003）。
+
+#### 8.5.2 性能基准（`app/cli/perfbench.py` + `make perf`）
+
+- 进程内模式（真实 BGE+Chroma，Stub LLM），独立 kb `perf`，每个规模点前清空集合与幂等表（同 8.4 `--fresh-kb` 级联）。
+- 规模点：`--scales 50,150,300`（文档数），合成语料进程内生成不入仓（固定 seed）；每个规模点测：
+  - **入库吞吐**：总耗时、docs/sec、chunk 总数、按 `Job.stage_timings` 拆解 embed/parse 占比；
+  - **查询延迟**：固定 30 条查询各测 `orchestration.run` 耗时，出 avg/P50/P90/P95/max（ms）；
+  - **准确率-规模曲线**：该 30 条的 Hit@5 随规模变化（体量增长是否伤检索）。
+- 报告 `reports/perf-{ts}.md`（逐规模点表格）；`--baseline reports/perf-<基线>.md` 对比 Δ。
+- 暖机（模型加载/索引构建）显式排除，与 rageval 同口径；`make perf` 不作硬门禁，首轮基线存档后看趋势。
+
 ---
 
 ## 第 9 章 开发计划与验收
 
 **MVP（W1~W4）与 Phase2（W5~W8）均已交付并验收通过**（详见第 13 章交付状态）。
-V1.0 发布标准已达成：pytest 全绿（`-m "not integration"`，293 项，2026-08-15 实测）、`/ui` 与 SPA 闭环
+V1.0 发布标准已达成：pytest 全绿（`-m "not integration"`，基线 599 项，2026-10-19 收集口径）、`/ui` 与 SPA 闭环
 （上传→问→看引用→删）、`rageval` 可运行且报告非空（`reports/` 存档 20+ 份）。
 
 ---
@@ -983,7 +1053,7 @@ V1.0 发布标准已达成：pytest 全绿（`-m "not integration"`，293 项，
 
 ### 13.6 评测体系 v2 —— ✅ 已交付
 
-- `tests/eval/` 已扩容至 **107 条**（`qa_pairs/{default,docs}/*.jsonl`），类型覆盖 direct/rewrite/no_answer/no_invent/口语/表格/多文档。
+- `tests/eval/` 已扩容至 **107 条**（`qa_pairs/{default,docs}/*.jsonl`），类型覆盖 direct/rewrite/no_answer/no_invent/口语/表格/多文档；同日并入 complex 难度分层 90 条（8.5.1，合计 197 条）。
 - **no_answer 判据修订（已落地）**：`pass =（返回 code0 且 answer 含"未找到相关依据"类文案）∨（返回 21001）`（`rageval.py` 单一常量 + 单测）。
 - 指标：`Faithfulness` 分类型、`Hit@1`、按库汇总、基线 diff 列。
 - CLI：`--kb`（按库）、`--all-kbs`、`--baseline <path>`（对比模式）、`--in-process`（Stub LLM 进程内）/ `--base-url`（HTTP 真实后端）；认证启用时 HTTP 模式加 `--login <用户> <密码>` 或 `--token <token>`。
@@ -1063,7 +1133,7 @@ V1.0 发布标准已达成：pytest 全绿（`-m "not integration"`，293 项，
 - **评测口径统一**：✅ 已落地——`rageval` 与 `/api/query` 走同一编排链路核心（`orchestration.run`），no_answer 判据单一常量（13.6）。
 - **provider 公共基类**：✅ 已落地——`app/adapters/base.py` `LocalModelAdapter`（懒加载/device/探活/异常包装复用）；本地模型 adapter（embedding/reranker）已继承。
 - **前端资产化**：✅ 桌面与 Web 共享 `BASE_URL` 抽象（`frontend/src/api/base.js` 单一常量 + `localStorage`/IPC 外部后端覆盖）。
-- **样例/评测集资产化**：✅ qa_pairs 107 条按库归档；新格式/新策略上线前必须跑资产回归。
+- **样例/评测集资产化**：✅ qa_pairs 按库归档（197 条，含 complex 分层）；新格式/新策略上线前必须跑资产回归。
 - **契约同步**：⚠️ 未自动化——后端 `openapi.json` → 前端 TS 类型仍为手写（前端规模小、接口稳定，暂不引入生成器；接口变更时必须同步更新前端调用）。
 
 #### 13.11.3 拓展性规范（预留扩展点，禁止封闭实现）
@@ -1088,9 +1158,9 @@ V1.0 发布标准已达成：pytest 全绿（`-m "not integration"`，293 项，
 
 ---
 
-### 13.12 输入侧治理（`在线侧输入处理.md` 落地，P1+P2）—— ✅ 已交付（2026-08-18）
+### 13.12 输入侧治理（`docs/specs/在线侧输入处理.md` 落地，P1+P2）—— ✅ 已交付（2026-08-18）
 
-> 把 `在线侧输入处理.md` 的输入侧治理方案按「可配置、可降级、默认关不改变现有行为」原则落地。
+> 把 `docs/specs/在线侧输入处理.md` 的输入侧治理方案按「可配置、可降级、默认关不改变现有行为」原则落地。
 > 每个新配置段都有独立 `enabled` 总开关：关闭时行为与旧版完全一致（客户端传 `history`、LLM 生成反问、无查询侧安全前置、无服务端会话）。
 
 #### 13.12.1 配置总览（新增 SystemConfig 段，全部默认关）
@@ -1152,9 +1222,9 @@ V1.0 发布标准已达成：pytest 全绿（`-m "not integration"`，293 项，
 
 ---
 
-### 13.13 输入侧治理激活批次（V1，`docs/dev-tasks/06`）—— ✅ 已交付（2026-08-30）
+### 13.13 输入侧治理激活批次（V1，`docs/dev-tasks/archive/06-输入侧治理激活批次.md`）—— ✅ 已交付（2026-08-30）
 
-> 依据《在线侧输入处理.md》可落地性评估（2026-08-30）：激活已建成能力并补齐两个轻件。
+> 依据《docs/specs/在线侧输入处理.md》可落地性评估（2026-08-30）：激活已建成能力并补齐两个轻件。
 > 原则延续 13.12「可配置、可降级」；唯一默认开启项为 T1（见下，评估分过低的查询本就必然
 > 以 21001 收尾，仅缩短空转，且以 `make eval` 全量回归为门禁）。
 
@@ -1190,14 +1260,14 @@ V1.0 发布标准已达成：pytest 全绿（`-m "not integration"`，293 项，
 #### 13.13.4 验收
 
 - `make test` 全绿（429 项）；`make eval` 对比基线不回退且 no_answer 类改善（**107/107**，基线 105/107）；
-  前端 `npm run build` 成功（dist 随仓库约定提交）；真实后端冒烟通过（详见 `docs/dev-tasks/06` §4.1）。
-- **已知边界（冒烟结论，详见 dev-tasks/06 §4.2）**：① 规则边界判定器对元问题（"我上一条说了什么"）
+  前端 `npm run build` 成功（dist 随仓库约定提交）；真实后端冒烟通过（详见 `docs/dev-tasks/archive/06-输入侧治理激活批次.md` §4.1）。
+- **已知边界（冒烟结论，详见 dev-tasks/archive/06-输入侧治理激活批次.md §4.2）**：① 规则边界判定器对元问题（"我上一条说了什么"）
   存在盲区（query-vs-query 双维比较，规格内行为，根治需 L3 合并调用）；② SYSTEM_PROMPT 的
   "只基于知识库上下文+强制引用"契约会压制从会话历史复述用户自述事实（历史记忆问答产品化单独立项）。
 
 ---
 
-## 第 14 章 当前状态与遗留（V5.1，2026-08-15）
+## 第 14 章 当前状态与遗留（V5.1，2026-08-15 立档，2026-10-19 修订）
 
 > 给后续开发/运维 Agent 的**现状快照**：当前可运行形态、常用命令、已知遗留与触发条件。
 
@@ -1207,7 +1277,7 @@ V1.0 发布标准已达成：pytest 全绿（`-m "not integration"`，293 项，
 - **模型**：embedding `bge-small-zh-v1.5`（本地）+ reranker `bge-reranker-base`（本地）+ LLM `deepseek-chat`（唯一外部调用，key 经 `RAG_DEEPSEEK_API_KEY`）。
 - **数据**：`data/chroma`（向量，`rag_<kb>` 集合）+ `data/kb.json`（知识库映射）+ `data/documents.json`（文档索引，重启自动从 Chroma 兜底重建）。
 - **前端**：`frontend/dist` 由后端托管（SPA，静态资源 no-store）；桌面端 `npm run desktop`（或打包 App，自动拉起后端）。
-- **评测集**：验证集 `tests/eval/qa_pairs/{default,docs}/` 107 条（报告 `reports/eval-{ts}.md`）；
+- **评测集**：验证集 `tests/eval/qa_pairs/` 197 条（default/docs 自建 107 + complex 难度分层 90；报告 `reports/eval-{ts}.md`）；
   外部测试集 `tests/review/`（CMRC 2018，独立 kb `cmrc`，报告 `reports/review-{ts}.md`，见 8.4）。
 
 ### 14.2 常用命令
@@ -1216,9 +1286,10 @@ V1.0 发布标准已达成：pytest 全绿（`-m "not integration"`，293 项，
 |---|---|
 | `make bootstrap` | venv + 依赖 |
 | `make run` | 启动后端（8000） |
-| `make test` | 全量单测（`-m "not integration"`，293 项，2026-08-15 实测） |
+| `make test` | 全量单测（`-m "not integration"`，基线 599 项，2026-10-19 收集口径） |
 | `make eval` | 进程内评测（Stub LLM）并存档报告 |
 | `make review` | 外部基准测试集评测（CMRC 2018 → 独立 kb `cmrc`，`--fresh-kb` 全新入库；`BASELINE=reports/review-<基线>.md` 可对比）并存档报告 |
+| `make perf` | 性能基准（规模点 50/150/300 文档：入库吞吐 + 查询延迟分位 + Hit@5 规模曲线；`BASELINE=reports/perf-<基线>.md` 可对比） |
 | `make desktop` | 启动 Electron 桌面（前端需先 `npm run build`） |
 | `cd frontend && npm run build` | 重建 SPA（静态托管实时生效） |
 | `cd frontend && npm run test:desktop` | Electron 壳测试（11 用例） |
@@ -1236,14 +1307,15 @@ V1.0 发布标准已达成：pytest 全绿（`-m "not integration"`，293 项，
 |---|---|---|
 | 团队模式启用 | 代码就绪且**当前部署已启用**（V5.1） | RBAC 深度 C 扩展（文档级/角色矩阵）：12.3 续 |
 | RBAC 拦截 | 已接线（V5.1：Authorizer + kb owner/scope） | 文档级权限/多角色矩阵（12.3 深度 C 续） |
-| A 组智能体体验（记忆压缩/澄清/联网/多模型） | ✅ 已交付（2026-08-16）：A1 历史摘要压缩（memory 段）、A2 主动澄清（21003+need_clarify）、A3 同义词扩充、A5 Tavily 联网检索（web 段，key 走环境变量）、A6 多模型候选+熔断（llm.candidates）；**A4 多库自动路由已移除（2026-08-30，docs/dev-tasks/05）**：多库基础设施（collection 隔离+库级权限）保留，选库回归显式 kb_id / 缺省 default | 除 A4 外均可独立开关（enabled） |
+| A 组智能体体验（记忆压缩/澄清/联网/多模型） | ✅ 已交付（2026-08-16）：A1 历史摘要压缩（memory 段）、A2 主动澄清（21003+need_clarify）、A3 同义词扩充、A5 Tavily 联网检索（web 段，key 走环境变量）、A6 多模型候选+熔断（llm.candidates）；**A4 多库自动路由已移除（2026-08-30，docs/dev-tasks/archive/05-移除A4多库自动路由.md）**：多库基础设施（collection 隔离+库级权限）保留，选库回归显式 kb_id / 缺省 default | 除 A4 外均可独立开关（enabled） |
 | 输入侧治理（在线侧输入处理落地） | ✅ 已交付（2026-08-18，13.12）：query_input 标准化管线 / query_security 查询侧安全前置 / greeting 极简通道 / clarification 模板化反问 / dialogue 服务端会话（边界判定+生命周期） | 全部默认关（clarification 默认开）；前端传 session_id 支持为后续项（当前后端可接、前端未发） |
-| 输入侧治理激活批次（T1 绝望短路 / T2 极简通道扩容 / T3 服务端会话接通） | ✅ 已交付（2026-08-30，13.13 + docs/dev-tasks/06）：域外查询首轮短路 21001；greeting rules 扩容并部署启用；前端携带 session_id + dialogue 部署启用（L2 激活） | T1 代码默认开（eval 门禁通过）；T2/T3 代码默认关、settings.yaml 部署启用 |
+| 输入侧治理激活批次（T1 绝望短路 / T2 极简通道扩容 / T3 服务端会话接通） | ✅ 已交付（2026-08-30，13.13 + docs/dev-tasks/archive/06）：域外查询首轮短路 21001；greeting rules 扩容并部署启用；前端携带 session_id + dialogue 部署启用（L2 激活） | T1 代码默认开（eval 门禁通过）；T2/T3 代码默认关、settings.yaml 部署启用 |
 | 元数据富化（section/date） | ✅ 已交付（2026-08-16，T5）：md/txt/docx/pdf 章节标题提取→Chunk.metadata.section；pdf/docx date；支持 `filters={"metadata":{"section":...}}` | 已完结 |
 | 13.10 P3 包（OCR/表格/混合分块/多 embedding/多 LLM） | 规格已立 | 用户决策 + 13.1 度量协议验证 |
+| 查询智能补强（08：Q1 多策略改写 / Q2 Scope 路由 lite） | Q1 实现完成（HyDE/Step-Back，默认关；随代码在途）；Q2 未开工 | `docs/dev-tasks/08` DoD + 13.1 度量协议 |
 | 契约同步自动化（openapi→TS） | 手写中 | 接口变更频繁或前端规模扩大时 |
 | 事件钩子（文档变更→缓存失效） | ✅ 已覆盖（2026-08-16）：`mutation_epoch` 在 add_chunks/delete_document 递增，BM25 缓存（hybrid_rrf）与父块缓存（orchestration）均按 epoch 失效；通用事件总线留待增量索引需求 | 增量索引/多端同步需求出现时 |
-| CI 基线门禁 | 人工对比 | 接 CI 时纳入 |
+| CI 基线门禁 | ✅ 已交付（4.5，`.github/workflows/ci.yml`）：PR 跑 `make test`（覆盖率门禁）+ 前端 `npm run build`，评测对比留痕不阻断 | 已纳入；后续按需加回归基线对比 |
 | 会话持久化/流式输出 | 未做（D 组评估结论） | 产品明确要求时单独立项 |
 | 发布打包 | 前端壳可打包（`electron-builder --mac dmg`）；**Python 运行时捆绑未做** | 正式发布前做捆绑决策 |
 
@@ -1271,6 +1343,11 @@ V1.0 发布标准已达成：pytest 全绿（`-m "not integration"`，293 项，
 |---|---|
 | PDF / Word(.docx) / Excel(.xlsx) / PPT(.pptx) / Markdown / 文本 | ✅ 已支持（`parser/` 注册表分发，5.1） |
 | HTML / 邮件(.eml/.msg) | ✅ 已支持（标准库实现，零新增依赖） |
+| 代码文件（py/js/ts/java/go/…，含 yaml/toml/ini/xml 配置类） | ✅ 已支持（16.1 + 16.5）：tree-sitter AST 符号提取（15 种语言 grammar），无 grammar 回退纯文本 |
+| JSON / JSONL | ✅ 已支持（16.3，路径扁平化，纯标准库） |
+| CSV / TSV | ✅ 已支持（16.4，标准库 csv，与 xlsx 同口径） |
+| 旧版 Excel(.xls) | ✅ 已支持（16.2，新增依赖 `xlrd`） |
+| 旧版 Word(.doc) / PPT(.ppt) | ⚠️ 条件支持（16.2）：本机存在 LibreOffice `soffice` 时自动转换解析，否则 `ParseError` 30003 并提示安装 |
 | 图片 OCR（扫描件 PDF / png/jpg） | ⏳ 预留接口 `_parse_ocr`（默认抛错），需接引擎（paddleocr/pytesseract）+ 配置开关（13.10 P3） |
 
 ### 15.3 安全现状三层
@@ -1287,7 +1364,7 @@ V1.0 发布标准已达成：pytest 全绿（`-m "not integration"`，293 项，
 |---|---|---|
 | P-A | 数据清洗层 `adapters/cleaner/`（归一/去噪/段落 simhash 去重/质量过滤），`cleaner.enabled=false` 默认关 | ✅ 已交付（15.5） |
 | P-B | 解析增强：PDF 表格保真（find_tables → Markdown）、PARSERS 注册表、HTML/EML 格式、OCR 预留接口 | ✅ 已交付（15.5） |
-| P-C | 入库安全：提示注入扫描（默认审计标记、可选拦截）+ 内容审核层（内置可编辑词表，默认关） | ✅ 已交付（开发指令 01） |
+| P-C | 入库安全：提示注入扫描（默认审计标记、可选拦截）+ 内容审核层（内置可编辑词表，默认关） | ✅ 已交付（规格见 `docs/specs/数据清洗与格式_开发要点.md` P-C 与 15.5 决策） |
 | P-D | 真 Agentic：**结构化 Agent**（工具注册表 + 规划器，复用现有组件为工具），单独立项，需 `make eval` 基线验证不回退 | 📋 规划 |
 
 ### 15.5 决策记录
@@ -1296,9 +1373,107 @@ V1.0 发布标准已达成：pytest 全绿（`-m "not integration"`，293 项，
 - **OCR 引擎**：本轮仅预留接口不接引擎（13.10 P3 规格：默认关、懒加载）；引擎决策另行评估。
 - **Agentic 方向**：结构化 Agent（非 ReAct 文本循环）。
 - **内容审核规则**：内置可编辑中文词表 csv + 配置开关（默认关）。
-- **A4 多库自动路由移除（2026-08-30）**：多库（kb_id → collection 隔离 + 库级权限）保留为企业 RBAC 载体；自动路由层（kb_router/KbRouter/kb_id="auto"）整体移除——前端已显式选库，企业场景路由误选代价高，且休眠路径存在普通用户 50001 缺陷（`_route_kb` 无匹配时 `can_read_kb(user, None)` 崩溃）。规格与改动清单见 `docs/dev-tasks/05-移除A4多库自动路由.md`。
+- **A4 多库自动路由移除（2026-08-30）**：多库（kb_id → collection 隔离 + 库级权限）保留为企业 RBAC 载体；自动路由层（kb_router/KbRouter/kb_id="auto"）整体移除——前端已显式选库，企业场景路由误选代价高，且休眠路径存在普通用户 50001 缺陷（`_route_kb` 无匹配时 `can_read_kb(user, None)` 崩溃）。规格与改动清单见 `docs/dev-tasks/archive/05-移除A4多库自动路由.md`。
 - **两层评测策略（2026-08-30）**：验证集（自建 107 条，`make eval`）与测试集（外部公开数据集，`make review`）物理分离——自建集只做回归门禁，公开数据集（首个 CMRC 2018，CC BY-SA 4.0）度量真实检索/问答效果；`rageval` 增 `--fresh-kb`（清理集合+幂等表）保证每轮全新入库可复现。规格见 8.4，数据结构见 `tests/review/README.md`。
+- **验证体系 v2（2026-08-30）**：四道门禁覆盖体量/复杂度/难度/准确性/性能（8.5）——complex 难度分层验证集（多格式语料 PDF/DOCX/XLSX/PPTX/HTML/EML/长文/噪声，9 层 variant，生成器回环自检）并入 `make eval`；性能基准 `make perf`（规模点吞吐/延迟分位/Hit@5 曲线）。生成器只用既有依赖（pymupdf 可生成含 CJK 的 PDF），零新增第三方依赖。
 - 清洗/新格式均默认关闭或向后兼容：`cleaner.enabled=false` 时 `ingestion.py` 行为与旧版完全一致。
+
+---
+
+## 第 16 章 新增解析格式：代码 / JSON / 表格 / 旧版 Office（2026-09-08 立档，2026-09-09 拆分）
+
+> 依据：用户需求（代码、旧版 Office、JSON、CSV）。性质：**向后兼容的增量格式**——只新增扩展名与解析实现，
+> 不改动既有 10 种格式的任何行为；全部走 5.1 的「新格式接入 SOP」。
+> **职责边界**：解析器只做「解析 + 统一化」（原始字节 → `Document`），**不做清洗/重构**
+> （清洗归 `adapters/cleaner/`，分块归 `adapters/chunker/`）。
+> 依赖策略：新增 `xlrd`（读 `.xls`）与 `tree-sitter` + 15 个语言 grammar（16.5）；
+> `.doc/.ppt` 不引 Python 依赖，改用**可选** LibreOffice 外部转换。
+
+### 16.0 模块划分（2026-09-09 拆分，行为零变化）
+原 `parser/__init__.py` 单文件 938 行按职责拆分，公开 API 不变（`ingestion.py` 与测试零改动）：
+
+| 模块 | 职责 |
+|---|---|
+| `__init__.py` | 门面：re-export 公开 API + 注册装配（新增格式在此加一行） |
+| `formats.py` | 格式常量：`CODE_LANGUAGES`/`CODE_EXTENSIONS`/`TABULAR_EXTENSIONS`/`LEGACY_OFFICE_EXTENSIONS`/`SUPPORTED_EXTENSIONS`/OLE2 魔数 |
+| `common.py` | 统一化层：`_build_document`（Document 产出）/ `_decode_text`（编码回退链） |
+| `security.py` | 解析前预检：`_check_magic` / `_check_zip_bomb` |
+| `registry.py` | `ParserSpec` / `PARSER_REGISTRY` / `PARSERS` / `_register_parser` / `_routing_chain` |
+| `dispatcher.py` | `parse_file` 分发入口（单实现路径 + P3-8 降级链） |
+| `quality.py` | `evaluate_parse_quality` / `reindex_tables` / 表格渲染工具 |
+| `pdf.py` | PDF（含表格一等公民） |
+| `office.py` | docx / xlsx / pptx + 旧版 xls / doc / ppt |
+| `office_convert.py` | LibreOffice 外部转换（`.doc/.ppt`） |
+| `tabular.py` | CSV / TSV |
+| `text.py` | txt / md / html / eml |
+| `json_doc.py` | JSON / JSONL（路径扁平化） |
+| `code.py` | 代码（tree-sitter AST 符号提取 + 纯文本回退） |
+| `ocr.py` | OCR 预留接口 |
+
+### 16.1 代码文件（`code.py`）
+- 扩展名 29 个（与 `ingestion.allowed_extensions` 同步）：
+  脚本类 `py/js/mjs/cjs/ts/tsx/jsx/java/go/rs/c/h/cpp/hpp/cs/rb/php/kt/swift/sh/sql/vue/css/scss`；
+  配置类 `yaml/yml/toml/ini/xml`。
+- 解析：按字节解码（`utf-8-sig` → `gbk` → `utf-8 errors="replace"` 三级回退），**原文保真**（不去噪/不重排）。
+- `metadata`：`language`（扩展名 → 语言名映射）、`kind`、`text_stats`（按 5.1 统一补齐）；
+  接入 grammar 时另有 `symbols` / `symbol_count`（16.5）。
+- 分块沿用 5.2 既有规则（按行/段落聚合 + 超长硬切），不为代码单独加分块器（避免过度设计）。
+
+### 16.2 旧版 Office（`.xls` / `.doc` / `.ppt`）
+- **`.xls` → `xlrd`**（新增依赖，理由见 `pyproject.toml` 注释）：逐 sheet 逐行取值，输出与 5.1 xlsx 同款
+  「行 → 制表符连接」文本，`metadata["sheets"]` 记录表名。
+- **`.doc` / `.ppt` → LibreOffice 外部转换**（可选，配置 `ingestion.office_convert`）：
+  1. `shutil.which` 探测 `soffice`/`libreoffice`（可用 `office_convert.soffice_path` 指定绝对路径）；
+  2. `soffice --headless --convert-to docx|pptx --outdir <临时目录> <临时源文件>`
+     （`subprocess` 参数列表化、无 shell、带 `timeout_seconds` 超时）；
+  3. 转换产物交给既有 `_parse_docx` / `_parse_pptx` 解析（复用，不重复实现）；
+  4. `metadata["parser"] = "soffice_convert"`、`metadata["converted_from"] = 原扩展名` 溯源。
+- 未安装 / 转换失败 / 超时 → `ParseError`（30003），文案含安装指引
+  （macOS `brew install --cask libreoffice`；Debian/Ubuntu `apt-get install libreoffice`）。
+- **安全**：转换在 `tempfile.mkdtemp()` 临时目录进行且用后清理；不联网；`office_convert.enabled=false` 时直接拒绝。
+
+### 16.3 JSON / JSONL（`json_doc.py`）
+- 呈现形式：**路径扁平化**，每行 `路径: 值`。
+  - dict → `a.b`；list → `a[0]`；标量 → `path: str(value)`（`None` → `null`，`True/False` → `true/false`，数字原样）。
+  - `.jsonl`：按行解析，每条记录路径前缀 `[N].`（N 从 1 起）。
+- 上限（`ingestion.json_flatten`）：`max_items`（默认 5000 行，超出截断并追加 `…（已截断，共 N 行）`）、
+  `max_depth`（默认 12，超出写 `<max-depth>` 占位）。
+- 非法 JSON / 非对象行 → `ParseError`（30003）；空文件 → 空文本（沿用既有语义）。
+- 不保留 JSON 原文（避免同一内容双份入库；且深层嵌套原文检索效果差）。
+
+### 16.4 CSV / TSV（`tabular.py`）
+- 与 xlsx/xls **同口径**：标准库 `csv` 逐行读取 → 去掉空单元格 → 制表符连接（空行忽略），
+  `metadata["columns"]` 记录首行列名；`kind` 为 `csv`/`tsv`。
+- 编码走 `_decode_text` 回退链（GBK 中文表头可正常解码）；带引号字段（含分隔符/换行）按 RFC 4180 解析。
+- 上限 `_MAX_ROWS = 200_000`（超出截断 + 尾部标记）；空文件 → 空文本。
+- 不做列名映射改写（那是清洗/重构范畴）；检索侧若需「列名: 值」形态，走 cleaner 或后续单独评估。
+
+### 16.5 代码 AST 符号提取（tree-sitter）
+- **依赖**：`tree-sitter` + 15 个官方 grammar（python/javascript/typescript/java/go/rust/c/cpp/c_sharp/
+  ruby/php/bash/kotlin/swift/css）。**按需 import**：缺任一 grammar 只影响该语言，自动回退纯文本，不影响启动。
+- **提取规则**：深度优先遍历 AST，按「语言 → 定义节点类型映射」收集符号：
+  函数/方法/类/结构体/接口/枚举/协议/trait/impl/module/namespace 等；
+  名称优先取 `name` 字段，无该字段时依次尝试 `declarator`/`selectors`/`type`，最后兜底首个标识符
+  （C/C++ 声明符、Go `type_spec`、CSS 选择器）。类内函数统一记为 `method` 并加容器前缀（如 `A.m`）。
+- **产出**：
+  - `metadata["symbols"] = [{name, kind, line_start, line_end}, ...]`（按 AST 遍历顺序）；
+  - `metadata["symbol_count"]`（标量，便于统计与健康检查）；
+  - `ingestion.code_symbols.index_in_text=true` 时，正文前置
+    `[CODE_INDEX language=<lang> symbols=N]` + 每行 `kind name (L起-L止)` + `[/CODE_INDEX]`
+    （与 `[TABLE]` 同为机器可识别的原子块，提升符号名可检索性）；**源码原文紧随其后、原样保留**。
+- **配置**（`ingestion.code_symbols`）：`enabled`（默认 true；false = 纯文本解码）、
+  `index_in_text`（默认 true）、`max_symbols`（默认 500，超出截断）。
+- **回退**：无 grammar 的语言（yaml/toml/ini/xml/vue/scss/sql）、grammar 未安装、AST 解析异常
+  → 一律回退纯文本解码（不抛错、不阻塞入库），`logger.debug/warning` 留痕。
+
+### 16.6 接入清单与验收
+- 四动作（5.1 SOP）：①实现函数 → ②注册 `ParserSpec` → ③`allowed_extensions` 加扩展名 →
+  ④需要降级链时在 `parser_routing` 加一行。本批**默认走单实现路径**（`parser_routing` 保持 `{}`，零差异承诺）。
+- 魔数校验（5.1 / S2）新增分支：`.doc/.xls/.ppt` 校验 OLE2 头 `D0 CF 11 E0 A1 B1 1A E1`；
+  代码/JSON/JSONL/CSV/TSV 走文本嗅探（样本含 NUL 即拒）。
+- 单测（`tests/unit/test_parser.py`、`tests/unit/test_parser_routing.py`）：各新格式正常解析、编码回退、非法输入、
+  魔数不符、soffice 缺失与成功两条路径（monkeypatch）、JSON 截断与深度上限、AST 符号提取与回退、扩展名白名单。
+- 验收：`make test` 全绿（覆盖率 ≥80%）；`make eval` 与基线无回退（新增格式不改既有解析行为）。
 
 ---
 

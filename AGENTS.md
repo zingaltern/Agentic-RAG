@@ -11,9 +11,14 @@
 | `TASK.md` | 当前任务简报（某周里程碑与验收判据）——由任务指令给定 | 高 |
 | `README.md` | 快速启动（`make run / make test`） | 中 |
 | `PRODUCT_MANUAL.md` | 产品说明书（面向终端用户，界面/功能口径） | 中 |
+| `docs/README.md` | **文档索引与归档约定**（`docs/` 目录唯一入口；新增文档先看这里） | 中 |
+| `docs/specs/在线侧输入处理.md` | 输入侧治理方案蓝图（13.12/13.13 落地依据） | 相关任务必读 |
+| `docs/specs/数据清洗与格式_开发要点.md` | 数据清洗与格式边界执行规格（第 15 章依据） | 相关任务必读 |
+| `docs/dev-tasks/` | 批次开发指令（规格先行的任务书；已交付批次在 `archive/` 子目录） | 按批次 |
 | `docs/review-followup.md` | 评审延后项清单与状态 | 低 |
 | `tests/eval_suite/README.md` | 独立基准评测规范（120 条冻结集，第二道门禁） | 评测时必读 |
 | `tests/review/README.md` | 外部基准测试集（`make review`，两层评测之"测试集"）数据来源/测试对结构/再生成 | 评测时必读 |
+| `tests/eval/README.md` | 验证集（`make eval`，两层评测之"验证集"）判据与 complex 难度分层集说明 | 评测时必读 |
 
 - 冲突时：`DEVELOPMENT.md` > 任务指令 > `AGENTS.md` 中与上述冲突的表述。
 - 若你发现规格确实需要变更：**先改 DEVELOPMENT.md 再改代码**，并在 commit message 里说明。
@@ -24,8 +29,9 @@
 make bootstrap      # 虚拟环境 + 安装依赖（首次）
 make run            # 启动 API（SPA + /ui 测试页）→ http://127.0.0.1:8000
 make test           # 跑全部单测（含覆盖率门禁 ≥80%）
-make eval           # 验证集评测（自建 107 条，reports/eval-*.md）
+make eval           # 验证集评测（default/docs 自建 107 + complex 难度分层 90 = 197 条；reports/eval-*.md）
 make review         # 外部基准测试集评测（CMRC 2018，独立 kb cmrc；reports/review-*.md；BASELINE=… 可对比）
+make perf           # 性能基准（规模点 50/150/300 文档：入库吞吐/延迟分位/Hit@5 曲线；BASELINE=… 可对比）
 python -m app.cli.rageval --kb default   # 评测（按库；--all-kbs 全库；--in-process 进程内）
 # —— 第二阶段（第 13 章）——
 cd frontend && npm install && npm run dev     # Web 前端（vite，proxy → :8000）
@@ -38,7 +44,7 @@ make desktop        # Electron 桌面（内置拉起后端）【W8 落地】
 ## 环境与密钥
 
 - LLM 为 DeepSeek API：`RAG_DEEPSEEK_API_KEY`（只走环境变量，**禁止**写入文件/配置/代码/commit）。
-- 参考 `env.example`；真实 `.env`、`data/`（Chroma）、模型缓存必须在 `.gitignore` 中排除。
+- 参考 `.env.example`；真实 `.env`、`data/`（Chroma）、模型缓存必须在 `.gitignore` 中排除。
 
 ## 代码规范
 
@@ -62,10 +68,11 @@ make desktop        # Electron 桌面（内置拉起后端）【W8 落地】
 
 ## 测试要求
 
-- 完成任何功能后必须 `make test` 全绿（528 项，2026-09-06 实测，含覆盖率门禁 ≥80%）；新模块补齐对应单测（对照 DEVELOPMENT 第 8.1 矩阵）。
-- 评测回归（两层评测策略，DEVELOPMENT 8.4：验证集与测试集分离）：
-  验证集 `tests/eval/qa_pairs/{default,docs}/` 107 条经 `make eval` 出报告（13.1 度量协议，改检索/改写/检测等影响指标的功能必须前后对比）；
+- 完成任何功能后必须 `make test` 全绿（基线 599 项，2026-10-19 收集口径，含覆盖率门禁 ≥80%）；新模块补齐对应单测（对照 DEVELOPMENT 第 8.1 矩阵）。
+- 评测回归（两层评测策略，DEVELOPMENT 8.4/8.5：验证集与测试集分离）：
+  验证集 `tests/eval/qa_pairs/`（default/docs 自建 107 条 + complex 难度分层 90 条）经 `make eval` 出报告（13.1 度量协议，改检索/改写/检测等影响指标的功能必须前后对比；complex 按 variant 逐层看通过率，首轮基线存档后不回退）；
   外部测试集 `tests/review/`（首个 CMRC 2018，独立 kb `cmrc`，160 条）经 `make review` 出报告——量真实效果、看趋势 Δ，不设"全绿"门禁；
+  性能基准经 `make perf` 出报告（吞吐/延迟分位/Hit@5 规模曲线，首轮基线存档后看 Δ）；
   独立基准集 `tests/eval_suite/`（120 条冻结）规范见该目录 README，不随开发周期增删。
 
 ## 提交与 GitHub（用户要求时执行）

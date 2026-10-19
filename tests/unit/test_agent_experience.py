@@ -1,6 +1,6 @@
 """A 组智能体体验增强单测（A1 记忆压缩 / A2 澄清 / A5 web / A6 熔断）。
 
-注：A4 多库自动路由已于 2026-08-30 移除（docs/dev-tasks/05），相关用例随之删除。
+注：A4 多库自动路由已于 2026-08-30 移除（docs/dev-tasks/archive/05-移除A4多库自动路由.md），相关用例随之删除。
 """
 from __future__ import annotations
 
