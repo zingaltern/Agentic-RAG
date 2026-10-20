@@ -34,7 +34,7 @@ const { kbs, load: loadKbs } = useKbs()
 
 const chat = computed(() => store.chat)
 const debug = ref(false)
-const mode = ref('auto')   // P-D：auto | reflect | agentic（后端未启用时自动回退）
+const mode = ref('reflect')   // P-D：reflect | auto | agentic（服务端默认 reflect）
 const webSearch = computed({
   get: () => store.webSearch,
   set: (v) => { store.webSearch = v },
