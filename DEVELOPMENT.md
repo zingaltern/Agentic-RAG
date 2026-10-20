@@ -992,7 +992,7 @@ class PluginRegistry:
 ## 第 9 章 开发计划与验收
 
 **MVP（W1~W4）与 Phase2（W5~W8）均已交付并验收通过**（详见第 13 章交付状态）。
-V1.0 发布标准已达成：pytest 全绿（`-m "not integration"`，2026-10-20 收集口径 818 项；历史基线 599 项）、`/ui` 与 SPA 闭环
+V1.0 发布标准已达成：pytest 全绿（`-m "not integration"`，2026-10-20 收集口径 826 项；历史基线 599 项）、`/ui` 与 SPA 闭环
 （上传→问→看引用→删）、`rageval` 可运行且报告非空（`reports/` 存档 20+ 份）。
 
 ---
@@ -1372,7 +1372,7 @@ V1.0 发布标准已达成：pytest 全绿（`-m "not integration"`，2026-10-20
 |---|---|
 | `make bootstrap` | venv + 依赖 |
 | `make run` | 启动后端（8000） |
-| `make test` | 全量单测（`-m "not integration"`，2026-10-20 收集口径 818 项；历史基线 599 项） |
+| `make test` | 全量单测（`-m "not integration"`，2026-10-20 收集口径 826 项；历史基线 599 项） |
 | `make eval` | 进程内评测（Stub LLM）并存档报告 |
 | `make review` | 外部基准测试集评测（CMRC 2018 → 独立 kb `cmrc`，`--fresh-kb` 全新入库；`BASELINE=reports/review-<基线>.md` 可对比）并存档报告 |
 | `make perf` | 性能基准（规模点 50/150/300 文档：入库吞吐 + 查询延迟分位 + Hit@5 规模曲线；`BASELINE=reports/perf-<基线>.md` 可对比） |
@@ -1741,7 +1741,7 @@ llm:
 - P2 规划/循环/回退：🚧 基础版（评审后回归）。`LLMPlanner`（JSON 计划/原生 tool_calls/JSON 动作兜底）、`AgentRuntime`（Plan→Act→Observe→Reflect→Synthesize、预算/循环/证据账本）、`mode=reflect|agentic|auto` 分发、失败回退 reflect（`termination_reason=fallback_reflect`）、`Answer`/API 新字段；P2 加固已落地：routing/planning/max_repair/tool_call_timeout/fallback 校验、LLM 硬预算（provider 层计数）、工具独立线程池、空 `allowed_tools` 语义、web URL 去重、planner/reflector 证据包裹、RuleReflector 归一化分与单源多子目标软信号。
 - P3 反思/合成/安全：🚧 基础版（评审后回归）。`RuleReflector` 确定性充分性/重规划 + 可选 `LLMReflector`（默认关、防自评放水、次数上限）；`LLMSynthesizer` `<evidence>` 分隔/注入标记/上下文预算；`LLMVerifier` 引用编号校验 + 句级引用 + detector 组合 + 可配修复次数（默认 1）；工具作用域注入、web 私网 URL 拦截、证据注入标记；前端 Agent 计划/步骤面板。P3 加固：测试默认离线、`initial_steps` 不采集、重复工具调用跳过、`result.data` 截断、证据闭合标签大小写/空白转义、LLM 预算统一 `budget_steps`。灰度安全演练留 P4。
 - P4 评测/灰度/前端：🚧 早期。P4 仍待：Agentic 专用质量集/过程指标、真实 DeepSeek smoke、Shadow/Canary、BGE/Chroma Agent 工具集成冒烟、P3-7 同工具慢调用熔断。前端已加“自动/反思/Agent”模式开关（`QueryConsole.vue` 请求体透传 `mode`）；Agentic 专用评测集、过程指标、Shadow/Canary、性能门禁待建设。
-- 已知边界：`mode=agentic` 默认关闭（`agent.enabled=false`），`reflect` 行为零回归；`make test` 当前 818 项全绿（覆盖率 ≥80%）。
+- 已知边界：`mode=agentic` 默认关闭（`agent.enabled=false`），`reflect` 行为零回归；`make test` 当前 826 项全绿（覆盖率 ≥80%）。
 
 ---
 

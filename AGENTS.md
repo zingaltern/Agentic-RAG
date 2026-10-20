@@ -74,7 +74,7 @@ make desktop        # Electron 桌面（内置拉起后端）【W8 落地】
 
 ## 测试要求
 
-- 完成任何功能后必须 `make test` 全绿（2026-10-20 收集口径 818 项；历史基线 599 项；含覆盖率门禁 ≥80%）；新模块补齐对应单测（对照 DEVELOPMENT 第 8.1 矩阵）。
+- 完成任何功能后必须 `make test` 全绿（2026-10-20 收集口径 826 项；历史基线 599 项；含覆盖率门禁 ≥80%）；新模块补齐对应单测（对照 DEVELOPMENT 第 8.1 矩阵）。
 - 评测回归（两层评测策略，DEVELOPMENT 8.4/8.5：验证集与测试集分离）：
   验证集 `tests/eval/qa_pairs/`（default/docs 自建 107 条 + complex 难度分层 90 条）经 `make eval` 出报告（13.1 度量协议，改检索/改写/检测等影响指标的功能必须前后对比；complex 按 variant 逐层看通过率，首轮基线存档后不回退）；
   外部测试集 `tests/review/`（首个 CMRC 2018，独立 kb `cmrc`，160 条）经 `make review` 出报告——量真实效果、看趋势 Δ，不设"全绿"门禁；
