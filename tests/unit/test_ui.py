@@ -96,3 +96,15 @@ def test_s4_security_response_headers_present(client):
     csp = resp.headers.get("content-security-policy", "")
     assert "default-src 'self'" in csp
     assert "unsafe-eval" not in csp, "CSP 不允许 unsafe-eval"
+
+
+def test_spa_html_not_cached(client):
+    """history 路由回退的 index.html 必须 no-store。
+
+    否则 /documents 等子路由被浏览器缓存，重新构建后仍引用已删除的旧 chunk，
+    直接刷新会出现整页空白（生产上已实际发生）。
+    """
+    for path in ("/", "/documents", "/kbs", "/settings"):
+        resp = client.get(path)
+        assert resp.status_code == 200, path
+        assert resp.headers.get("cache-control") == "no-store", path
