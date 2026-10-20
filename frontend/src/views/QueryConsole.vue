@@ -1,382 +1,1173 @@
 <script setup>
-import { nextTick, onMounted, ref, watch } from 'vue'
-import { storeToRefs } from 'pinia'
-import { ChatDotRound, ChatLineRound, Cpu, Delete, MagicStick, Promotion } from '@element-plus/icons-vue'
-import { api } from '../api'
-import { friendlyError } from '../api/index.js'
+/**
+ * 问答控制台（Apple Messages 式）
+ * 功能：建议问题 / 停止生成 / 重新生成 / 编辑上一条 / 导出对话 / 逐句引用 /
+ *      来源卡片（可展开、可复制）/ 反思过程 / 本地反馈 / 键盘操作 / 移动端自适应。
+ *
+ * 生命周期约定（本批重点）：
+ * - 在途请求由 useChatQuery 的模块级 controller 统一管理，切页/清空/登出/401 都能停；
+ * - 每次请求带 generation，旧请求回来时 generation 不一致 → 直接丢弃，
+ *   避免"切页后旧回答落到新会话"或"旧 finally 把新请求的 loading 置 false"；
+ * - 停止由 UI 侧统一插入可重试占位，响应侧不再各自 push。
+ */
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import {
+  Bottom, ChatDotRound, ChatLineRound, CircleCheck, CircleClose, Delete, Download,
+  MagicStick, MoreFilled, Promotion, Search, UploadFilled, VideoPause,
+} from '@element-plus/icons-vue'
+import PageHeader from '../components/PageHeader.vue'
+import EmptyState from '../components/EmptyState.vue'
+import SegmentedControl from '../components/SegmentedControl.vue'
+import InlineText from '../components/InlineText.vue'
+import { api, CANCELLED_CODE, friendlyError } from '../api'
 import { useAppStore } from '../stores/app'
+import { useKbs } from '../composables/useKbs'
+import { focusComposerTick } from '../composables/useUi'
+import { beginQuery, abortQuery, finishQuery, isCurrent } from '../composables/useChatQuery'
+import { buildHistory, findLastUserIndex } from '../utils/chat'
+import { hostOf, safeHttpUrl } from '../utils/url'
+import { parseMarkdown } from '../utils/markdown'
+import { formatClock, formatDuration, formatPercent, toNumber } from '../utils/format'
 
 const store = useAppStore()
-const kbs = ref([])
-const kbId = ref('default')
-const debug = ref(false)
-const emptyKb = ref(false)          // 当前知识库无文档 → 空态给引导（先上传再提问）
-let msgSeq = 0                       // 消息稳定 key：避免 :key="i" 索引复用导致 DOM 状态错乱
-const mkMsg = (msg) => ({ id: ++msgSeq, ...msg })
-const { chat, webSearch } = storeToRefs(store)   // 会话/联网开关提升到 store：切页不丢
-const bodyRef = ref(null)
-const inputRef = ref(null)   // 编辑消息时聚焦输入框
-let composing = false      // 中文输入法组合期：Enter 用于确认候选，不发送
+const { kbs, load: loadKbs } = useKbs()
 
-onMounted(loadKbs)
-async function loadKbs() {
-  const res = await api('/api/kbs')
-  if (res.code === 0) {
-    kbs.value = res.data.kbs || []
-    const prev = kbId.value
-    if (!kbs.value.some((k) => k.kb_id === kbId.value)) kbId.value = 'default'
-    // 仅当 kbId 未变化（watch 未触发）时手动刷新空库状态，避免双请求
-    if (kbId.value === prev) await refreshKbDocs()
+const chat = computed(() => store.chat)
+const debug = ref(false)
+const mode = ref('auto')   // P-D：auto | reflect | agentic（后端未启用时自动回退）
+const webSearch = computed({
+  get: () => store.webSearch,
+  set: (v) => { store.webSearch = v },
+})
+
+const bodyRef = ref(null)
+const inputRef = ref(null)
+const atBottom = ref(true)
+const docNames = ref([])
+const kbDocs = ref(0)
+const expandedSources = ref({})
+const feedback = ref({})
+let composing = false
+let pendingInsertAt = null   // 停止时把占位插回原位置（重生成场景）
+
+const currentKb = computed(() => kbs.value.find((k) => k.kb_id === store.kbId) || null)
+const emptyKb = computed(() => kbDocs.value === 0)
+const messages = computed(() => chat.value.messages)
+const lastUserIndex = computed(() => findLastUserIndex(messages.value))
+const lastUserMessage = computed(() => messages.value[lastUserIndex.value] || null)
+
+/* ---------------- 数据加载 ---------------- */
+onMounted(async () => {
+  await loadKbs()
+  ensureKbAccessible()
+  loadFeedback()
+  // 切页/刷新回来时恢复到底部：否则长对话停在顶部，且“回到底部”按钮因 atBottom=true 而隐藏
+  if (messages.value.length) nextTick(() => scrollToBottom())
+})
+
+onUnmounted(() => {
+  // 离开页面即放弃在途请求：否则回答会落到"已看不见"的会话里，且 loading 常驻
+  abortQuery()
+  chat.value.loading = false
+  pendingInsertAt = null
+})
+
+/** 上次选中的库可能已被删除或无权访问 → 回落到 default，避免空白列表与无效请求。 */
+function ensureKbAccessible() {
+  if (kbs.value.length && !kbs.value.some((k) => k.kb_id === store.kbId)) {
+    store.setKbId('default')
+    store.pushInfo('上次使用的知识库不可用，已切回默认库')
   }
 }
-async function refreshKbDocs() {
-  const res = await api(`/api/documents?page=1&size=1&kb_id=${kbId.value}`)
-  emptyKb.value = res.code === 0 && (res.data.total || 0) === 0
-}
-watch(kbId, refreshKbDocs)
 
-async function ask() {
-  if (chat.value.loading) return            // A2：请求进行中禁止并发提交（Enter 路径）
-  const q = chat.value.query.trim()
-  if (!q) { store.pushError('请输入问题'); return }
-  // 会话记忆：携带最近 6 轮（不含当前问题）；仅用户提问与成功回答进历史，
-  // 错误气泡（result.code !== 0）不进历史，避免污染模型上下文
-  const history = chat.value.messages
-    .slice(-6)
-    .filter((m) => m.role === 'user' || (m.result && m.result.code === 0))
-    .map((m) => ({
-      role: m.role,
-      content: m.role === 'user' ? m.text : (m.text || ''),
-    }))
-  // 13.13 T3：携带服务端会话 ID（dialogue 启用时后端历史优先；关闭时 history 兼容现状）
-  const sessionId = store.ensureSessionId()
-  chat.value.messages.push(mkMsg({ role: 'user', text: q, time: new Date() }))
+/** 侧栏/命令面板/本页下拉任一入口切库都会触发：文档数、建议问题、空态同步刷新。 */
+watch(
+  () => store.kbId,
+  () => { loadKbDocs() },
+  { immediate: true },
+)
+
+async function loadKbDocs() {
+  const kbId = store.kbId
+  const res = await api(`/api/documents?page=1&size=20&kb_id=${encodeURIComponent(kbId)}`, { silent: true })
+  if (kbId !== store.kbId) return   // 快速切库：丢弃过期响应
+  if (res.code === 0) {
+    kbDocs.value = res.data.total || 0
+    docNames.value = (res.data.items || []).map((d) => d.filename.replace(/\.[^.]+$/, ''))
+  } else {
+    kbDocs.value = 0
+    docNames.value = []
+  }
+}
+
+function onKbChange() {
+  // v-model 已写入 store.kbId，但 setKbId 负责持久化到 localStorage；
+  // 不调用它会导致刷新后回到上一次写入的库（选中态与持久态不一致）。
+  store.setKbId(store.kbId)
+  const name = currentKb.value ? currentKb.value.name : store.kbId
+  store.pushInfo(`已切换到「${name}」`)
+  nextTick(() => inputRef.value && inputRef.value.focus())
+}
+
+/* ---------------- 建议问题 ---------------- */
+const suggestions = computed(() => {
+  const d = docNames.value
+  const out = []
+  if (d[0]) out.push(`总结《${d[0]}》的核心要点`)
+  if (d[0]) out.push(`《${d[0]}》里有哪些关键规定？`)
+  if (d[1]) out.push(`《${d[1]}》讲了什么？`)
+  if (!out.length) out.push('这个知识库可以回答哪些问题？')
+  return out.slice(0, 3)
+})
+
+function useSuggestion(text) {
+  chat.value.query = text
+  nextTick(() => inputRef.value && inputRef.value.focus())
+}
+
+/* ---------------- 提问 / 停止 / 重试 ---------------- */
+function newId() {
+  return `m-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
+}
+
+function insertMessage(message, at) {
+  if (at == null) messages.value.push(message)
+  else messages.value.splice(Math.min(at, messages.value.length), 0, message)
+}
+
+/**
+ * @param {string} q
+ * @param {{appendUser?: boolean, insertAt?: number|null, historyOverride?: Array|null}} options
+ */
+async function runQuery(q, options = {}) {
+  const { appendUser = true, insertAt = null, historyOverride = null } = options
+  if (chat.value.loading) {
+    store.pushInfo('正在生成回答，请先停止后再重试')
+    return
+  }
+  const question = String(q || '').trim()
+  if (!question) { store.pushError('请输入问题'); return }
+
+  const history = historyOverride || buildHistory(messages.value)
+  if (appendUser) {
+    messages.value.push({ id: newId(), role: 'user', text: question, time: new Date() })
+  }
   chat.value.query = ''
+  atBottom.value = true
+  scrollToBottom()
+
+  const token = beginQuery()
+  pendingInsertAt = insertAt
   chat.value.loading = true
   try {
     const res = await api('/api/query', {
       method: 'POST',
-      body: JSON.stringify({ query: q, kb_id: kbId.value, debug: debug.value, web_search: webSearch.value, history, session_id: sessionId }),
+      signal: token.signal,
+      body: JSON.stringify({
+        query: question,
+        kb_id: store.kbId,
+        debug: debug.value,
+        web_search: webSearch.value,
+        mode: mode.value,
+        history,
+        session_id: store.ensureSessionId(),
+      }),
     })
-    // A4：api() 不再 throw（网络失败返回 code:50001），此处统一渲染错误气泡
-    chat.value.messages.push(mkMsg({
+    // 被停止/清空/登出/新请求取代：旧响应一律丢弃
+    if (!isCurrent(token.generation)) return
+    if (res.code === CANCELLED_CODE) return   // 停止占位由 stop() 统一插入
+
+    const okAnswer = res.code === 0
+    insertMessage({
+      id: newId(),
       role: 'assistant',
-      text: res.code !== 0
-        ? friendlyError(res.code, res.message)
-        : ((res.data && res.data.answer) || ''),
+      text: okAnswer ? ((res.data && res.data.answer) || '') : friendlyError(res.code, res.message),
       result: { ...(res.data || {}), code: res.code },
       time: new Date(),
-    }))
+      error: !okAnswer,
+    }, insertAt)
   } catch (e) {
-    chat.value.messages.push(mkMsg({
+    if (!isCurrent(token.generation)) return
+    insertMessage({
+      id: newId(),
       role: 'assistant',
-      text: friendlyError(-1, String(e && e.message || e)),
-      result: { code: -1, message: String(e && e.message || e) },
+      text: friendlyError(-1, String((e && e.message) || e)),
+      result: { code: -1, message: String((e && e.message) || e) },
       time: new Date(),
-    }))
+      error: true,
+    }, insertAt)
   } finally {
-    chat.value.loading = false
+    finishQuery(token)
+    if (isCurrent(token.generation)) {
+      chat.value.loading = false
+      pendingInsertAt = null
+      if (atBottom.value) scrollToBottom()
+    }
   }
+}
+
+function ask() {
+  runQuery(chat.value.query)
+}
+
+/** 停止生成：中断请求，并在原位置插入可重试的占位（不在响应侧各自 push，避免竞态）。 */
+function stop() {
+  if (!chat.value.loading) return
+  const at = pendingInsertAt
+  abortQuery()
+  chat.value.loading = false
+  pendingInsertAt = null
+  insertMessage({
+    id: newId(), role: 'assistant', text: '', result: null, interrupted: true, time: new Date(),
+  }, at)
+  store.pushInfo('已停止生成')
+  if (atBottom.value) scrollToBottom()
+}
+
+/**
+ * 重新生成：只重跑该回答对应的提问。
+ * - loading 中直接拒绝，不能先 splice 再静默失败；
+ * - 历史只取该问题之前的消息，且排除"当前问题"本身（它已在 payload.query）；
+ * - 新回答插回原 index，而不是 append 到末尾。
+ */
+function regenerate(index) {
+  if (chat.value.loading) {
+    store.pushInfo('请先停止当前生成，再重新生成')
+    return
+  }
+  const target = messages.value[index]
+  if (!target || target.role !== 'assistant') return
+  const question = findQuestionBefore(index)
+  if (!question) return
+  const historyOverride = buildHistory(messages.value, { beforeIndex: index, excludeTrailingUser: true })
+  messages.value.splice(index, 1)
+  runQuery(question, { appendUser: false, insertAt: index, historyOverride })
+}
+
+function findQuestionBefore(index) {
+  for (let i = index - 1; i >= 0; i -= 1) {
+    if (messages.value[i].role === 'user') return messages.value[i].text
+  }
+  return ''
+}
+
+function retry(index) {
+  regenerate(index)
 }
 
 function onEnter(e) {
   if (e.isComposing || composing) return   // IME 组合期（确认候选词）不发送
+  if (e.metaKey || e.ctrlKey) return       // ⌘Enter 交给单独处理器
   ask()
 }
 
+function onComposerKeydown(e) {
+  if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+    e.preventDefault()
+    ask()
+    return
+  }
+  if ((e.metaKey || e.ctrlKey) && e.key === '.') {
+    e.preventDefault()
+    if (chat.value.loading) stop()
+    return
+  }
+  if (e.key === 'ArrowUp' && !chat.value.query && !chat.value.loading && lastUserIndex.value >= 0) {
+    e.preventDefault()
+    editUserMessage(lastUserIndex.value)
+  }
+}
+
+/* ---------------- 消息操作 ---------------- */
 function clearChat() {
+  abortQuery()
+  chat.value.loading = false
+  pendingInsertAt = null
   chat.value.messages = []
-  store.resetSession()   // 13.13 T3：清空对话 = 开启新会话（服务端历史/澄清计数随之重置）
+  chat.value.query = ''
+  store.resetSession()
+  feedback.value = {}
+  store.pushInfo('已开始新会话')
 }
 
-// 回答按 [N] 引用切段渲染（模板插值，禁 innerHTML/v-html）
-function answerParts(msg) {
-  return (msg.text || '').split(/(\[\d+\])/g).filter(Boolean).map((part) => ({
-    text: part,
-    citation: /^\[\d+\]$/.test(part),
-  }))
-}
-
-// 已证率较高（≥0.6）即视为通过，避免「高已证率却仍显示未通过」的误导
-function getVerifiedRate(result) {
-  return (result && result.citations && result.citations.confirmed) ?? 0
-}
-function passedCheck(result) {
-  if (!result) return false
-  if (result.hallucination_check === 'passed') return true
-  return getVerifiedRate(result) >= 0.6
-}
-function badgeType(result) {
-  return passedCheck(result) ? 'success' : 'warning'
-}
-function badgeText(result) {
-  return passedCheck(result) ? '幻觉检测通过' : '幻觉检测未通过（疑似）'
-}
-function stepTitle(step) {
-  if (step.rewritten !== undefined) return `iter ${step.iter} · 改写 → ${(step.rewritten || []).join(' / ')}`
-  if (step.llm_ms !== undefined) return `iter ${step.iter} · LLM 耗时 ${step.llm_ms}ms`
-  return `iter ${step.iter} · query=${step.query} · score=${step.evaluator_score} · reason=${step.reason}`
-}
-
-function fmtTime(d) {
-  if (!d) return ''
-  return new Date(d).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
-}
-
-// 消息气泡悬停操作：复制 / 编辑（编辑仅用户消息：回填输入框以便修改后重发）
-async function copyText(text) {
+async function copyText(text, tip = '已复制到剪贴板') {
   try {
     await navigator.clipboard.writeText(text || '')
-    store.pushInfo('已复制到剪贴板')
+    store.pushInfo(tip)
   } catch {
     store.pushError('复制失败，请手动选择复制')
   }
 }
-function editUserMessage(m) {
-  chat.value.query = m.text || ''
-  nextTick(() => { if (inputRef.value) inputRef.value.focus() })
+
+function editUserMessage(index) {
+  const msg = messages.value[index]
+  if (!msg || msg.role !== 'user') return
+  chat.value.query = msg.text || ''
+  nextTick(() => {
+    if (inputRef.value) inputRef.value.focus()
+  })
+}
+
+function vote(msg, dir) {
+  const next = feedback.value[msg.id] === dir ? null : dir
+  const map = { ...feedback.value }
+  if (next) map[msg.id] = next
+  else delete map[msg.id]
+  feedback.value = map
+  persistFeedback()
+  if (next) store.pushInfo(next === 'up' ? '感谢反馈：回答有帮助' : '感谢反馈：回答需改进（记录在本机）')
+}
+
+function loadFeedback() {
+  try {
+    feedback.value = JSON.parse(localStorage.getItem('rag_feedback') || '{}') || {}
+  } catch { feedback.value = {} }
+}
+function persistFeedback() {
+  try {
+    localStorage.setItem('rag_feedback', JSON.stringify(feedback.value))
+  } catch { /* ignore */ }
+}
+
+/* ---------------- 渲染辅助 ---------------- */
+const blockCache = new Map()
+function blocks(text) {
+  const key = String(text || '')
+  if (blockCache.has(key)) return blockCache.get(key)
+  const parsed = parseMarkdown(key)
+  if (blockCache.size > 60) blockCache.clear()
+  blockCache.set(key, parsed)
+  return parsed
+}
+
+function citedText(result) {
+  const used = (result && result.citations && result.citations.used) || []
+  return Array.isArray(used) ? used.join(' ') : String(used || '')
+}
+
+function verifiedRate(result) {
+  return Math.min(Math.max(toNumber(result && result.citations && result.citations.confirmed, 0), 0), 1)
+}
+
+/** 后端给了 hallucination_check 就严格照办；只有字段缺失时才用已证率兜底。 */
+function passedCheck(result) {
+  if (!result) return false
+  if (result.hallucination_check === 'passed') return true
+  if (result.hallucination_check === 'suspected') return false
+  return verifiedRate(result) >= 0.6
+}
+
+function badgeType(result) {
+  return passedCheck(result) ? 'success' : 'warning'
+}
+
+function badgeText(result) {
+  const rate = formatPercent(verifiedRate(result))
+  return passedCheck(result) ? `已证 ${rate} · 通过` : `已证 ${rate} · 待核实`
+}
+
+function sourceScore(source) {
+  const s = toNumber(source && source.score, 0)
+  return Math.min(Math.max(s, 0), 1)
+}
+
+function isExpanded(msgId, i) {
+  return Boolean(expandedSources.value[`${msgId}-${i}`])
+}
+function toggleSource(msgId, i) {
+  const key = `${msgId}-${i}`
+  expandedSources.value = { ...expandedSources.value, [key]: !expandedSources.value[key] }
+}
+
+function sourceLabel(source) {
+  return source.source_type === 'web' ? '网页' : '知识库'
+}
+
+/** 网页来源没有页码：不要把 URL 当“第 x 页”渲染。 */
+function sourceMeta(source) {
+  if (!source || source.source_type === 'web') return ''
+  return source.page ? `第 ${source.page} 页` : ''
+}
+
+function sourceHost(source) {
+  return source && source.source_type === 'web' ? hostOf(source.url) : ''
+}
+
+/** 只放行 http/https，杜绝 javascript:/data: 之类 scheme。 */
+function sourceLink(source) {
+  return safeHttpUrl(source && source.url)
+}
+
+function jumpToSources(msgId) {
+  atBottom.value = true
+  const el = document.getElementById(`sources-${msgId}`)
+  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+}
+
+/* ---------------- 导出 ---------------- */
+function exportChat() {
+  if (!messages.value.length) { store.pushInfo('当前没有可导出的对话'); return }
+  const kbName = currentKb.value ? currentKb.value.name : store.kbId
+  const lines = ['# Agentic RAG 对话导出', '', `- 导出时间：${new Date().toLocaleString('zh-CN')}`, `- 知识库：${kbName}`, '']
+  for (const m of messages.value) {
+    if (m.role === 'user') {
+      lines.push(`## 问：${m.text}`, '')
+    } else if (m.interrupted) {
+      lines.push('## 答（已停止生成）', '')
+    } else {
+      lines.push('## 答', '', m.text || '', '')
+      const sources = (m.result && m.result.sources) || []
+      if (sources.length) {
+        lines.push('**引用来源**', '')
+        sources.forEach((s, i) => {
+          lines.push(`${i + 1}. ${s.filename || '未知文件'}${s.page ? ` · 第 ${s.page} 页` : ''}${s.url ? ` · ${s.url}` : ''}`)
+        })
+        lines.push('')
+      }
+    }
+  }
+  const blob = new Blob([lines.join('\n')], { type: 'text/markdown;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `rag-chat-${new Date().toISOString().slice(0, 16).replace(/[:T]/g, '')}.md`
+  a.click()
+  URL.revokeObjectURL(url)
+  store.pushInfo('对话已导出为 Markdown')
+}
+
+function onMenu(command) {
+  if (command === 'export') exportChat()
+  else if (command === 'clear') clearChat()
+}
+
+/* ---------------- 滚动 ---------------- */
+const SCROLL_THRESHOLD = 72
+
+function onScroll() {
+  const el = bodyRef.value
+  if (!el) return
+  atBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight < SCROLL_THRESHOLD
+}
+
+function scrollToBottom(smooth = false) {
+  nextTick(() => {
+    const el = bodyRef.value
+    if (!el) return
+    el.scrollTo({ top: el.scrollHeight, behavior: smooth ? 'smooth' : 'auto' })
+  })
 }
 
 watch(
-  () => chat.value.messages.length,
-  () => nextTick(() => { if (bodyRef.value) bodyRef.value.scrollTop = bodyRef.value.scrollHeight }),
+  () => [messages.value.length, chat.value.loading],
+  () => { if (atBottom.value) scrollToBottom() },
 )
+
+// 命令面板「新对话」后把焦点交还输入框
+watch(focusComposerTick, () => nextTick(() => inputRef.value && inputRef.value.focus()))
+
+const canSend = computed(() => Boolean(chat.value.query.trim()) && !chat.value.loading)
 </script>
 
 <template>
-  <div class="chat">
-    <div class="card chat-header">
-      <h2 class="card-title" style="flex: 1; margin: 0">
-        <span class="title-icon"><el-icon><ChatLineRound /></el-icon></span>问答控制台
-      </h2>
-      <el-select v-model="kbId" style="width: 240px">
-        <el-option v-for="k in kbs" :key="k.kb_id" :label="k.name" :value="k.kb_id" />
-      </el-select>
-      <el-checkbox v-model="debug">展示反思过程</el-checkbox>
-      <el-checkbox v-model="webSearch">联网搜索</el-checkbox>
-      <el-button @click="clearChat" :disabled="!chat.messages.length">
-        <el-icon style="margin-right: 5px"><Delete /></el-icon>清空对话
-      </el-button>
-    </div>
+  <div class="chat-page">
+    <header class="chat-head">
+      <PageHeader
+        title="问答控制台"
+        :subtitle="`${currentKb ? currentKb.name : store.kbId} · ${kbDocs} 份文档 · 回答均带引用来源`"
+      >
+        <template #actions>
+          <el-select v-model="store.kbId" class="kb-select" placeholder="知识库" @change="onKbChange">
+            <el-option v-for="k in kbs" :key="k.kb_id" :label="k.name" :value="k.kb_id" />
+          </el-select>
 
-    <div class="card chat-body" ref="bodyRef">
-      <div v-if="!chat.messages.length" class="chat-empty">
-        <el-icon class="chat-empty-icon"><ChatDotRound /></el-icon>
-        <p>基于知识库的智能问答</p>
-        <p v-if="emptyKb" class="muted">
-          当前知识库暂无文档——请先到
-          <router-link to="/documents" class="empty-link">文档管理</router-link>上传文档后再提问
-        </p>
-        <p v-else class="muted">输入问题开始提问，回答将带引用来源与溯源评分</p>
-      </div>
+          <SegmentedControl
+            v-model="debug"
+            :options="[{ value: false, label: '简洁' }, { value: true, label: '反思过程' }]"
+            size="sm"
+          />
 
-      <template v-for="(m) in chat.messages" :key="m.id">
-        <div v-if="m.role === 'user'" class="msg-row msg-user">
-          <div class="msg-main">
-            <div class="bubble bubble-user">{{ m.text }}</div>
-            <div class="msg-meta">{{ fmtTime(m.time) }}</div>
-            <div class="msg-actions">
-              <el-button text size="small" class="act-btn" @click="copyText(m.text)">复制</el-button>
-              <el-button text size="small" class="act-btn" @click="editUserMessage(m)">编辑</el-button>
+          <SegmentedControl
+            v-model="mode"
+            :options="[
+              { value: 'auto', label: '自动' },
+              { value: 'reflect', label: '反思' },
+              { value: 'agentic', label: 'Agent' },
+            ]"
+            size="sm"
+          />
+
+          <el-tooltip :content="webSearch ? '联网搜索已开启' : '仅检索本地知识库'" placement="bottom">
+            <button
+              type="button"
+              class="web-toggle"
+              :class="{ 'is-on': webSearch }"
+              :aria-pressed="webSearch"
+              @click="webSearch = !webSearch"
+            >
+              <el-icon><Search /></el-icon>
+              <span>联网</span>
+            </button>
+          </el-tooltip>
+
+          <el-dropdown trigger="click" @command="onMenu">
+            <button type="button" class="btn-icon" aria-label="更多操作">
+              <el-icon><MoreFilled /></el-icon>
+            </button>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item command="export" :disabled="!messages.length">
+                  <el-icon><Download /></el-icon>导出对话
+                </el-dropdown-item>
+                <el-dropdown-item command="clear" :disabled="!messages.length" divided>
+                  <el-icon><Delete /></el-icon>清空对话
+                </el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
+        </template>
+      </PageHeader>
+    </header>
+
+    <div ref="bodyRef" class="chat-scroll" @scroll.passive="onScroll">
+      <div class="chat-inner" :class="{ 'chat-inner--empty': !messages.length }">
+        <!-- 空态：建议问题一键填入 -->
+        <EmptyState
+          v-if="!messages.length"
+          :icon="ChatLineRound"
+          title="基于知识库的智能问答"
+          :description="emptyKb
+            ? '当前知识库还没有文档。先上传文档，答案才有据可依。'
+            : '直接提问，或从下面的建议开始。回答会标注引用编号与已证率。'"
+        >
+          <template #default>
+            <router-link v-if="emptyKb" to="/documents">
+              <el-button type="primary">
+                <el-icon style="margin-right: 6px"><UploadFilled /></el-icon>上传第一份文档
+              </el-button>
+            </router-link>
+            <template v-else>
+              <button
+                v-for="s in suggestions"
+                :key="s"
+                type="button"
+                class="suggestion"
+                @click="useSuggestion(s)"
+              >
+                <el-icon><MagicStick /></el-icon>
+                <span>{{ s }}</span>
+              </button>
+            </template>
+          </template>
+        </EmptyState>
+
+        <template v-for="(m, index) in messages" :key="m.id">
+          <!-- 用户消息 -->
+          <div v-if="m.role === 'user'" class="msg msg--user">
+            <div class="msg-body">
+              <div class="bubble--user">{{ m.text }}</div>
+              <div class="msg-tools">
+                <span class="msg-time">{{ formatClock(m.time) }}</span>
+                <button type="button" class="tool" @click="copyText(m.text)">复制</button>
+                <button type="button" class="tool" @click="editUserMessage(index)">编辑</button>
+              </div>
             </div>
           </div>
-          <div class="avatar avatar-user"><el-icon><Promotion /></el-icon></div>
-        </div>
 
-        <div v-else class="msg-row msg-ai">
-          <div class="avatar avatar-ai"><el-icon><Cpu /></el-icon></div>
-          <div class="msg-main">
-            <div class="bubble bubble-ai">
-              <template v-if="m.result && m.result.code !== 0">
-                <el-alert v-if="m.result.need_clarify" type="warning" :closable="false" show-icon
-                          :title="'需要澄清：' + m.text" style="margin: 0" />
-                <div v-else class="answer-box" style="margin: 0">{{ m.text }}</div>
-              </template>
-              <template v-else>
-                <div class="answer-text">
-                  <template v-for="(part, j) in answerParts(m)" :key="j">
-                    <span v-if="part.citation" class="cite">{{ part.text }}</span>
-                    <template v-else>{{ part.text }}</template>
-                  </template>
-                </div>
-                <div v-if="m.result" class="meta-row">
-                  <el-tag :type="badgeType(m.result)" size="small">{{ badgeText(m.result) }}</el-tag>
-                  <span class="meta-text">引用 {{ (m.result.citations && m.result.citations.used) || [] }}</span>
-                </div>
-                <el-collapse v-if="m.result && m.result.sources && m.result.sources.length" class="sources">
-                  <el-collapse-item :title="`引用来源（${m.result.sources.length}）· 已证率 ${(((m.result.citations && m.result.citations.confirmed) ?? 0)).toFixed(2)}`" :name="1">
-                    <el-table :data="m.result.sources" size="small" border>
-                      <el-table-column label="来源" width="84">
-                        <template #default="{ row }">
-                          <el-tag v-if="row.source_type === 'web'" type="info" size="small" effect="plain">网页</el-tag>
-                          <el-tag v-else type="success" size="small" effect="plain">知识库</el-tag>
-                        </template>
-                      </el-table-column>
-                      <el-table-column label="文件" min-width="140">
-                        <template #default="{ row }">
-                          <span class="src-file">{{ row.filename }}</span>
-                        </template>
-                      </el-table-column>
-                      <el-table-column label="页码" min-width="180">
-                        <template #default="{ row }">
-                          <a v-if="row.url" :href="row.url" target="_blank" rel="noopener noreferrer" class="src-link">{{ row.page }}</a>
-                          <span v-else>{{ row.page }}</span>
-                        </template>
-                      </el-table-column>
-                      <el-table-column prop="score" label="相关度评分" width="100">
-                        <template #default="{ row }">{{ row.score.toFixed(3) }}</template>
-                      </el-table-column>
-                      <el-table-column label="片段">
-                        <template #default="{ row }">{{ (row.chunk || '').slice(0, 200) }}</template>
-                      </el-table-column>
-                    </el-table>
-                  </el-collapse-item>
-                </el-collapse>
+          <!-- 助手消息 -->
+          <div v-else class="msg msg--ai">
+            <span class="ai-avatar" aria-hidden="true"><el-icon><ChatDotRound /></el-icon></span>
+            <div class="msg-body">
+              <!-- 中断 -->
+              <div v-if="m.interrupted" class="interrupted">
+                <el-icon><VideoPause /></el-icon>
+                <span>已停止生成</span>
+                <button type="button" class="tool tool--strong" @click="retry(index)">重新生成</button>
+              </div>
 
-                <el-collapse
-                  v-if="debug && m.result && m.result.debug_trace && m.result.debug_trace.length"
-                  class="sources"
-                >
-                  <el-collapse-item :title="`反思过程（${m.result.debug_trace.length} 步）`" :name="1">
-                    <template v-for="(step, k) in m.result.debug_trace" :key="k">
-                      <div class="debug-step-title">{{ stepTitle(step) }}</div>
-                      <pre class="debug-step">{{ JSON.stringify(step, null, 2) }}</pre>
-                    </template>
-                  </el-collapse-item>
-                </el-collapse>
-              </template>
-            </div>
-            <div class="msg-time">{{ fmtTime(m.time) }}</div>
-            <div class="msg-actions">
-              <el-button text size="small" class="act-btn" @click="copyText(m.text)">复制</el-button>
+              <!-- 失败 -->
+              <div v-else-if="m.error || (m.result && m.result.code !== 0)" class="answer answer--error">
+                <p class="error-title">
+                  <el-icon><CircleClose /></el-icon>
+                  {{ (m.result && (m.result.code === 21003 || m.result.need_clarify)) ? '需要澄清' : '未能回答' }}
+                </p>
+                <p class="error-text">{{ m.text }}</p>
+                <button type="button" class="tool tool--strong" @click="retry(index)">重试</button>
+              </div>
+
+              <!-- 正常回答 -->
+              <div v-else class="answer">
+                <div v-if="!blocks(m.text).length" class="answer-empty muted">（空回答）</div>
+                <template v-for="(b, bi) in blocks(m.text)" :key="bi">
+                  <h3 v-if="b.type === 'h1' || b.type === 'h2' || b.type === 'h3' || b.type === 'h4'" class="md-h">
+                    <InlineText :text="b.text" @cite="jumpToSources(m.id)" />
+                  </h3>
+                  <ul v-else-if="b.type === 'ul'" class="md-list">
+                    <li v-for="(it, ii) in b.items" :key="ii"><InlineText :text="it" @cite="jumpToSources(m.id)" /></li>
+                  </ul>
+                  <ol v-else-if="b.type === 'ol'" class="md-list">
+                    <li v-for="(it, ii) in b.items" :key="ii"><InlineText :text="it" @cite="jumpToSources(m.id)" /></li>
+                  </ol>
+                  <blockquote v-else-if="b.type === 'quote'" class="md-quote">
+                    <InlineText :text="b.text" @cite="jumpToSources(m.id)" />
+                  </blockquote>
+                  <pre v-else-if="b.type === 'code'" class="md-code"><code>{{ b.text }}</code></pre>
+                  <hr v-else-if="b.type === 'hr'" class="md-hr" />
+                  <p v-else class="md-p"><InlineText :text="b.text" @cite="jumpToSources(m.id)" /></p>
+                </template>
+
+                <div v-if="m.result" class="answer-meta">
+                  <el-tag :type="badgeType(m.result)" size="small" effect="light">
+                    <el-icon class="meta-icon"><CircleCheck v-if="passedCheck(m.result)" /><CircleClose v-else /></el-icon>
+                    {{ badgeText(m.result) }}
+                  </el-tag>
+                  <span v-if="citedText(m.result)" class="meta-chip mono">引用 {{ citedText(m.result) }}</span>
+                  <span class="meta-chip">{{ formatDuration(m.result.elapsed_ms) }}</span>
+                  <span v-if="m.result.iterations" class="meta-chip">反思 {{ m.result.iterations }} 轮</span>
+                  <span v-if="m.result.index_dna_mismatch" class="meta-chip meta-chip--warn">索引配置不一致</span>
+                </div>
+
+                <!-- 来源卡片 -->
+                <div v-if="m.result && m.result.sources && m.result.sources.length" :id="`sources-${m.id}`" class="sources">
+                  <p class="sources-title">
+                    引用来源
+                    <span class="muted">{{ m.result.sources.length }} 条 · 点击正文编号可跳转</span>
+                  </p>
+                  <article v-for="(s, si) in m.result.sources" :key="si" class="source">
+                    <div class="source-head">
+                      <span class="source-index">[{{ si + 1 }}]</span>
+                      <span class="source-file truncate" :title="s.filename">{{ s.filename || '未知来源' }}</span>
+                      <el-tag size="small" :type="s.source_type === 'web' ? 'info' : 'success'" effect="plain">
+                        {{ sourceLabel(s) }}
+                      </el-tag>
+                      <span v-if="sourceMeta(s)" class="source-page">{{ sourceMeta(s) }}</span>
+                      <span v-else-if="sourceHost(s)" class="source-page">{{ sourceHost(s) }}</span>
+                      <span class="source-score" :title="`相关度 ${sourceScore(s).toFixed(3)}`">
+                        <span class="score-track"><i :style="{ width: `${sourceScore(s) * 100}%` }" /></span>
+                        <b>{{ sourceScore(s).toFixed(2) }}</b>
+                      </span>
+                    </div>
+                    <p class="source-chunk" :class="{ 'is-expanded': isExpanded(m.id, si) }">{{ s.chunk }}</p>
+                    <div class="source-foot">
+                      <button
+                        v-if="(s.chunk || '').length > 160"
+                        type="button"
+                        class="tool"
+                        @click="toggleSource(m.id, si)"
+                      >{{ isExpanded(m.id, si) ? '收起' : '展开全文' }}</button>
+                      <button type="button" class="tool" @click="copyText(s.chunk, '已复制原文片段')">复制片段</button>
+                      <a
+                        v-if="sourceLink(s)"
+                        :href="sourceLink(s)"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        class="tool"
+                      >打开原文</a>
+                    </div>
+                  </article>
+                </div>
+
+                <!-- 反思过程 -->
+                <details v-if="debug && m.result && m.result.debug_trace && m.result.debug_trace.length" class="trace">
+                  <summary>反思过程（{{ m.result.debug_trace.length }} 步）</summary>
+                  <div v-for="(step, k) in m.result.debug_trace" :key="k" class="trace-step">
+                    <p class="trace-title">
+                      第 {{ step.iter ?? k + 1 }} 轮<span v-if="step.reason"> · {{ step.reason }}</span><span v-if="step.evaluator_score !== undefined"> · 评分 {{ step.evaluator_score }}</span>
+                    </p>
+                    <p v-if="step.query" class="trace-query mono">query: {{ step.query }}</p>
+                    <p v-if="step.rewritten && step.rewritten.length" class="trace-query mono">rewrite: {{ step.rewritten.join(' / ') }}</p>
+                    <pre class="trace-json">{{ JSON.stringify(step, null, 2) }}</pre>
+                  </div>
+                </details>
+
+                <!-- Agent 计划/步骤（P-D，debug 时显示） -->
+                <details v-if="debug && m.result && m.result.plan" class="trace">
+                  <summary>Agent 计划（{{ (m.result.plan.subgoals || []).length }} 个子目标）</summary>
+                  <div v-for="g in (m.result.plan.subgoals || [])" :key="g.goal_id" class="trace-step">
+                    <p class="trace-title">{{ g.goal_id }} · {{ g.question }}<span v-if="g.status"> · {{ g.status }}</span></p>
+                    <p v-if="g.success_criteria" class="trace-query">判据：{{ g.success_criteria }}</p>
+                  </div>
+                  <div v-for="(st, k) in (m.result.steps || [])" :key="`st-${k}`" class="trace-step">
+                    <p class="trace-title">第 {{ st.step ?? k + 1 }} 步 · {{ st.action }}</p>
+                    <p v-if="st.summary" class="trace-query">{{ st.summary }}</p>
+                    <p v-if="st.evidence_ids && st.evidence_ids.length" class="trace-query mono">证据：{{ st.evidence_ids.join(' / ') }}</p>
+                  </div>
+                </details>
+              </div>
+
+              <div v-if="!m.interrupted" class="msg-tools msg-tools--ai">
+                <span class="msg-time">{{ formatClock(m.time) }}</span>
+                <button type="button" class="tool" @click="copyText(m.text)">复制</button>
+                <button type="button" class="tool" @click="regenerate(index)">重新生成</button>
+                <span class="vote">
+                  <button
+                    type="button"
+                    class="tool tool--icon"
+                    :class="{ 'is-on': feedback[m.id] === 'up' }"
+                    aria-label="回答有帮助"
+                    @click="vote(m, 'up')"
+                  >👍</button>
+                  <button
+                    type="button"
+                    class="tool tool--icon"
+                    :class="{ 'is-on': feedback[m.id] === 'down' }"
+                    aria-label="回答需改进"
+                    @click="vote(m, 'down')"
+                  >👎</button>
+                </span>
+              </div>
             </div>
           </div>
-        </div>
-      </template>
+        </template>
 
-      <div v-if="chat.loading" class="msg-row msg-ai">
-        <div class="avatar avatar-ai"><el-icon><Cpu /></el-icon></div>
-        <div class="bubble bubble-ai typing">
-          <span class="dot" /><span class="dot" /><span class="dot" />
+        <!-- 生成中 -->
+        <div v-if="chat.loading" class="msg msg--ai">
+          <span class="ai-avatar" aria-hidden="true"><el-icon><ChatDotRound /></el-icon></span>
+          <div class="typing" role="status" aria-label="正在生成回答">
+            <span /><span /><span />
+            <em>正在检索并组织答案…</em>
+          </div>
         </div>
       </div>
     </div>
 
-    <div class="card chat-input">
-      <el-input
-        ref="inputRef"
-        v-model="chat.query"
-        type="textarea"
-        :rows="2"
-        resize="none"
-        placeholder="输入问题，Enter 发送；中文输入法中 Enter 仅确认候选字"
-        @keydown.enter.exact.prevent="onEnter"
-        @compositionstart="composing = true"
-        @compositionend="composing = false"
-      />
-      <el-button type="primary" :loading="chat.loading" @click="ask">
-        <el-icon style="margin-right: 5px"><MagicStick /></el-icon>提问
-      </el-button>
-    </div>
+    <transition name="fade">
+      <button v-if="!atBottom" type="button" class="to-bottom" aria-label="回到底部" @click="scrollToBottom(true)">
+        <el-icon><Bottom /></el-icon>
+      </button>
+    </transition>
+
+    <footer class="chat-composer">
+      <div class="composer" :class="{ 'is-busy': chat.loading }">
+        <el-input
+          ref="inputRef"
+          v-model="chat.query"
+          type="textarea"
+          :autosize="{ minRows: 2, maxRows: 6 }"
+          resize="none"
+          maxlength="2000"
+          placeholder="输入问题，Enter 发送；Shift + Enter 换行"
+          aria-label="输入问题"
+          @keydown="onComposerKeydown"
+          @keydown.enter.exact.prevent="onEnter"
+          @compositionstart="composing = true"
+          @compositionend="composing = false"
+        />
+        <div class="composer-bar">
+          <div class="composer-hints">
+            <span class="hint"><span class="kbd">↵</span> 发送</span>
+            <span class="hint"><span class="kbd">⇧↵</span> 换行</span>
+            <span class="hint"><span class="kbd">⌘.</span> 停止</span>
+          </div>
+          <span class="count">{{ chat.query.length }}/2000</span>
+          <el-button v-if="chat.loading" class="send-btn" @click="stop">
+            <el-icon style="margin-right: 5px"><VideoPause /></el-icon>停止
+          </el-button>
+          <el-button v-else type="primary" class="send-btn" :disabled="!canSend" @click="ask">
+            <el-icon style="margin-right: 5px"><Promotion /></el-icon>发送
+          </el-button>
+        </div>
+      </div>
+      <p class="composer-note muted">
+        回答由检索结果与模型生成，请以引用原文为准；联网搜索需服务端配置搜索服务。
+      </p>
+    </footer>
   </div>
 </template>
 
 <style scoped>
-.chat { display: flex; flex-direction: column; height: calc(100vh - 96px); gap: 14px; }
-.chat-header { display: flex; align-items: center; gap: 12px; margin: 0; flex-wrap: wrap; }
-.chat-body {
-  flex: 1;
-  overflow-y: auto;
-  margin: 0;
+.chat-page {
+  position: relative;
   display: flex;
   flex-direction: column;
-  gap: 18px;
-  padding: 20px 24px;
+  height: 100%;
+  min-height: 0;
   background:
-    radial-gradient(1000px 420px at 0% 0%, rgba(255, 154, 112, .08), transparent 60%),
-    radial-gradient(900px 400px at 100% 100%, rgba(255, 201, 158, .08), transparent 60%),
-    #fff;
+    radial-gradient(900px 400px at 12% 0%, var(--accent-soft), transparent 62%),
+    var(--bg);
 }
-.chat-empty { margin: auto; text-align: center; color: #9aa6b8; }
-.chat-empty-icon { font-size: 46px; color: #c6d2e6; }
-.chat-empty p { margin: 8px 0 0; font-size: 14px; color: #5b6b82; }
-.empty-link { color: #ff7a45; text-decoration: none; font-weight: 600; }
-.empty-link:hover { text-decoration: underline; }
+html[data-theme="dark"] .chat-page { background: var(--bg); }
 
-.msg-row { display: flex; gap: 10px; align-items: flex-start; animation: msg-in .3s ease; }
-.msg-user { justify-content: flex-end; }
-.msg-ai { justify-content: flex-start; }
-@keyframes msg-in {
-  from { opacity: 0; transform: translateY(10px); }
-  to { opacity: 1; transform: translateY(0); }
+/* ---------- 顶部 ---------- */
+.chat-head { padding: 20px 28px 10px; flex: none; }
+.kb-select { width: 200px; }
+.web-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: all var(--dur) var(--ease);
 }
-.avatar {
-  width: 36px; height: 36px; border-radius: 50%;
-  display: inline-flex; align-items: center; justify-content: center;
-  font-size: 17px; flex: none; color: #fff;
-  box-shadow: 0 2px 8px rgba(15, 23, 42, .15);
+.web-toggle:hover { border-color: var(--accent); color: var(--accent); }
+.web-toggle.is-on { background: var(--accent-soft); border-color: var(--accent-soft-2); color: var(--accent); }
+
+/* ---------- 消息区 ---------- */
+.chat-scroll { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow-y: auto; padding: 6px 28px 4px; }
+.chat-inner--empty { flex: 1; justify-content: center; }
+.chat-inner {
+  max-width: 860px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  padding-bottom: 18px;
 }
-.avatar-user { background: linear-gradient(135deg, #ff9a70, #ff7a45); }
-.avatar-ai {
-  background: linear-gradient(135deg, #ffc99e, #ff9a70);
-  box-shadow: 0 2px 8px rgba(255, 154, 112, .35);
+
+.msg { display: flex; gap: 10px; align-items: flex-start; animation: fade-up 300ms var(--ease) both; }
+.msg--user { justify-content: flex-end; }
+.msg-body { display: flex; flex-direction: column; max-width: min(76%, 680px); min-width: 0; }
+.msg--user .msg-body { align-items: flex-end; }
+
+.ai-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  flex: none;
+  margin-top: 2px;
+  border-radius: 50%;
+  font-size: 15px;
+  color: #fff;
+  background: var(--accent-gradient);
+  box-shadow: 0 4px 12px var(--accent-ring);
 }
-.msg-main { display: flex; flex-direction: column; max-width: 78%; }
-.msg-user .msg-main { align-items: flex-end; }
-.msg-ai .msg-main { align-items: flex-start; }
-.bubble {
-  padding: 12px 16px;
-  border-radius: 14px;
+
+.bubble--user {
+  padding: 10px 15px;
+  border-radius: 18px;
+  border-bottom-right-radius: 6px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 14px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  word-break: break-word;
+  box-shadow: 0 4px 14px var(--accent-ring);
+}
+
+.answer {
+  padding: 14px 16px;
+  border-radius: 18px;
+  border-bottom-left-radius: 6px;
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  box-shadow: var(--shadow-1);
   font-size: 14px;
   line-height: 1.75;
-  word-break: break-word;
+  color: var(--text);
+  min-width: 0;
 }
-.bubble-user {
-  background: linear-gradient(135deg, #ff9a70, #ff7a45);
-  color: #fff;
-  border-bottom-right-radius: 6px;
-  box-shadow: 0 4px 14px rgba(255, 122, 69, .3);
+.answer--error {
+  border-color: var(--danger-soft);
+  background: var(--danger-soft);
+  color: var(--danger);
 }
-.bubble-ai {
-  background: #fff;
-  border: 1px solid #f2e5d3;
-  border-bottom-left-radius: 6px;
-  box-shadow: 0 2px 10px rgba(150, 105, 60, .08);
-  color: #3d352b;
+.error-title { display: flex; align-items: center; gap: 6px; margin: 0 0 6px; font-weight: 600; font-size: 13px; }
+.error-text { margin: 0; font-size: 13px; line-height: 1.65; }
+.answer-empty { padding: 4px 0; }
+
+.md-p { margin: 0 0 10px; }
+.md-p:last-child { margin-bottom: 0; }
+.md-h { margin: 14px 0 8px; font-size: 14.5px; font-weight: 650; letter-spacing: -0.01em; }
+.md-h:first-child { margin-top: 0; }
+.md-list { margin: 0 0 10px; padding-left: 20px; }
+.md-list li { margin: 3px 0; }
+.md-quote {
+  margin: 0 0 10px;
+  padding: 8px 12px;
+  border-left: 3px solid var(--accent-soft-2);
+  background: var(--fill-1);
+  border-radius: 0 var(--radius-xs) var(--radius-xs) 0;
+  color: var(--text-secondary);
 }
-.msg-meta, .msg-time { font-size: 11px; color: #a3aec0; margin-top: 4px; }
-.meta-row { display: flex; align-items: center; gap: 10px; margin-top: 12px; flex-wrap: wrap; }
-.meta-text { font-size: 12px; color: #8a94a6; }
-.sources { margin-top: 12px; }
-.typing { display: flex; gap: 5px; padding: 15px 18px; }
-.dot {
-  width: 7px; height: 7px; border-radius: 50%;
-  background: #8aa4d8; animation: blink 1.2s infinite;
-}
-.dot:nth-child(2) { animation-delay: .2s; }
-.dot:nth-child(3) { animation-delay: .4s; }
-@keyframes blink { 0%, 80%, 100% { opacity: .25; } 40% { opacity: 1; } }
-.chat-input { display: flex; gap: 12px; align-items: flex-end; margin: 0; }
-.chat-input .el-input { flex: 1; }
-.debug-step-title { font-size: 12px; font-weight: 600; color: #ff7a45; margin: 10px 0 4px; }
-.debug-step {
+.md-code {
+  margin: 0 0 10px;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-deep);
+  border: 1px solid var(--hairline);
+  font-family: var(--font-mono);
   font-size: 12px;
-  background: #fafbfd;
-  border: 1px solid #eef1f6;
-  padding: 8px 10px;
-  border-radius: 8px;
+  line-height: 1.6;
+  overflow-x: auto;
+  white-space: pre;
+}
+.md-hr { border: none; border-top: 1px solid var(--hairline); margin: 12px 0; }
+
+.answer-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--hairline);
+}
+.meta-icon { margin-right: 4px; vertical-align: -2px; }
+.meta-chip {
+  font-size: 11.5px;
+  color: var(--text-tertiary);
+  padding: 2px 7px;
+  border-radius: var(--radius-pill);
+  background: var(--fill-1);
+}
+.meta-chip--warn { color: var(--warning); background: var(--warning-soft); }
+
+/* 来源 */
+.sources { margin-top: 12px; }
+.sources-title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0 0 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+.source {
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  border-radius: var(--radius-md);
+  background: var(--fill-1);
+  border: 1px solid transparent;
+  transition: border-color var(--dur) var(--ease), background var(--dur) var(--ease);
+}
+.source:hover { background: var(--surface); border-color: var(--hairline); }
+.source-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.source-index { font-family: var(--font-mono); font-size: 11px; color: var(--accent); font-weight: 600; }
+.source-file { font-size: 12.5px; font-weight: 600; max-width: 240px; }
+.source-page { font-size: 11px; color: var(--text-tertiary); }
+.source-score { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; flex: none; }
+.score-track {
+  width: 56px;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--fill-2);
+  overflow: hidden;
+}
+.score-track i { display: block; height: 100%; border-radius: 999px; background: var(--accent); }
+.source-score b {
+  font-size: 10.5px;
+  color: var(--text-tertiary);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+.source-chunk {
+  margin: 8px 0 4px;
+  font-size: 12.5px;
+  line-height: 1.65;
+  color: var(--text-secondary);
   white-space: pre-wrap;
-  max-height: 220px;
-  overflow-y: auto;
-  margin: 0;
+  word-break: break-word;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
-.msg-actions {
-  display: flex; gap: 4px; margin-top: 4px;
-  opacity: 0; transition: opacity .15s ease; pointer-events: none;
+.source-chunk.is-expanded { display: block; -webkit-line-clamp: unset; }
+.source-foot { display: flex; gap: 4px; flex-wrap: wrap; }
+
+/* 反思过程 */
+.trace { margin-top: 10px; }
+.trace summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text-secondary);
+  padding: 6px 0;
+  list-style: none;
 }
-.msg-row:hover .msg-actions { opacity: 1; pointer-events: auto; }
-.act-btn { padding: 2px 8px; height: auto; font-size: 12px; color: #8a94a6; }
-.act-btn:hover { color: #ff7a45; }
-.src-link { color: #ff7a45; text-decoration: none; word-break: break-all; }
-.src-link:hover { text-decoration: underline; }
+.trace summary::-webkit-details-marker { display: none; }
+.trace summary::before { content: '▸ '; color: var(--text-tertiary); }
+.trace[open] summary::before { content: '▾ '; }
+.trace-step { padding: 8px 0; border-top: 1px solid var(--hairline); }
+.trace-title { margin: 0 0 4px; font-size: 12px; font-weight: 600; color: var(--text-secondary); }
+.trace-query { margin: 0; font-size: 11.5px; color: var(--text-tertiary); word-break: break-all; }
+.trace-json {
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  max-height: 200px;
+  overflow: auto;
+  border-radius: var(--radius-xs);
+  background: var(--bg-deep);
+  border: 1px solid var(--hairline);
+  font-size: 11px;
+  line-height: 1.55;
+  color: var(--text-secondary);
+}
+
+/* 工具条 */
+.msg-tools {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-top: 4px;
+  opacity: 0;
+  transition: opacity 160ms var(--ease);
+}
+.msg:hover .msg-tools,
+.msg:focus-within .msg-tools { opacity: 1; }
+/* 触屏没有 hover：操作按钮常显，否则永远点不到 */
+@media (hover: none) {
+  .msg-tools { opacity: 1; }
+}
+.msg-tools--ai { margin-top: 6px; }
+.msg-time { font-size: 10.5px; color: var(--text-quaternary); margin-right: 4px; }
+.tool {
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  padding: 0 7px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-tertiary);
+  font-family: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+  transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+.tool:hover { background: var(--fill-1); color: var(--accent); }
+.tool--strong { color: var(--accent); font-weight: 600; }
+.tool--icon { font-size: 12px; padding: 0 5px; }
+.tool--icon.is-on { background: var(--accent-soft); }
+.vote { display: inline-flex; gap: 2px; margin-left: 4px; padding-left: 6px; border-left: 1px solid var(--hairline); }
+
+.interrupted {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-radius: var(--radius-md);
+  border: 1px dashed var(--hairline-strong);
+  background: var(--fill-1);
+  color: var(--text-tertiary);
+  font-size: 12.5px;
+}
+
+.typing {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 14px 16px;
+  border-radius: 18px;
+  border-bottom-left-radius: 6px;
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  box-shadow: var(--shadow-1);
+}
+.typing span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  opacity: 0.35;
+  animation: blink 1.2s infinite;
+}
+.typing span:nth-child(2) { animation-delay: 0.18s; }
+.typing span:nth-child(3) { animation-delay: 0.36s; }
+.typing em { margin-left: 6px; font-style: normal; font-size: 12px; color: var(--text-tertiary); }
+@keyframes blink { 0%, 80%, 100% { opacity: 0.25; } 40% { opacity: 1; } }
+
+/* 建议问题 */
+.suggestion {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 13px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+  box-shadow: var(--shadow-1);
+  transition: all var(--dur) var(--ease);
+}
+.suggestion:hover { border-color: var(--accent); color: var(--accent); transform: translateY(-1px); }
+.suggestion .el-icon { color: var(--accent); }
+
+/* 回到底部 */
+.to-bottom {
+  position: absolute;
+  right: 34px;
+  bottom: 148px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border: 1px solid var(--hairline);
+  border-radius: 50%;
+  background: var(--surface);
+  color: var(--text-secondary);
+  box-shadow: var(--shadow-2);
+  cursor: pointer;
+  z-index: 5;
+}
+.to-bottom:hover { color: var(--accent); }
+.fade-enter-active, .fade-leave-active { transition: opacity 180ms var(--ease); }
+.fade-enter-from, .fade-leave-to { opacity: 0; }
+
+/* 输入区 */
+.chat-composer {
+  flex: none;
+  padding: 10px 28px 16px;
+  background: linear-gradient(180deg, transparent, var(--bg) 42%);
+}
+.composer {
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 10px 12px 8px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow-2);
+  transition: border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
+}
+.composer:focus-within { border-color: var(--accent-soft-2); box-shadow: 0 0 0 4px var(--accent-soft), var(--shadow-2); }
+.composer :deep(.el-textarea__inner) {
+  background: transparent;
+  padding: 2px 4px 6px;
+  box-shadow: none !important;
+  font-size: 14px;
+  line-height: 1.6;
+}
+.composer-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-top: 6px;
+  border-top: 1px solid var(--hairline);
+}
+.composer-hints { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; }
+.hint { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--text-quaternary); }
+.count { font-size: 11px; color: var(--text-quaternary); font-variant-numeric: tabular-nums; }
+.send-btn { min-width: 88px; }
+.composer-note { max-width: 860px; margin: 7px auto 0; text-align: center; font-size: 10.5px; }
+
+@media (max-width: 900px) {
+  .chat-head { padding: 14px 16px 6px; }
+  .chat-scroll { padding: 4px 14px 0; }
+  .chat-composer { padding: 8px 12px 12px; }
+  .msg-body { max-width: 88%; }
+  .kb-select { width: 160px; }
+  .to-bottom { right: 18px; bottom: 150px; }
+}
+@media (max-width: 640px) {
+  .composer-hints { display: none; }
+  .kb-select { flex: 1; width: auto; min-width: 0; }
+  .chat-head :deep(.head-actions) { width: 100%; }
+  .msg-body { max-width: 92%; }
+  .ai-avatar { display: none; }
+}
 </style>

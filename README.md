@@ -1,6 +1,6 @@
 # Agentic RAG 智能知识库系统
 
-基于 FastAPI + BGE(中文嵌入) + Chroma + BM25/RRF 混合检索 + DeepSeek(LLM) 的企业知识库问答系统，带 Agentic 反思循环与幻觉检测。
+基于 FastAPI + BGE(中文嵌入) + Chroma + BM25/RRF 混合检索 + DeepSeek(LLM) 的企业知识库问答系统，带可切换的反思/Agentic 双模式与幻觉检测。
 
 > **面向第一次使用的用户**：请先阅读 [产品说明书（PRODUCT_MANUAL.md）](PRODUCT_MANUAL.md)——从怎么启动、怎么上传文档到"认证与连接"该不该填，都有图文讲解。
 
@@ -138,13 +138,19 @@ make desktop   # 依赖：.venv（make bootstrap）、frontend 依赖（make fro
 | POST | `/api/documents/upload` | 上传入库（可选表单字段 `kb_id`；V5.2：`mode=upsert` 同文件名增量替换、`force=true` 强制重入库） |
 | GET/DELETE | `/api/documents/{id}` | 文档元数据 / 删除（级联清向量块） |
 | GET | `/api/jobs/{job_id}` | 上传任务状态轮询 |
-| POST | `/api/query` | 问答（可选 `kb_id`，与 `collection` 二选一，kb_id 优先） |
+| POST | `/api/query` | 问答（可选 `kb_id`，与 `collection` 二选一；可选 `mode=auto\|reflect\|agentic`，缺省走配置） |
 | GET/POST/DELETE | `/api/kbs` | 知识库 CRUD（13.5：内置 default 不可删） |
 | GET/POST | `/api/plugins/status` `/api/plugins/switch` | 插件 provider 状态 / 热切换（switch 需登录且仅管理员） |
 
 **多知识库（13.5）**：`kb_id → Chroma collection` 物理隔离；上传/问答按 `kb_id` 作用域，
 A/B 库内容互不可见；`/api/kbs` 建库（name 自动 slug 化生成 kb_id）、删库级联清空向量集合。
 默认库 `default` 沿用存量 collection `kb`，不可删除。
+
+**Agentic 模式（P-D，默认关）**：`orchestration.agent.enabled=true` 后，`/api/query` 可传
+`mode=agentic`（强制 Agent）或 `mode=auto`（规则路由：简单→reflect，复杂→Agent，不确定→reflect
+失败后升级）。Agent 走“Plan → 工具调用 → 证据入账 → 反思 → 合成”，工具只读且作用域由服务端注入；
+`reflect` 永久保留兜底。开关、预算、工具清单见 `configs/settings.yaml` `orchestration.agent` 与
+`DEVELOPMENT.md` 第 17 章；默认关闭时行为与旧版一致。前端问答控制台提供“反思/自动/Agent”切换，默认“反思”；“自动”为显式 opt-in。
 
 ## 评测报告与已知限制
 
@@ -157,7 +163,7 @@ A/B 库内容互不可见；`/api/kbs` 建库（name 自动 slug 化生成 kb_id
   - 口语化问法（如"咋整"）可能因改写未覆盖而评估分不足 → 触发 21001 兜底；同义词表见 `configs/synonyms.csv`（缺失时用内置小表）。
   - 进程内评测（Stub LLM）的 Faithfulness 恒 0%（Stub 答案与上下文不匹配属预期），真 DeepSeek 模式约 69%。
   - LLM 生成的规范化总结句对幻觉检测阈值达标率有限，阈值可在 `configs/settings.yaml` 调整。
-  - **定位边界**：当前为检索侧自我修正循环（Iterative/Self-Correcting RAG），无规划器/工具调用（真 Agentic 见 `DEVELOPMENT.md` 第 15 章演进路线 P-D）。
+  - **定位边界**：默认仍是检索侧自我修正循环（Iterative/Self-Correcting RAG）；P-D 真 Agentic 的 P1/P2/P3 基础版已落地（`mode=agentic`/`auto`，默认关闭），P4（Agentic 专用评测/灰度）待续，见 `DEVELOPMENT.md` 第 17 章。
   - **格式边界**：支持 PDF / Word(.doc/.docx) / Excel(.xls/.xlsx) / PPT(.ppt/.pptx) / Markdown / 文本 / HTML / 邮件(.eml) / CSV 与 TSV / 代码与配置类（29 种扩展名，tree-sitter AST 符号提取） / JSON 与 JSONL（第 16 章）；其中 `.doc/.ppt` 需服务端安装 LibreOffice（未装时明确报错并给安装指引）；`.msg`（Outlook 二进制格式）暂不支持解析，会返回明确提示"请导出为 .eml"；图片 OCR 仅预留接口未接引擎（15.2）。
   - **安全现状**：解析安全✅（魔数校验+zip 炸弹防御）；提示注入✅（入库侧扫描，默认 audit 打标、可配 reject 40002；生成阶段另有 SYSTEM_PROMPT 约束）；内容审核✅（`adapters/content_moderation/`，词表可编辑，默认关，可 reject 40003）；PII 脱敏两级可配（`ingestion.pii` 全局 + `KbInfo.pii` 库级覆盖，默认关）（15.3）。
   - **数据清洗层**：`cleaner.enabled` 默认关；开启后入库前执行归一/去噪/段落去重/质量过滤（15.4 P-A）。
@@ -173,7 +179,7 @@ A/B 库内容互不可见；`/api/kbs` 建库（name 自动 slug 化生成 kb_id
 | W7 | Web 前端：前后端分离，`frontend/` Vue3+Vite SPA | 已落地 |
 | W8 | Electron 桌面壳（内置拉起后端）+ 收尾 | 已落地 |
 
-当前阶段面向收尾与加固：桌面打包（Python 运行时捆绑待决策）、认证/权限（`api.auth_enabled` + `RAG_ADMIN_USER/RAG_ADMIN_PASSWORD`，当前部署已开启团队模式）；P-D 真 Agentic（结构化 Agent）待排期（`DEVELOPMENT.md` 第 15 章）。
+当前阶段面向收尾与加固：桌面打包（Python 运行时捆绑待决策）、认证/权限（`api.auth_enabled` + `RAG_ADMIN_USER/RAG_ADMIN_PASSWORD`，当前部署已开启团队模式）；P-D 真 Agentic（单 Agent/规划器/工具调用/证据账本）P1/P2/P3 基础版已落地、默认关闭；P4 评测与灰度待续（`DEVELOPMENT.md` 第 17 章）。
 
 Web 前端开发期用 `cd frontend && npm run dev`（proxy 到 :8000）；桌面端 W8 落地后 `make desktop`。
 
@@ -185,8 +191,8 @@ app/
 ├── application.py     # 装配层：中间件（CORS/安全头/限速/审计）+ 依赖注入
 ├── api/               # health / documents / query / plugins / jobs / kbs / users / auth 路由
 ├── core/              # domain 数据模型 / interfaces 接口契约 / config / errors / logging / registry / rate_limit
-├── adapters/          # embedding / vector_store / retriever / reranker / evaluator / rewriter / detector / llm / parser / chunker
-├── services/          # orchestration（反思循环）/ ingestion / jobs_store / documents_store / kb_store / user_store / rbac / desensitize
+├── adapters/          # embedding / vector_store / retriever / reranker / evaluator / rewriter / detector / llm / parser / chunker / tools / agent
+├── services/          # orchestration（reflect/agentic 分发）/ agent（runtime）/ ingestion / jobs_store / documents_store / kb_store / user_store / rbac / desensitize
 └── cli/               # demo_ingest / rageval / build_review_set / build_eval_stress / perfbench / rebuild
 web/                   # /ui 内置测试页（无前端工程，冒烟/降级入口）
 frontend/              # Vue3 SPA + Electron 桌面壳（electron/main.cjs、bootstrap.cjs）

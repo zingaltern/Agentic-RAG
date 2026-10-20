@@ -85,14 +85,63 @@ llm:
   temperature: 0.1
   max_tokens: 1024
   timeout_seconds: 30
+  tool_calling: auto               # P-D：auto | native | json | off
+  tool_call_timeout_seconds: 30
+  max_tool_calls_per_turn: 4
   # api_key 只允许通过环境变量注入（RAG_DEEPSEEK_API_KEY / RAG_LLM_API_KEY），禁止写入本文件
 
 orchestration:
+  mode: reflect                    # P-D：reflect | agentic | auto（默认 reflect，零回归）
   max_reflection_iterations: 3
   search_timeout_seconds: 10
   request_timeout_seconds: 30
   max_concurrent_queries: 4        # C3（V5.1）：并发查询上限，耗尽返回 43001
   semaphore_acquire_timeout_seconds: 5.0
+  agent:                           # P-D：真 Agentic（默认关，见 DEVELOPMENT.md 第 17 章）
+    enabled: false
+    max_steps: 8
+    max_llm_calls: 8
+    max_tool_calls: 12
+    max_parallel_tools: 3
+    max_replans: 2
+    max_parse_failures: 2
+    max_concurrent_queries: 2
+    acquire_timeout_seconds: 0.5
+    request_timeout_seconds: 45
+    max_context_tokens: 6000
+    max_evidence_items: 24
+    max_evidence_chars: 4000
+    min_evidence_score: 0.25
+    routing:
+      enabled: true
+      agentic_threshold: 3
+      reflect_threshold: 1
+      escalate_on_reflect_failure: true
+      max_escalations: 1
+      escalate_min_budget_ratio: 0.5
+    planning:
+      enabled: true
+      max_subgoals: 4
+      temperature: 0.1
+    reflection:
+      llm_judge: false
+      max_llm_judgements: 2
+      min_evidence_per_subgoal: 1
+    synthesis:
+      citation_repair: true
+      max_repair_attempts: 1
+      strict_verify: false
+    fallback:
+      on_plan_error: reflect
+      on_tool_error: reflect
+      on_protocol_error: reflect
+    tools:
+      kb_search: {enabled: true, default_k: 8, max_k: 20}
+      kb_fetch: {enabled: true, max_chars: 4000}
+      kb_list_documents: {enabled: true, max_items: 50}
+      kb_outline: {enabled: false, max_sections: 40}
+      web_search: {enabled: false, max_results: 5, allowed_domains: []}  # enabled=true 时必须显式配置；空列表启动失败
+      ask_user: {enabled: true}
 
 ingestion:
   max_file_size_mb: 50

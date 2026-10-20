@@ -14,6 +14,7 @@
 | `docs/README.md` | **文档索引与归档约定**（`docs/` 目录唯一入口；新增文档先看这里） | 中 |
 | `docs/specs/在线侧输入处理.md` | 输入侧治理方案蓝图（13.12/13.13 落地依据） | 相关任务必读 |
 | `docs/specs/数据清洗与格式_开发要点.md` | 数据清洗与格式边界执行规格（第 15 章依据） | 相关任务必读 |
+| `docs/specs/真Agentic_RAG设计.md` | P-D 真 Agentic 详细设计（规划器/工具调用/证据账本/评测/路线图；设计稿，待评审回写规格） | 相关任务必读 |
 | `docs/dev-tasks/` | 批次开发指令（规格先行的任务书；已交付批次在 `archive/` 子目录） | 按批次 |
 | `docs/review-followup.md` | 评审延后项清单与状态 | 低 |
 | `tests/eval_suite/README.md` | 独立基准评测规范（120 条冻结集，第二道门禁） | 评测时必读 |
@@ -73,7 +74,7 @@ make desktop        # Electron 桌面（内置拉起后端）【W8 落地】
 
 ## 测试要求
 
-- 完成任何功能后必须 `make test` 全绿（收集口径以当前 `make test` 为准；历史基线 599 项；含覆盖率门禁 ≥80%）；新模块补齐对应单测（对照 DEVELOPMENT 第 8.1 矩阵）。
+- 完成任何功能后必须 `make test` 全绿（2026-10-20 收集口径 818 项；历史基线 599 项；含覆盖率门禁 ≥80%）；新模块补齐对应单测（对照 DEVELOPMENT 第 8.1 矩阵）。
 - 评测回归（两层评测策略，DEVELOPMENT 8.4/8.5：验证集与测试集分离）：
   验证集 `tests/eval/qa_pairs/`（default/docs 自建 107 条 + complex 难度分层 90 条）经 `make eval` 出报告（13.1 度量协议，改检索/改写/检测等影响指标的功能必须前后对比；complex 按 variant 逐层看通过率，首轮基线存档后不回退）；
   外部测试集 `tests/review/`（首个 CMRC 2018，独立 kb `cmrc`，160 条）经 `make review` 出报告——量真实效果、看趋势 Δ，不设"全绿"门禁；

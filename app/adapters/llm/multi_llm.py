@@ -10,8 +10,9 @@ import threading
 import time
 from typing import Any
 
-from app.core.errors import LLMUnavailableError
-from app.core.interfaces import LLM
+from app.core.domain import LLMResponse
+from app.core.errors import LLMToolsUnsupportedError, LLMUnavailableError
+from app.core.interfaces import LLM, ToolCallingLLM
 from app.core.logging import get_logger
 
 logger = get_logger("llm")
@@ -46,7 +47,7 @@ class _Circuit:
                 self.fails = 0
 
 
-class MultiCandidateLLM(LLM):
+class MultiCandidateLLM(ToolCallingLLM):
     def __init__(self, candidates: list[LLM], fail_threshold: int = 3,
                  cooldown_seconds: int = 60, **_: Any):
         if not candidates:
@@ -70,4 +71,32 @@ class MultiCandidateLLM(LLM):
                 self._circuits[idx].record_failure()
                 logger.warning("候选 %s 调用失败（累计熔断阈值 %s）: %s",
                                idx, self._circuits[idx].fail_threshold, exc)
+        if isinstance(last_exc, LLMToolsUnsupportedError):
+            raise last_exc
+        raise LLMUnavailableError(f"全部模型候选不可用: {last_exc}")
+
+    def chat_with_tools(self, messages, tools, tool_choice="auto",
+                        temperature=0.1, max_tokens=1024) -> LLMResponse:
+        """候选 LLM 的工具调用转发（P-D）；任一候选失败按熔断规则切换。"""
+        last_exc: Exception | None = None
+        for idx, llm in enumerate(self._candidates):
+            if not self._circuits[idx].allow():
+                logger.info("候选 %s 处于熔断冷却期，跳过工具调用", idx)
+                continue
+            caller = getattr(llm, "chat_with_tools", None)
+            if caller is None:
+                last_exc = LLMUnavailableError(f"候选 {idx} 不支持工具调用")
+                self._circuits[idx].record_failure()
+                continue
+            try:
+                out = caller(messages, tools, tool_choice=tool_choice,
+                             temperature=temperature, max_tokens=max_tokens)
+                self._circuits[idx].record_success()
+                return out
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                self._circuits[idx].record_failure()
+                logger.warning("候选 %s 工具调用失败: %s", idx, exc)
+        if isinstance(last_exc, LLMToolsUnsupportedError):
+            raise last_exc
         raise LLMUnavailableError(f"全部模型候选不可用: {last_exc}")

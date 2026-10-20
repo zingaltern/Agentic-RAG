@@ -101,3 +101,43 @@ def test_query_error_mapping(q_client):
 def test_query_validation_missing_query(q_client):
     body = q_client.post("/api/query", json={}).json()
     assert body["code"] == 40001
+
+
+def test_query_agentic_mode_and_debug_fields(q_client):
+    """P-D：mode=agentic 透传；debug 时返回 plan/steps/agent_trace。"""
+    from app.core.domain import Answer
+
+    class _Agent:
+        def __init__(self):
+            self.calls = 0
+
+        def run(self, **kwargs):
+            self.calls += 1
+            return Answer(
+                text="agent 答案[1]", sources=[], mode="agentic",
+                agent_steps=2, plan={"goal": "g", "subgoals": []},
+                steps=[{"step": 1, "action": "kb_search", "summary": "检索",
+                        "evidence_ids": ["E1"]}],
+                agent_trace=[{"span_id": "s1", "type": "plan"}],
+                debug_trace=[{"iter": 0, "action": "plan", "summary": "g"}],
+                termination_reason="answered",
+                usage={"llm_calls": 2, "tool_calls": 1},
+            )
+
+    deps = q_client.app.state.deps
+    agent = _Agent()
+    deps.config.orchestration.agent.enabled = True
+    deps.orchestration.agent_runtime = agent
+    body = q_client.post("/api/query", json={
+        "query": "年假怎么申请？", "mode": "agentic", "debug": True,
+    }).json()
+    assert body["code"] == 0
+    data = body["data"]
+    assert agent.calls == 1
+    assert data["mode"] == "agentic"
+    assert data["agent_steps"] == 2
+    assert data["termination_reason"] == "answered"
+    assert data["plan"]["goal"] == "g"
+    assert data["steps"][0]["action"] == "kb_search"
+    assert data["agent_trace"][0]["type"] == "plan"
+    assert data["usage"]["llm_calls"] == 2

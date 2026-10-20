@@ -14,7 +14,8 @@ docs/
 ├── specs/                          # 方案/规格类输入文档（外部评审或蓝图，落地前先读）
 │   ├── 在线侧输入处理.md             # 输入侧治理蓝图（L0~L4 分层；13.12/13.13 落地依据）
 │   ├── 数据清洗与格式_开发要点.md     # 数据清洗与格式边界执行规格（15.2/15.4 P-A/P-B 依据）
-│   └── 测试与评测体系设计.md         # 测试分层/模块功能与质量矩阵/指标与数据集治理（设计稿，待评审落地）
+│   ├── 测试与评测体系设计.md         # 测试分层/模块功能与质量矩阵/指标与数据集治理（设计稿，待评审落地）
+│   └── 真Agentic_RAG设计.md          # P-D 真 Agentic 设计稿（规划器/工具调用/证据账本/评测/路线图）
 └── dev-tasks/                      # 开发指令（按批次编号，两位序号递增）
     ├── 02-P-D-结构化Agent.md
     ├── 03-P3-可选适配器包.md
@@ -35,6 +36,7 @@ docs/
 | `specs/在线侧输入处理.md` | 输入侧治理方案（L0 极简通道 / L1 标准化 / L2 会话状态 / L3 路由分解 / L4 结构化提取；含非功能指标；L0~L2 已落地 13.12/13.13，L3/L4 规划） | `DEVELOPMENT.md` 13.12–13.13、`app/core/config.py`、`app/adapters/normalizer`、`app/adapters/dialogue`、`app/services/session_store.py` |
 | `specs/数据清洗与格式_开发要点.md` | 清洗层与输入格式边界的执行规格（T1–T7，均已交付） | `DEVELOPMENT.md` 第 15 章、`docs/dev-tasks/04` |
 | `specs/测试与评测体系设计.md` | 测试六层模型、模块功能/质量测试矩阵、指标分层与统计规范、数据集治理与实施路线（设计稿） | `AGENTS.md`、`Makefile`、`tests/*/README.md` |
+| `specs/真Agentic_RAG设计.md` | P-D 真 Agentic 完整设计稿：现状审计、单 Agent 架构、工具注册表/规划器/反思/证据账本、API/配置、安全与本地化、评测门禁、分阶段路线（设计稿；P1/P2/P3 基础版已落地，P4 待续） | `DEVELOPMENT.md` 第 17 章、`docs/dev-tasks/02`、`app/services/orchestration.py` |
 
 ### 开发指令（`docs/dev-tasks/`）
 
@@ -42,7 +44,7 @@ docs/
 
 | 文件 | 批次主题 | 依据 | 状态 |
 |---|---|---|---|
-| `dev-tasks/02-P-D-结构化Agent.md` | P-D 真 Agentic（结构化 Agent，单独立项大改造） | `DEVELOPMENT.md` 15.1/15.4/15.5 | 未开工 |
+| `dev-tasks/02-P-D-结构化Agent.md` | P-D 真 Agentic（结构化 Agent，单独立项大改造） | `DEVELOPMENT.md` 15.1/15.4/15.5 | 未开工（详细设计见 `specs/真Agentic_RAG设计.md`） |
 | `dev-tasks/03-P3-可选适配器包.md` | 13.10 P3 可选适配器（OCR/表格/多分块/多 embedding/多 LLM，默认关） | `DEVELOPMENT.md` 13.10/15.2 | 未开工 |
 | `dev-tasks/04-遗留项与元数据富化.md` | 14.4 遗留项 + 元数据富化（T5） | `DEVELOPMENT.md` 14.4 | 部分交付（T5 / CI / 事件钩子已完成） |
 | `dev-tasks/08-查询智能补强批次.md` | 查询智能 Q1 多策略改写 / Q2 Scope 路由 lite | 2026-09-06 企业级平台对标评估 | Q1 实现完成（随代码在途）；Q2 未开工 |
