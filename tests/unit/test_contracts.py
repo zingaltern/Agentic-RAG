@@ -26,16 +26,23 @@ from app.core.interfaces import (
     HallucinationDetector,
     LLM,
     Cleaner,
+    Planner,
     QueryRewriter,
+    Reflector,
     Reranker,
     Retriever,
+    Synthesizer,
+    Tool,
+    ToolCallingLLM,
     VectorEngine,
     VectorStore,
+    Verifier,
 )
 from app.core.registry import PluginRegistry
 
 ABC_INTERFACES = (VectorEngine, VectorStore, Retriever, Reranker,
-                  Evaluator, QueryRewriter, Cleaner, HallucinationDetector, LLM)
+                  Evaluator, QueryRewriter, Cleaner, HallucinationDetector, LLM,
+                  ToolCallingLLM, Tool, Planner, Reflector, Synthesizer, Verifier)
 
 
 def test_interfaces_are_abc():
@@ -62,7 +69,8 @@ def test_vector_store_contract():
 
 
 def test_retriever_contract():
-    assert _params(Retriever.retrieve) == ["query", "k", "filters"]
+    # P-D（17.3）：工具化需要 path/collection；两者有默认值，兼容旧三参调用
+    assert _params(Retriever.retrieve) == ["query", "k", "filters", "path", "collection"]
 
 
 def test_reranker_contract():
@@ -155,3 +163,27 @@ def test_plugin_registry_roundtrip():
     finally:
         PluginRegistry._registry.clear()
         PluginRegistry._registry.update(saved)
+
+def test_tool_contract():
+    assert _params(Tool.invoke) == ["ctx", "args"]
+
+
+def test_tool_calling_llm_contract():
+    assert _params(ToolCallingLLM.chat_with_tools) == [
+        "messages", "tools", "tool_choice", "temperature", "max_tokens"]
+
+
+def test_planner_contract():
+    assert _params(Planner.plan) == ["state", "budget"]
+    assert _params(Planner.next_action) == ["state", "budget"]
+    assert _params(Planner.replan) == ["state", "reflection"]
+
+
+def test_reflector_contract():
+    assert _params(Reflector.reflect) == ["state", "result"]
+    assert _params(Reflector.sufficient) == ["state"]
+    assert _params(Reflector.missing) == ["state"]
+
+
+def test_synthesizer_contract():
+    assert _params(Synthesizer.synthesize) == ["state"]
