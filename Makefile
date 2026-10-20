@@ -1,5 +1,7 @@
 # ---- Agentic RAG Makefile ----
-PYTHON := .venv/bin/python
+# 解释器：优先 make bootstrap 生成的 .venv；CI 等未建 venv 的环境（pip 装到系统解释器）
+# 回退到 PATH 上的 python3，可用 make test PYTHON=... 显式覆盖。
+PYTHON ?= $(shell [ -x .venv/bin/python ] && echo .venv/bin/python || echo python3)
 PIP    := .venv/bin/pip
 VENV_PY := $(shell command -v python3.11 >/dev/null 2>&1 && echo python3.11 || echo python3)
 
