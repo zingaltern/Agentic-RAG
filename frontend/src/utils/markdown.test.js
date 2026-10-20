@@ -56,3 +56,36 @@ test('parseMarkdown：空输入与纯空白', () => {
   assert.deepEqual(parseMarkdown('   \n\n  '), [])
   assert.deepEqual(toBlocks(undefined), [])
 })
+
+test('parseMarkdown：标准表格 → headers + rows', () => {
+  const md = '| 类型 | 报错信息 | 根因 |\n|---|---|---|\n| 堆 OOM | `Java heap space` | 对象过多 |\n| 栈 OOM | `StackOverflowError` | 递归过深 |'
+  const blocks = parseMarkdown(md)
+  assert.equal(blocks.length, 1)
+  assert.equal(blocks[0].type, 'table')
+  assert.deepEqual(blocks[0].headers, ['类型', '报错信息', '根因'])
+  assert.equal(blocks[0].rows.length, 2)
+  assert.deepEqual(blocks[0].rows[0], ['堆 OOM', '`Java heap space`', '对象过多'])
+})
+
+test('parseMarkdown：缺表头的表格（分块把表头切走）仍按无头表渲染', () => {
+  const md = '| 堆OOM | `Java heap space` |\n| 栈OOM | `StackOverflowError` |'
+  const blocks = parseMarkdown(md)
+  assert.equal(blocks.length, 1)
+  assert.equal(blocks[0].type, 'table')
+  assert.deepEqual(blocks[0].headers, [])
+  assert.equal(blocks[0].rows.length, 2)
+})
+
+test('parseMarkdown：表格后接段落能正确分段', () => {
+  const md = '| A | B |\n|---|---|\n| 1 | 2 |\n\n普通段落'
+  const blocks = parseMarkdown(md)
+  assert.equal(blocks[0].type, 'table')
+  assert.equal(blocks[1].type, 'p')
+  assert.equal(blocks[1].text, '普通段落')
+})
+
+test('parseMarkdown：行内出现竖线但不是表格 → 仍是段落', () => {
+  const blocks = parseMarkdown('a | b | c 只是普通文本')
+  assert.equal(blocks.length, 1)
+  assert.equal(blocks[0].type, 'p')
+})

@@ -506,10 +506,18 @@ class OrchestrationService:
 
             # 2) 精排（13.2）：RRF 输出 → rerank → rerank_top_k
             reranked = self.reranker.rerank(normalized, candidates)
-            # A5 冲突优先级：KB 块恒排 web 之前（即使 web 相关度更高，仍以知识库为准）
-            if self.config.web.kb_priority and web_active:
-                reranked = sorted(reranked, key=_kb_first_key)
+            # 名额先按相关度选，再谈优先级：
+            #   旧实现先按 KB 优先排序再截断，KB 候选 ≥ rerank_top_k 时 web 会被整体截掉，
+            #   导致前端勾选“联网”却永远拿不到网页结果（web_active 为真但 top 里没有 web）。
             top = reranked[:rerank_top_k]
+            if web_active and rerank_top_k > 0 and not any(_is_web_chunk(c) for c in top):
+                web_candidates = [c for c in reranked if _is_web_chunk(c)]
+                if web_candidates:
+                    top = (top[:-1] + [web_candidates[0]]) if len(top) >= rerank_top_k \
+                        else (top + [web_candidates[0]])
+            # A5 冲突优先级：入选集合内 KB 块恒排 web 之前（即使 web 相关度更高，仍以知识库为准）
+            if self.config.web.kb_priority and web_active:
+                top = sorted(top, key=_kb_first_key)
 
             # 3) 评估（输入必须是 rerank 后的 top_n，13.3.1）
             result = self.evaluator.evaluate(normalized, top)

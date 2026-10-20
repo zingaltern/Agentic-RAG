@@ -17,6 +17,20 @@ const router = createRouter({
   ],
 })
 
+// 部署后 chunk 哈希会变化：仍停留在旧页面的标签页点击懒加载路由时，
+// 动态 import 会 404（SPA 回退返回 index.html，MIME 不对），表现为“点击没反应”。
+// 这里捕获一次并整页跳转到目标路由（10 秒内只做一次，避免死循环）。
+router.onError((error, to) => {
+  const message = String((error && error.message) || error || '')
+  if (!/Failed to fetch dynamically imported module|Importing a module script failed|error loading dynamically imported module/i.test(message)) return
+  let last = 0
+  try { last = Number(sessionStorage.getItem('rag_chunk_reload') || 0) } catch { last = 0 }
+  if (Date.now() - last < 10000) return
+  try { sessionStorage.setItem('rag_chunk_reload', String(Date.now())) } catch { /* ignore */ }
+  const target = to && to.fullPath ? to.fullPath : window.location.pathname + window.location.search
+  window.location.assign(target)
+})
+
 // 每个页面写自己的 document.title（多标签页/桌面窗口可区分）
 router.afterEach((to) => {
   const title = to.meta && to.meta.title

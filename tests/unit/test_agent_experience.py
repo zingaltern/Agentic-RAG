@@ -368,6 +368,52 @@ def test_a5_kb_priority_ranks_kb_first(monkeypatch):
     assert any(s.get("source_type") == "web" for s in answer.sources), "web 仍作为补充保留"
 
 
+def test_a5_kb_priority_keeps_web_when_kb_fills_topk(monkeypatch):
+    """回归：KB 候选 ≥ rerank_top_k 时，web 不能被“KB 优先排序 + 截断”整体挤掉。
+
+    旧实现先按 KB 优先排序再取 top_k：只要知识库候选足够多，web 候选就全部落在
+    名额之外，前端勾选“联网”也拿不到任何网页来源。
+    """
+    class _ManyKB:
+        def retrieve(self, query, k, filters=None, path="hybrid", collection=None):
+            return [
+                ScoredChunk(
+                    chunk=Chunk(chunk_id=f"c{i}", document_id=f"d{i}", text=f"知识库内容{i}",
+                                order=i, parent_id=None, metadata={"source": f"kb{i}.md"}),
+                    score=0.95 - i * 0.01, notion="rrf")
+                for i in range(6)
+            ]
+
+    class _WebStub:
+        def retrieve(self, query):
+            return [ScoredChunk(
+                chunk=Chunk(chunk_id="web_0", document_id="web", text="网页内容",
+                            order=0, parent_id=None,
+                            metadata={"source": "https://x.com", "source_type": "web", "title": "网页"}),
+                score=0.1, notion="web")]
+
+    monkeypatch.setattr("app.adapters.retriever.web_retriever.WebRetriever", lambda **kw: _WebStub())
+
+    class _RerankByScore:
+        def rerank(self, query, chunks):
+            return sorted(chunks, key=lambda c: -c.score)
+
+    class _LowE(_E):
+        def evaluate(self, query, chunks):
+            return EvaluationResult(False, 0.2, "below_threshold")
+
+    config = load_config()
+    config.web.enabled = False
+    config.web.kb_priority = True
+    config.reranker.rerank_top_k = 5
+    svc = OrchestrationService(config=config, retriever=_ManyKB(), reranker=_RerankByScore(),
+                               evaluator=_LowE(), rewriter=None, detector=_Det(),
+                               llm=_StubLLM("根据网页[1]。"), vector_store=None)
+    answer = svc.run("百度最新进展", web_search=True)
+    assert answer.code == 0
+    assert any(s.get("source_type") == "web" for s in answer.sources), "web 候选必须保留至少一条"
+
+
 def test_a5_kb_priority_off_allows_web_first(monkeypatch):
     """kb_priority=False 时退回原混排：web 相关度更高可排前（验证开关可关）。"""
     class _WebStub:

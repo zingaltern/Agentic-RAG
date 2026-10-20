@@ -612,6 +612,24 @@ const canSend = computed(() => Boolean(chat.value.query.trim()) && !chat.value.l
                     <InlineText :text="b.text" @cite="jumpToSources(m.id)" />
                   </blockquote>
                   <pre v-else-if="b.type === 'code'" class="md-code"><code>{{ b.text }}</code></pre>
+                  <div v-else-if="b.type === 'table'" class="md-table-wrap">
+                    <table class="md-table">
+                      <thead v-if="b.headers && b.headers.length">
+                        <tr>
+                          <th v-for="(h, hi) in b.headers" :key="hi">
+                            <InlineText :text="h" @cite="jumpToSources(m.id)" />
+                          </th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <tr v-for="(row, ri) in b.rows" :key="ri">
+                          <td v-for="(cell, ci) in row" :key="ci">
+                            <InlineText :text="cell" @cite="jumpToSources(m.id)" />
+                          </td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
                   <hr v-else-if="b.type === 'hr'" class="md-hr" />
                   <p v-else class="md-p"><InlineText :text="b.text" @cite="jumpToSources(m.id)" /></p>
                 </template>
@@ -902,6 +920,42 @@ html[data-theme="dark"] .chat-page { background: var(--bg); }
   white-space: pre;
 }
 .md-hr { border: none; border-top: 1px solid var(--hairline); margin: 12px 0; }
+/* 表格：横向可滚动，单元格允许换行，避免长报错信息把气泡撑爆 */
+.md-table-wrap {
+  margin: 10px 0;
+  /* 气泡宽度由内容决定：给表格一个下限，避免窄表把气泡挤成一条竖条 */
+  min-width: min(320px, 100%);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-sm);
+  overflow-x: auto;
+}
+.md-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+.md-table th,
+.md-table td {
+  min-width: 84px;
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--hairline);
+  border-right: 1px solid var(--hairline);
+  text-align: left;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+.md-table th:last-child,
+.md-table td:last-child { border-right: none; }
+.md-table tbody tr:last-child td { border-bottom: none; }
+.md-table th {
+  background: var(--fill-1);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.md-table tbody tr:hover td { background: var(--fill-1); }
+/* 报错类长标识（StackOverflowError 等）不要被从中间掰断，宁可让外层横向滚动 */
+.md-table .inline-code { white-space: nowrap; }
 
 .answer-meta {
   display: flex;
