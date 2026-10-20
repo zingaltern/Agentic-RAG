@@ -1019,6 +1019,12 @@ V1.0 发布标准已达成：pytest 全绿（`-m "not integration"`，基线 599
 - 输入 `(query, reason)`，输出 1~3 个改写/扩句变体（JSON 数组，含代词消解）；超时 30s；
   失败/超时/限流/解析失败 → **自动回退** `rule` 改写；仅当 `result.passed=False` 才调用（成本控制）。
 - **多路融合**：循环内对每个变体分别检索，候选用 `rrf_fusion`（5.4）融合后进入该轮评估。
+- **08-Q1 多策略改写（默认关）**：`rewriter.step_back_enabled` / `rewriter.hyde_enabled` 两开关；任一开启 → **一次合并 LLM 调用**
+  输出 `{"rewritten": [...], "step_back": "...", "hyde": "..."}`（省多次往返）；变体序列 = rewritten（hybrid）+
+  step_back（hybrid）+ hyde（**vector**：假设性段落靠向量邻域生效，BM25 长文本会污染 RRF 词面排序）；
+  去重并剔除与原 query 相同者；失败/超时/解析失败 → `rule` 回退（单变体）。
+  返回类型 `str | list[str] | list[dict{"text","path"}]`（`core/interfaces.py` 契约同步），编排层按类型适配；
+  两开关均关 → 旧 JSON 数组路径，行为零差异。
 
 #### 13.3.3 循环硬约束（已落地于编排）
 1. **每轮 query 必须与上轮不同**（文本 diff 校验；若不变则自动换路：BM25-only / 向量-only / 去停用词重切）；
@@ -1312,7 +1318,7 @@ V1.0 发布标准已达成：pytest 全绿（`-m "not integration"`，基线 599
 | 输入侧治理激活批次（T1 绝望短路 / T2 极简通道扩容 / T3 服务端会话接通） | ✅ 已交付（2026-08-30，13.13 + docs/dev-tasks/archive/06）：域外查询首轮短路 21001；greeting rules 扩容并部署启用；前端携带 session_id + dialogue 部署启用（L2 激活） | T1 代码默认开（eval 门禁通过）；T2/T3 代码默认关、settings.yaml 部署启用 |
 | 元数据富化（section/date） | ✅ 已交付（2026-08-16，T5）：md/txt/docx/pdf 章节标题提取→Chunk.metadata.section；pdf/docx date；支持 `filters={"metadata":{"section":...}}` | 已完结 |
 | 13.10 P3 包（OCR/表格/混合分块/多 embedding/多 LLM） | 规格已立 | 用户决策 + 13.1 度量协议验证 |
-| 查询智能补强（08：Q1 多策略改写 / Q2 Scope 路由 lite） | Q1 实现完成（HyDE/Step-Back，默认关；随代码在途）；Q2 未开工 | `docs/dev-tasks/08` DoD + 13.1 度量协议 |
+| 查询智能补强（08：Q1 多策略改写 / Q2 Scope 路由 lite） | **Q1 ✅ 已交付（2026-10-21）**：HyDE / Step-Back 多策略改写，默认关、合并单次调用、hyde 走 vector 路径；603 项单测全绿，已合入 `feat/query-intel` → `main`；13.1 三份评测报告待补跑。**Q2 未开工（顺延）** | Q2 开工需用户决策；`docs/dev-tasks/08` DoD + 13.1 度量协议 |
 | 契约同步自动化（openapi→TS） | 手写中 | 接口变更频繁或前端规模扩大时 |
 | 事件钩子（文档变更→缓存失效） | ✅ 已覆盖（2026-08-16）：`mutation_epoch` 在 add_chunks/delete_document 递增，BM25 缓存（hybrid_rrf）与父块缓存（orchestration）均按 epoch 失效；通用事件总线留待增量索引需求 | 增量索引/多端同步需求出现时 |
 | CI 基线门禁 | ✅ 已交付（4.5，`.github/workflows/ci.yml`）：PR 跑 `make test`（覆盖率门禁）+ 前端 `npm run build`，评测对比留痕不阻断 | 已纳入；后续按需加回归基线对比 |
