@@ -66,6 +66,8 @@ rewriter:
   provider: llm                    # rule(回退) | llm(W5)
   synonyms_csv: ./configs/synonyms.csv
   llm_timeout_seconds: 30
+  step_back_enabled: false         # 08-Q1：Step-Back 抽象化变体（合并单次 LLM 调用，默认关）
+  hyde_enabled: false              # 08-Q1：HyDE 假设文档变体（vector 路径，默认关）
 
 detector:
   provider: semantic               # citation(回退) | semantic(W5)
@@ -93,7 +95,10 @@ orchestration:
 
 ingestion:
   max_file_size_mb: 50
-  allowed_extensions: [pdf, docx, xlsx, pptx, md, txt, html, htm, eml, msg]
+  allowed_extensions: [pdf, docx, xlsx, pptx, doc, xls, ppt, md, txt, html, htm, eml, msg,
+                       json, jsonl, csv, tsv,
+                       py, js, mjs, cjs, ts, tsx, jsx, java, go, rs, c, h, cpp, hpp, cs,
+                       rb, php, kt, swift, sh, sql, vue, css, scss, yaml, yml, toml, ini, xml]
   embed_batch_size: 64
   max_queue_size: 64              # C5（V5.1）：入库队列上限，满时返回 43003
   zip_max_total_mb: 200           # S2（V5.1）：zip 解压总大小上限（防炸弹）
@@ -112,6 +117,17 @@ ingestion:
     mode: mask                     # mask=*** | replace=[身份证] 占位符 | delete=移除
     types: [id_card, phone, bank_card]
   parser_routing: {}              # P3-8：解析链路由（空=旧单实现路径；例 {"pdf": {"chain": ["pymupdf"]}}）
+  json_flatten:                   # 16.3：JSON/JSONL 路径扁平化上限（防超深/超大结构）
+    max_items: 5000               # 单文档最多产出行数（超出截断 + 尾部标记）
+    max_depth: 12                 # 最大递归深度（超出写 <max-depth> 占位）
+  office_convert:                 # 16.2：.doc/.ppt 经 LibreOffice 转换后复用 docx/pptx 解析
+    enabled: true                 # false=直接拒绝（30003），不尝试外部命令
+    soffice_path: ""              # 空=自动探测 PATH 上的 soffice/libreoffice
+    timeout_seconds: 60           # 单次转换超时；超时/失败 → ParseError 30003
+  code_symbols:                   # 16.5：代码 AST 符号提取（tree-sitter；缺 grammar 自动回退纯文本）
+    enabled: true                 # false=代码退化为纯文本解码
+    index_in_text: true           # 正文前置 [CODE_INDEX] 符号索引块
+    max_symbols: 500              # 单文件符号数上限
 
 cleaner:
   enabled: false                  # 数据清洗层开关（解析后、分块前），默认关不改变现有行为

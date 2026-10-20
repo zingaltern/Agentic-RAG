@@ -127,6 +127,7 @@ class Answer:
     message: str = "ok"
     need_clarify: bool = False      # A2：主动澄清（21003）时置真
     elapsed_ms: int = 0
+    contexts: list[dict] = field(default_factory=list)   # P0：评测用完整上下文（capture_contexts=True）
 
 
 class OrchestrationService:
@@ -169,14 +170,25 @@ class OrchestrationService:
         return [ScoredChunk(chunk=by_id[cid].chunk, score=score, notion="rrf") for cid, score in ordered]
 
     def _rewrite_variants(self, query: str, feedback: EvaluationResult) -> list[tuple[str, str]]:
-        """改写产出 1~3 变体（rule 返回 str → 单变体；llm 返回 list → 多变体）。"""
+        """改写产出 1~3 变体（08-Q1：兼容 str / list[str] / list[dict{"text","path"}]）。
+
+        dict 变体的 path 由改写器指定（hyde→vector，其余缺省 hybrid）；
+        检索路径贯穿 filters/collection（13.3.3 不变）。
+        """
         raw = self.rewriter.rewrite(query, feedback)
         if isinstance(raw, str):
             raw = [raw]
-        variants = [v for v in raw if v and v.strip()]
+        variants: list[tuple[str, str]] = []
+        for item in raw:
+            if isinstance(item, dict):
+                text = (item.get("text") or "").strip()
+                if text:
+                    variants.append((text, item.get("path") or "hybrid"))
+            elif isinstance(item, str) and item.strip():
+                variants.append((item, "hybrid"))
         if not variants:
-            variants = [query]
-        return [(v, "hybrid") for v in variants]
+            variants = [(query, "hybrid")]
+        return variants
 
     def _switch_path(self, query: str) -> list[tuple[str, str]]:
         """13.3.3-1 换路：query 与上轮相同 → 去停用词重切 / BM25-only / 向量-only。"""
@@ -272,6 +284,25 @@ class OrchestrationService:
             })
         return out
 
+    @staticmethod
+    def _full_contexts(context: list[ScoredChunk]) -> list[dict]:
+        """P0 评测出口：完整上下文（不截断）+ chunk_id，供质量评测/离线分析使用。
+
+        仅 capture_contexts=True 时填充，不影响 API 响应体积与默认行为。
+        """
+        out: list[dict] = []
+        for item in context:
+            meta = item.chunk.metadata
+            out.append({
+                "chunk_id": item.chunk.chunk_id,
+                "document_id": item.chunk.document_id,
+                "filename": meta.get("source") or item.chunk.document_id,
+                "page": meta.get("page"),
+                "text": item.chunk.text,
+                "score": round(item.score, 4),
+            })
+        return out
+
     # -- 主流程 --------------------------------------------------------------
 
     def run(self, query: str, filters: dict | None = None,
@@ -279,7 +310,8 @@ class OrchestrationService:
             top_k: int | None = None, debug: bool = False,
             history: list[dict] | None = None,
             web_search: bool = False,
-            allow_clarify: bool = True) -> Answer:
+            allow_clarify: bool = True,
+            capture_contexts: bool = False) -> Answer:
         start = time.perf_counter()
         # 预热（幂等，已加载时零成本）：模型加载属装配开销，不计入请求/检索预算，
         # 避免冷启动首次请求误触发 21002
@@ -418,6 +450,7 @@ class OrchestrationService:
                 return Answer(
                     text=answer_text,
                     sources=self._sources(context),
+                    contexts=self._full_contexts(context) if capture_contexts else [],
                     iterations=iteration,
                     hallucination=detection,
                     debug_trace=trace if debug else [],

@@ -29,6 +29,30 @@ dependencies = [
     "python-docx",
     "openpyxl",
     "python-pptx",
+    # 新增（DEVELOPMENT.md 16.2）：旧版 Excel .xls 是 OLE2 二进制格式，openpyxl 不支持；
+    # xlrd>=2.0 只读 .xls（纯 Python、无编译依赖），为当前唯一成熟选项。
+    # .doc/.ppt 不引 Python 依赖，走可选 LibreOffice 外部转换（16.2）。
+    "xlrd>=2.0",
+    # 新增（DEVELOPMENT.md 16.5）：代码文件 AST 符号提取。
+    # tree-sitter 核心 + 15 个语言 grammar（官方发布，均有 macOS/Linux/Windows 预编译 wheel）。
+    # 设计为按需 import：缺任一 grammar 只影响该语言（回退纯文本解码），不影响启动；
+    # 配置格式（yaml/toml/ini/xml）不接 grammar，走纯文本路径。
+    "tree-sitter>=0.22",
+    "tree-sitter-python",
+    "tree-sitter-javascript",
+    "tree-sitter-typescript",
+    "tree-sitter-java",
+    "tree-sitter-go",
+    "tree-sitter-rust",
+    "tree-sitter-c",
+    "tree-sitter-cpp",
+    "tree-sitter-c-sharp",
+    "tree-sitter-ruby",
+    "tree-sitter-php",
+    "tree-sitter-bash",
+    "tree-sitter-kotlin",
+    "tree-sitter-swift",
+    "tree-sitter-css",
     # LLM（OpenAI 兼容协议）
     # 上限 3：openai 3.x 改用 httpx2，单测的 respx(httpx 传输层) mock 不再生效、
     # 会真实请求 api.deepseek.com（CI 因此 401）。升级需同步改造 HTTP mock，另立批次。

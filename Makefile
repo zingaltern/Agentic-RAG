@@ -11,8 +11,12 @@ PIP_DEFAULT_TIMEOUT ?= 120
 
 # HuggingFace 模型下载镜像（首次加载嵌入模型联网下载用；可用环境变量覆盖）
 export HF_ENDPOINT ?= https://hf-mirror.com
+# 无外网环境（模型已在本地缓存）务必加 HF_HUB_OFFLINE=1：
+#   HF_HUB_OFFLINE=1 make eval / make perf / make run
+# 否则 sentence-transformers 加载缓存模型时仍会联网查 PEFT adapter 配置，卡在 socket 连接上（表现为"评测无输出"）。
+export HF_HUB_OFFLINE ?= 0
 
-.PHONY: bootstrap run test eval review coverage integration demo-ingest demo-query rebuild docker-up docker-down clean
+.PHONY: bootstrap run test eval review perf coverage integration demo-ingest demo-query rebuild docker-up docker-down clean
 
 ## 首次：创建虚拟环境（python3.11 优先）并安装依赖（含 dev 依赖）
 bootstrap:
@@ -49,6 +53,13 @@ review:
 		--pairs tests/review/qa_pairs/cmrc/qa_pairs.jsonl \
 		--docs tests/review/sample_data/cmrc \
 		--out reports/review-$$(date +%Y%m%d-%H%M%S).md \
+		$(if $(BASELINE),--baseline $(BASELINE),)
+
+## 性能基准（8.5.2）：规模点 50/150/300 文档（进程内真实 BGE+Chroma，Stub LLM），测入库吞吐、
+## 查询延迟分位与 Hit@5 规模曲线 → reports/perf-*.md。基线对比：make perf BASELINE=reports/perf-<基线>.md
+perf:
+	$(PYTHON) -m app.cli.perfbench --scales 50,150,300 --queries 30 \
+		--out reports/perf-$$(date +%Y%m%d-%H%M%S).md \
 		$(if $(BASELINE),--baseline $(BASELINE),)
 
 ## 集成测试（8.2）：需要本机 BGE 模型缓存（不联网下载）

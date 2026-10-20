@@ -152,6 +152,9 @@ class RewriterConfig(BaseModel):
     provider: str = "llm"                        # rule(回退) | llm(W5, 13.3.2)
     synonyms_csv: str = "./configs/synonyms.csv"
     llm_timeout_seconds: int = 30                # LLM 改写超时
+    # 08 批次 Q1：多策略改写（合并单次 LLM 调用产出；默认关=现行为零差异）
+    step_back_enabled: bool = False              # Step-Back：抽象化为一般性问题变体（hybrid）
+    hyde_enabled: bool = False                   # HyDE：假设性答案段落变体（vector 检索路径）
 
 
 class DetectorConfig(BaseModel):
@@ -255,10 +258,48 @@ class ArchiveConfig(BaseModel):
     dir: str = "./data/archive"
 
 
+class JsonFlattenConfig(BaseModel):
+    """JSON/JSONL 路径扁平化上限（16.3；防超深/超大结构把文本撑爆）。"""
+
+    max_items: int = 5000    # 单文档最多产出行数（超出截断 + 尾部标记）
+    max_depth: int = 12      # 最大递归深度（超出写 <max-depth> 占位）
+
+
+class OfficeConvertConfig(BaseModel):
+    """旧版 .doc/.ppt 经 LibreOffice 转换（16.2）。
+
+    - enabled=false：直接拒绝（ParseError 30003），不尝试外部命令；
+    - soffice_path 为空时自动探测 PATH 上的 soffice/libreoffice；
+    - 缺失引擎不静默降级：明确报错并给出安装指引。
+    """
+
+    enabled: bool = True
+    soffice_path: str = ""
+    timeout_seconds: int = 60
+
+
+class CodeSymbolsConfig(BaseModel):
+    """代码 AST 符号提取（16.5，tree-sitter）。
+
+    - enabled=false：代码文件退化为纯文本解码（零 grammar 依赖路径）；
+    - index_in_text=true：正文前置 `[CODE_INDEX]` 符号索引块（提升符号名可检索性）；
+    - max_symbols：单文件符号数上限（防超大文件把 metadata 撑爆）。
+    """
+
+    enabled: bool = True
+    index_in_text: bool = True
+    max_symbols: int = 500
+
+
 class IngestionConfig(BaseModel):
     max_file_size_mb: int = 50
-    allowed_extensions: list[str] = ["pdf", "docx", "xlsx", "pptx", "md", "txt",
-                                     "html", "htm", "eml", "msg"]
+    allowed_extensions: list[str] = ["pdf", "docx", "xlsx", "pptx", "doc", "xls", "ppt",
+                                     "md", "txt", "html", "htm", "eml", "msg",
+                                     "json", "jsonl", "csv", "tsv",
+                                     "py", "js", "mjs", "cjs", "ts", "tsx", "jsx",
+                                     "java", "go", "rs", "c", "h", "cpp", "hpp", "cs",
+                                     "rb", "php", "kt", "swift", "sh", "sql", "vue",
+                                     "css", "scss", "yaml", "yml", "toml", "ini", "xml"]
     embed_batch_size: int = 64
     desensitize_enabled: bool = False   # S5：敏感数据（身份证/手机号/银行卡）脱敏开关
     max_queue_size: int = 64            # C5（V5.1）：Worker 队列上限，满时拒绝并返回 43003
@@ -269,6 +310,9 @@ class IngestionConfig(BaseModel):
     archive: ArchiveConfig = ArchiveConfig()                # P0-2：原件归档（默认关）
     pii: PiiConfig = PiiConfig()                            # P2-6：PII 全局策略（默认关；kb 级可覆盖）
     parser_routing: dict = {}                               # P3-8：解析链路由（空=旧单实现路径；{"pdf":{"chain":["pymupdf"]}}）
+    json_flatten: JsonFlattenConfig = JsonFlattenConfig()   # 16.3：JSON/JSONL 扁平化上限
+    code_symbols: CodeSymbolsConfig = CodeSymbolsConfig()   # 16.5：代码 AST 符号提取（tree-sitter）
+    office_convert: OfficeConvertConfig = OfficeConvertConfig()  # 16.2：.doc/.ppt 转换开关
 
 
 class CleanerConfig(BaseModel):

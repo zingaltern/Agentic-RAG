@@ -144,10 +144,10 @@
       数据本地化：文档与索引只存本机 <code style="background:rgba(255,255,255,.15);color:#fff;">data/</code> 目录，回答由云端 DeepSeek 生成。
     </div>
     <div class="stats">
-      <div class="stat"><b>10 种</b><span>文档格式入库</span></div>
+      <div class="stat"><b>29 种</b><span>文档格式入库（含代码/JSON）</span></div>
       <div class="stat"><b>3 轮</b><span>反思循环上限（30s 硬预算）</span></div>
-      <div class="stat"><b>107 条</b><span>回归评测集（另有 120 条冻结基准）</span></div>
-      <div class="stat"><b>373 项</b><span>单元测试（覆盖率门禁 ≥80%）</span></div>
+      <div class="stat"><b>197 条</b><span>验证集（另有冻结 120 · 外部 160）</span></div>
+      <div class="stat"><b>599 项</b><span>单元测试（覆盖率门禁 ≥80%）</span></div>
       <div class="stat"><b>3 端</b><span>Web / 桌面 App / Docker</span></div>
     </div>
   </header>
@@ -159,7 +159,7 @@
     <div class="card" style="padding:14px 18px;">
       <table>
         <tr><th style="width:120px;">能力</th><th>说明</th></tr>
-        <tr><td>文档问答</td><td>上传 PDF / Word / Excel / PPT / Markdown / txt / HTML / 邮件（.eml/.msg）后自然语言提问，回答带 [N] 引用与来源原文，可逐条核对</td></tr>
+        <tr><td>文档问答</td><td>上传 PDF / Word(.doc/.docx) / Excel(.xls/.xlsx) / PPT(.ppt/.pptx) / Markdown / txt / HTML / 邮件（.eml/.msg）/ CSV / JSON / 代码与配置类（共 29 种扩展名）后自然语言提问，回答带 [N] 引用与来源原文，可逐条核对</td></tr>
         <tr><td>多知识库</td><td>一个库 = 一类文档；<code>kb_id → Chroma collection（rag_&lt;id&gt;）</code>物理隔离，库间内容互不可见；支持按库过滤、自动路由选库</td></tr>
         <tr><td>检索增强</td><td>向量 + 关键词（BM25）双路召回 → RRF 融合 → BGE 精排取 Top5，中文效果好</td></tr>
         <tr><td>反思循环</td><td>回答前先"自查"：检索结果够不够？不够就改写问题（LLM 改写，失败回退规则）、换检索路径再试，最多 3 轮</td></tr>
@@ -253,7 +253,7 @@
       <div class="stage">
         <div class="t">① 接收校验 <small>同步、快速失败</small></div>
         <div class="chips">
-          <span class="chip">大小 ≤ 50MB，扩展名白名单（10 种格式）</span>
+          <span class="chip">大小 ≤ 50MB，扩展名白名单（29 种扩展名，第 16 章）</span>
           <span class="chip warn">魔数校验（防伪装扩展名）+ zip 炸弹防御（总量 200MB / 1000 条目上限）</span>
           <span class="chip ok">content_hash 幂等：重复上传直接返回既有 document_id，不重复入库（加锁防并发双写）</span>
           <span class="chip bad">有界队列 64，满时显式拒绝 → 43003，绝不静默排队</span>
@@ -263,7 +263,7 @@
       <div class="stage">
         <div class="t">② 后台流水线（双线程 Worker）</div>
         <div class="chips">
-          <span class="chip">解析（PARSERS 注册表：PDF 含表格保真 / Word / Excel 按行 / PPT / HTML / 邮件）</span>
+          <span class="chip">解析（PARSERS 注册表：PDF 表格保真 / Word / Excel / PPT / HTML / 邮件 / CSV / JSON / 代码 AST / 旧版 Office 转换）</span>
           <span class="chip">数据清洗（可选，默认关）：归一 / 去噪 / 段落去重 / 质量过滤</span>
           <span class="chip">PII 脱敏（可选，默认关）：身份证/手机号/银行卡 → ***</span>
           <span class="chip">父子分块：父块 512 tokens 保完整，子块 128 tokens 供检索</span>
@@ -340,7 +340,7 @@
         <ul>
           <li><b>插件化架构</b>：嵌入/检索/精排/评估/改写/检测/LLM 全部抽象为接口 + 适配器注册表，<code>/api/plugins/switch</code> 运行期热切换（校验 → 重建 → 原子替换，失败回滚）</li>
           <li><b>多 LLM 容灾</b>（可选）：按优先级配置候选模型，单模型连续 3 次失败熔断 60 秒后自动恢复，全挂才报 30001</li>
-          <li><b>评测体系</b>：开发集 107 条 + 独立冻结基准 120 条；Hit@1/Hit@5/Faithfulness 等指标，改检索/改写必须前后对比留档；评测与线上走同一条编排链路（口径统一）</li>
+          <li><b>评测体系</b>：验证集 197 条（含 complex 难度分层）+ 独立冻结基准 120 条 + 外部 CMRC 2018 160 条；Hit@1/Hit@5/Faithfulness 等指标，改检索/改写必须前后对比留档；评测与线上走同一条编排链路（口径统一）</li>
           <li><b>三端同源</b>：Web SPA 由 FastAPI 同源托管；桌面壳自动探测端口（最多后移 5 个）、轮询健康就绪、后端崩溃自动重启（最多 2 次）、退出级联杀子进程；Electron 开启 contextIsolation/sandbox，仅加载本机地址</li>
           <li><b>全链路可观测</b>：每个请求 trace_id 贯穿 JSON 结构化日志；统一响应包 <code>{code, message, data}</code> 与稳定错误码表</li>
           <li><b>Docker</b>（可选）：compose 一键起容器，data/ 挂载持久卷，密钥经 env 注入不入镜像</li>
@@ -396,7 +396,7 @@
         <tr><th style="width:270px;">场景</th><th>系统行为</th></tr>
         <tr><td><span class="scene">同一文件重复上传</span></td><td>content_hash 幂等命中：直接返回既有 document_id（duplicate=true），不重复入库；幂等检查与写入加进程锁，杜绝并发上传产生双份</td></tr>
         <tr><td><span class="scene">文件是伪装的（改了扩展名）/ 恶意压缩包</span></td><td>魔数校验拒绝伪格式；zip 解压总量与条目数双上限防"zip 炸弹"</td></tr>
-        <tr><td><span class="scene">文件损坏 / 格式不支持（如老 .doc）</span></td><td>Job 标记 failed（30003 解析失败），前端得到明确失败原因，而非悬挂</td></tr>
+        <tr><td><span class="scene">文件损坏 / 格式不支持（如老 .doc 未装 LibreOffice）</span></td><td>Job 标记 failed（30003 解析失败），前端得到明确失败原因与安装指引（如 <code>brew install --cask libreoffice</code>），而非悬挂</td></tr>
         <tr><td><span class="scene">上传高峰把服务打满</span></td><td>入库队列有界（64）：满时新任务显式拒绝（43003"队列已满请稍后"），不静默排队拖垮内存</td></tr>
         <tr><td><span class="scene">服务在入库中途重启</span></td><td>启动时把残留的 pending/running Job 统一置为 failed（50003"服务重启，任务中断"），前端轮询拿到明确终止，而不是 404 或永远转圈</td></tr>
         <tr><td><span class="scene">删除文档 / 删除知识库</span></td><td>删除文档级联清除其全部向量块并按 mutation_epoch 失效 BM25 与父块缓存；删库级联 drop collection；<b>内置 default 库删除请求直接拒绝</b></td></tr>
@@ -465,7 +465,7 @@
   </section>
 
   <footer>
-    基于 README.md · PRODUCT_MANUAL.md · DEVELOPMENT.md（V5.1）与核心源码（orchestration / query / kb_router / multi_llm / web_retriever / interfaces）整理 · 2026-08-30<br>
+    基于 README.md · PRODUCT_MANUAL.md · DEVELOPMENT.md（V5.1）与核心源码（orchestration / query / parser / multi_llm / web_retriever / interfaces）整理 · 2026-10-19<br>
     页面为静态自包含文档，未修改任何项目代码。
   </footer>
 </div>

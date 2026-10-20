@@ -25,7 +25,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 CODE_FALLBACK = 21001
@@ -67,6 +67,7 @@ class CaseResult:
     answer_relevancy: bool = False
     faithful: bool = False
     elapsed_ms: int = 0
+    contexts: list[dict] = field(default_factory=list)   # P0：完整上下文（--export-jsonl/质量评测用）
     error: str = ""
 
 
@@ -126,7 +127,8 @@ class _StubLLM:
 
 def _run_in_process(config, docs_dir: Path, pairs: list[dict],
                     kb_id: str = "default", debug: bool = False,
-                    fresh: bool = False) -> list[dict]:
+                    fresh: bool = False, capture_contexts: bool = False) -> list[dict]:
+    from app.adapters.parser.formats import SUPPORTED_EXTENSIONS
     from app.core.config import load_config
     from app.core.registry import wire
     from app.services.kb_store import DEFAULT_KB_ID, KbStore
@@ -144,7 +146,10 @@ def _run_in_process(config, docs_dir: Path, pairs: list[dict],
         if deps.documents is not None:
             deps.documents.delete_by_kb(kb_id)
 
-    files = sorted(p for p in docs_dir.iterdir() if p.is_file())
+    # P0：跳过隐藏文件与不支持扩展（如 .DS_Store），避免“入库失败”噪声与污染
+    files = sorted(p for p in docs_dir.iterdir()
+                   if p.is_file() and not p.name.startswith(".")
+                   and p.suffix.lower() in SUPPORTED_EXTENSIONS)
     for path in files:
         job = deps.pipeline.ingest(path.read_bytes(), path.name,
                                    kb_id=kb_id, collection=collection)
@@ -160,7 +165,8 @@ def _run_in_process(config, docs_dir: Path, pairs: list[dict],
         started = time.time()
         try:
             result = deps.orchestration.run(pair["query"], top_k=5,
-                                            collection=collection, debug=debug)
+                                            collection=collection, debug=debug,
+                                            capture_contexts=capture_contexts)
             elapsed = round((time.time() - started) * 1000)
             # 与 HTTP 模式一致的响应体形状：{code, data, elapsed_ms, message}
             detection_rate = result.hallucination.verified_rate if result.hallucination else None
@@ -169,7 +175,8 @@ def _run_in_process(config, docs_dir: Path, pairs: list[dict],
                 "message": result.message,
                 "data": {
                     "answer": result.text,
-                    "sources": [{"filename": s["filename"]} for s in result.sources],
+                    "sources": result.sources,
+                    "contexts": result.contexts,
                     "iterations": result.iterations,
                     "hallucination_check": "passed"
                     if (result.hallucination and result.hallucination.verified) else "suspected",

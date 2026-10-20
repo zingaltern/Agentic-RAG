@@ -58,7 +58,9 @@ make run                # 生产托管：SPA 由 FastAPI 同源托管在 http://
 | `make run` | 启动 API（含 `/ui` 测试页）→ http://localhost:8000/ui |
 | `make test` | 单测 + 覆盖率（`fail_under=80`，默认过滤 integration） |
 | `make coverage` | 仅输出覆盖率报告（不设失败门禁） |
-| `make eval` | 评测：`reports/eval-{时间戳}.md`（逐条 + Hit@5 等聚合指标） |
+| `make eval` | 评测：`reports/eval-{时间戳}.md`（197 条验证集；逐条 + Hit@5 等聚合指标） |
+| `make review` | 外部基准评测（CMRC 2018，独立 kb `cmrc`）→ `reports/review-*.md` |
+| `make perf` | 性能基准（规模点 50/150/300：入库吞吐 / 延迟分位 / Hit@5 曲线）→ `reports/perf-*.md` |
 | `make integration` | 集成测试（需要本机 BGE 模型缓存，不联网） |
 | `make demo-ingest` | 入库 demo 文档并检索验证 |
 | `make docker-up` | 构建并启动 api 容器（可选） |
@@ -120,15 +122,15 @@ make desktop   # 依赖：.venv（make bootstrap）、frontend 依赖（make fro
   **注意（V5.1）**：审计日志含用户查询与回答摘要，属个人数据——日志文件权限已收紧（桌面 `backend.log` 0o600），
   留存与访问控制由部署方制度化管理。
 - 密码策略（V5.1）：新密码/重置密码 ≥8 位且同时含字母与数字；已有用户不强求改密。
-- 敏感数据脱敏（S6）：`ingestion.desensitize_enabled=true` 时身份证/手机号/银行卡入库前替换为 `***`
-  （默认关闭；HR/财务等合规场景建议开启，开启后号码类检索会失效，改策略前跑 `make eval` 对比）。
+- 敏感数据脱敏（S6，P2-6 两级化）：全局 `ingestion.pii = {enabled, mode: mask|replace|delete, types}`、库级 `KbInfo.pii` 覆盖（默认关闭）；
+  开启后身份证/手机号/银行卡按策略脱敏（开启后号码类检索会失效，改策略前跑 `make eval` 对比）；旧 `desensitize_enabled` 已弃用（同开时新逻辑优先）。
 - 并发与限速（V5.1）：并发查询上限 `orchestration.max_concurrent_queries`（默认 4，超限 43001）；
   `/api/query` 20 次/分/IP、上传 10 次/分/IP（超限 43002）；入库队列上限 64（超限 43003）。
 - CLI 评测（认证启用时）：`python -m app.cli.rageval --base-url http://127.0.0.1:8000 --login <user> <pass>` 或 `--token <token>`。
 
 ## API 速览
 
-统一响应包 `{code, message, data}`；错误码见 DEVELOPMENT.md 6.7 表。
+统一响应包 `{code, message, data}`；错误码见 DEVELOPMENT.md 2.2 表。
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
@@ -147,7 +149,8 @@ A/B 库内容互不可见；`/api/kbs` 建库（name 自动 slug 化生成 kb_id
 ## 评测报告与已知限制
 
 - `make eval` 报告输出到 `reports/eval-*.md`（`reports/` 已 gitignore，产物不入库）。
-- 全库评测（default+docs，107 条）：`make eval`（进程内模式）；HTTP 真链路：`python -m app.cli.rageval --all-kbs --base-url http://localhost:8000 --baseline <报告>`。
+- 全库评测（default+docs+complex，197 条）：`make eval`（进程内模式）；HTTP 真链路：`python -m app.cli.rageval --all-kbs --base-url http://localhost:8000 --baseline <报告>`。
+- **无外网环境**（模型已在本地缓存）：加 `HF_HUB_OFFLINE=1` 前缀，如 `HF_HUB_OFFLINE=1 make eval`——否则加载缓存模型时仍会联网查 PEFT adapter 配置而卡住。
 - 指标：Hit@1 / Hit@5 / ContextPrecision / ContextRecall / AnswerRelevancy / Faithfulness（分类型）/ 兜底率；按库汇总 + 基线 diff 列。
 - no_answer 判据（13.6 修订）：`code=0 且回答含"未找到相关依据"类文案 ∨ code=21001`。
 - **已知限制**（如实列出，供检索/改写调优）：
@@ -155,8 +158,8 @@ A/B 库内容互不可见；`/api/kbs` 建库（name 自动 slug 化生成 kb_id
   - 进程内评测（Stub LLM）的 Faithfulness 恒 0%（Stub 答案与上下文不匹配属预期），真 DeepSeek 模式约 69%。
   - LLM 生成的规范化总结句对幻觉检测阈值达标率有限，阈值可在 `configs/settings.yaml` 调整。
   - **定位边界**：当前为检索侧自我修正循环（Iterative/Self-Correcting RAG），无规划器/工具调用（真 Agentic 见 `DEVELOPMENT.md` 第 15 章演进路线 P-D）。
-  - **格式边界**：支持 PDF/Word/Excel/PPT/Markdown/文本/HTML/邮件（.eml/.msg）；图片 OCR 仅预留接口未接引擎（15.2）。
-  - **安全现状**：解析安全✅（魔数校验+zip 炸弹防御）；提示注入⚠️（仅生成阶段提示约束，入库无拦截）；内容审核❌（无审核层，仅 PII 脱敏默认关）（15.3）。
+  - **格式边界**：支持 PDF / Word(.doc/.docx) / Excel(.xls/.xlsx) / PPT(.ppt/.pptx) / Markdown / 文本 / HTML / 邮件(.eml/.msg) / CSV 与 TSV / 代码与配置类（29 种扩展名，tree-sitter AST 符号提取） / JSON 与 JSONL（第 16 章）；其中 `.doc/.ppt` 需服务端安装 LibreOffice（未装时明确报错并给安装指引）；图片 OCR 仅预留接口未接引擎（15.2）。
+  - **安全现状**：解析安全✅（魔数校验+zip 炸弹防御）；提示注入✅（入库侧扫描，默认 audit 打标、可配 reject 40002；生成阶段另有 SYSTEM_PROMPT 约束）；内容审核✅（`adapters/content_moderation/`，词表可编辑，默认关，可 reject 40003）；PII 脱敏两级可配（`ingestion.pii` 全局 + `KbInfo.pii` 库级覆盖，默认关）（15.3）。
   - **数据清洗层**：`cleaner.enabled` 默认关；开启后入库前执行归一/去噪/段落去重/质量过滤（15.4 P-A）。
 
 ## 第二阶段（Phase 2）规划速览
@@ -170,25 +173,28 @@ A/B 库内容互不可见；`/api/kbs` 建库（name 自动 slug 化生成 kb_id
 | W7 | Web 前端：前后端分离，`frontend/` Vue3+Vite SPA | 已落地 |
 | W8 | Electron 桌面壳（内置拉起后端）+ 收尾 | 已落地 |
 
-当前阶段面向收尾与加固：桌面打包（Python 运行时捆绑待决策）、认证/权限（`api.auth_enabled` + `RAG_ADMIN_USER/RAG_ADMIN_PASSWORD`，当前部署已开启团队模式）、文档索引持久化等。
+当前阶段面向收尾与加固：桌面打包（Python 运行时捆绑待决策）、认证/权限（`api.auth_enabled` + `RAG_ADMIN_USER/RAG_ADMIN_PASSWORD`，当前部署已开启团队模式）；P-D 真 Agentic（结构化 Agent）待排期（`DEVELOPMENT.md` 第 15 章）。
 
 Web 前端开发期用 `cd frontend && npm run dev`（proxy 到 :8000）；桌面端 W8 落地后 `make desktop`。
 
 ## 目录速览
 
 ```
-application.py           # 装配层：中间件（CORS/安全头/限速/审计）+ 依赖注入
 app/
 ├── main.py            # FastAPI 入口（装配 DI → 启动，托管 /ui）
+├── application.py     # 装配层：中间件（CORS/安全头/限速/审计）+ 依赖注入
 ├── api/               # health / documents / query / plugins / jobs / kbs / users / auth 路由
 ├── core/              # domain 数据模型 / interfaces 接口契约 / config / errors / logging / registry / rate_limit
 ├── adapters/          # embedding / vector_store / retriever / reranker / evaluator / rewriter / detector / llm / parser / chunker
 ├── services/          # orchestration（反思循环）/ ingestion / jobs_store / documents_store / kb_store / user_store / rbac / desensitize
-└── cli/               # demo_ingest / rageval
+└── cli/               # demo_ingest / rageval / build_review_set / build_eval_stress / perfbench / rebuild
 web/                   # /ui 内置测试页（无前端工程，冒烟/降级入口）
 frontend/              # Vue3 SPA + Electron 桌面壳（electron/main.cjs、bootstrap.cjs）
 configs/settings.yaml  # 系统配置
+docs/                  # 文档体系（索引 docs/README.md；specs/ 方案蓝图，dev-tasks/ 批次指令）
 tests/unit/            # 单测；tests/integration/ 集成测试（-m integration）
+tests/{eval,review,eval_suite}/  # 验证集 / 外部测试集 / 冻结基准集（规范见各自 README）
+reports/               # eval / review / perf 报告存档（gitignore，不入库）
 ```
 
 ## 里程碑（DEVELOPMENT.md 第 9 章）
@@ -202,7 +208,7 @@ tests/unit/            # 单测；tests/integration/ 集成测试（-m integrati
 | W5 | 精排 bge_reranker + 语义评估/LLM 改写/语义检测（Phase2） |
 | W6 | 多知识库隔离 + 评测体系 v2 |
 | W7 | Vue3 SPA 五区块 + CORS/静态托管（Phase2） |
-| W8 | Electron 桌面壳 + API Key 认证 + RBAC 预留（当前） |
+| W8 | Electron 桌面壳 + 认证/权限（V5.1：密码登录 + 库级 RBAC） |
 
 ## 测试
 

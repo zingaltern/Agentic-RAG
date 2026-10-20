@@ -1,0 +1,90 @@
+{"id": "C001", "query": "出差住宿每晚最高可以报销多少钱？", "type": "direct", "variant": "direct", "expected_sources": ["云帆科技-差旅管理办法v3.pdf"]}
+{"id": "C002", "query": "机票改签费用需要谁审批？", "type": "direct", "variant": "direct", "expected_sources": ["云帆科技-差旅管理办法v3.pdf"]}
+{"id": "C003", "query": "单笔服务器采购金额 5 万元以下由谁审批？", "type": "direct", "variant": "direct", "expected_sources": ["云帆科技-服务器采购流程.pdf"]}
+{"id": "C004", "query": "办公电脑密码多少天必须更换一次？", "type": "direct", "variant": "direct", "expected_sources": ["云帆科技-信息安全红线.pdf"]}
+{"id": "C005", "query": "星尘 X2 的官方定价是多少元？", "type": "direct", "variant": "direct", "expected_sources": ["云帆科技-2026年Q2产品路线图.pdf"]}
+{"id": "C006", "query": "试用期最长不超过几个月？", "type": "direct", "variant": "direct", "expected_sources": ["云帆科技-员工手册.docx"]}
+{"id": "C007", "query": "差旅报销需要在费用发生后多少个工作日内提交？", "type": "direct", "variant": "direct", "expected_sources": ["云帆科技-报销制度.docx"]}
+{"id": "C008", "query": "一个迭代的固定周期是多久？", "type": "direct", "variant": "direct", "expected_sources": ["云帆科技-项目管理规范.docx"]}
+{"id": "C009", "query": "P1 级故障的响应时限是多长？", "type": "direct", "variant": "direct", "expected_sources": ["云帆科技-售后服务条款.docx"]}
+{"id": "C010", "query": "研发部 2026 年的年度预算是多少万元？", "type": "direct", "variant": "direct", "expected_sources": ["云帆科技-2026年部门预算.xlsx"]}
+{"id": "C011", "query": "资产编号 ZC-1024 是什么设备？持有人是谁？", "type": "direct", "variant": "direct", "expected_sources": ["云帆科技-固定资产清单.xlsx"]}
+{"id": "C012", "query": "2026 年 Q2 的销售额是多少万元？", "type": "direct", "variant": "direct", "expected_sources": ["云帆科技-季度销售数据.xlsx"]}
+{"id": "C013", "query": "星尘系列新品发布会定在哪一天？", "type": "direct", "variant": "direct", "expected_sources": ["云帆科技-新品发布会.pptx"]}
+{"id": "C014", "query": "新员工入职培训为期几天？", "type": "direct", "variant": "direct", "expected_sources": ["云帆科技-入职培训.pptx"]}
+{"id": "C015", "query": "公司总部搬迁到了哪里？", "type": "direct", "variant": "direct", "expected_sources": ["云帆科技-内网公告.html"]}
+{"id": "C016", "query": "工卡补办需要多少费用？", "type": "direct", "variant": "direct", "expected_sources": ["云帆科技-常见问题FAQ.html"]}
+{"id": "C017", "query": "VPN 网关的连接端口是多少？", "type": "direct", "variant": "direct", "expected_sources": ["云帆科技-VPN配置指南.html"]}
+{"id": "C018", "query": "产品评审会改到什么时间？", "type": "direct", "variant": "direct", "expected_sources": ["云帆科技-会议时间变更.eml"]}
+{"id": "C019", "query": "核心系统停机维护安排在什么时间？", "type": "direct", "variant": "direct", "expected_sources": ["云帆科技-系统停机通知.eml"]}
+{"id": "C020", "query": "新报销系统什么时候上线？", "type": "direct", "variant": "direct", "expected_sources": ["云帆科技-报销系统上线.eml"]}
+{"id": "C021", "query": "值班工程师接到告警后多少分钟内必须响应？", "type": "direct", "variant": "direct", "expected_sources": ["云帆科技-值班手册.md"]}
+{"id": "C022", "query": "代码合并至少需要几名高级工程师评审通过？", "type": "direct", "variant": "direct", "expected_sources": ["云帆科技-代码评审规范.md"]}
+{"id": "C023", "query": "用户表 user_id 字段的长度是多少？", "type": "direct", "variant": "direct", "expected_sources": ["云帆科技-数据字典.md"]}
+{"id": "C024", "query": "核心服务的可用性承诺是多少？", "type": "direct", "variant": "direct", "expected_sources": ["云帆科技-SLA服务等级说明.md"]}
+{"id": "C025", "query": "出差住酒店一晚上最多能报多少？", "type": "rewrite", "variant": "paraphrase", "expected_sources": ["云帆科技-差旅管理办法v3.pdf"]}
+{"id": "C026", "query": "电脑密码多久得换一次啊", "type": "rewrite", "variant": "paraphrase", "expected_sources": ["云帆科技-信息安全红线.pdf"]}
+{"id": "C027", "query": "试用期最多多久就能转正呀", "type": "rewrite", "variant": "paraphrase", "expected_sources": ["云帆科技-员工手册.docx"]}
+{"id": "C028", "query": "报销单最晚啥时候要交？", "type": "rewrite", "variant": "paraphrase", "expected_sources": ["云帆科技-报销制度.docx"]}
+{"id": "C029", "query": "服务器挂了多久得有人响应？", "type": "rewrite", "variant": "paraphrase", "expected_sources": ["云帆科技-售后服务条款.docx"]}
+{"id": "C030", "query": "研发部今年预算有多少钱", "type": "rewrite", "variant": "paraphrase", "expected_sources": ["云帆科技-2026年部门预算.xlsx"]}
+{"id": "C031", "query": "工卡丢了补一张多少钱", "type": "rewrite", "variant": "paraphrase", "expected_sources": ["云帆科技-常见问题FAQ.html"]}
+{"id": "C032", "query": "会议室一次最多能订几个小时", "type": "rewrite", "variant": "paraphrase", "expected_sources": ["云帆科技-会议室预订说明.html"]}
+{"id": "C033", "query": "评审会是不是改时间了？改成啥时候了", "type": "rewrite", "variant": "paraphrase", "expected_sources": ["云帆科技-会议时间变更.eml"]}
+{"id": "C034", "query": "vpn连接用哪个端口", "type": "rewrite", "variant": "paraphrase", "expected_sources": ["云帆科技-VPN配置指南.html"]}
+{"id": "C035", "query": "值班告警多快之内要回复？", "type": "rewrite", "variant": "paraphrase", "expected_sources": ["云帆科技-值班手册.md"]}
+{"id": "C036", "query": "公司新地址在哪儿啊", "type": "rewrite", "variant": "paraphrase", "expected_sources": ["云帆科技-内网公告.html"]}
+{"id": "C037", "query": "一线城市住宿标准和 P1 故障响应时限分别是多少？", "type": "direct", "variant": "multi_doc", "expected_sources": ["云帆科技-差旅管理办法v3.pdf", "云帆科技-售后服务条款.docx"]}
+{"id": "C038", "query": "服务器采购 20 万以上需要谁联签？生产数据导出有什么要求？", "type": "direct", "variant": "multi_doc", "expected_sources": ["云帆科技-服务器采购流程.pdf", "云帆科技-信息安全红线.pdf"]}
+{"id": "C039", "query": "研发部年度预算和 2026 年 Q2 销售额分别是多少？", "type": "direct", "variant": "multi_doc", "expected_sources": ["云帆科技-2026年部门预算.xlsx", "云帆科技-季度销售数据.xlsx"]}
+{"id": "C040", "query": "新品发布会日期和星尘 X2 定价分别是多少？", "type": "direct", "variant": "multi_doc", "expected_sources": ["云帆科技-新品发布会.pptx", "云帆科技-2026年Q2产品路线图.pdf"]}
+{"id": "C041", "query": "差旅报销提交时限和新报销系统上线日期分别是？", "type": "direct", "variant": "multi_doc", "expected_sources": ["云帆科技-报销制度.docx", "云帆科技-报销系统上线.eml"]}
+{"id": "C042", "query": "IT 服务台分机和 VPN 端口分别是多少？", "type": "direct", "variant": "multi_doc", "expected_sources": ["云帆科技-通讯录.html", "云帆科技-VPN配置指南.html"]}
+{"id": "C043", "query": "入职培训为期几天？工卡补办费用是多少？", "type": "direct", "variant": "multi_doc", "expected_sources": ["云帆科技-入职培训.pptx", "云帆科技-常见问题FAQ.html"]}
+{"id": "C044", "query": "服务可用性承诺和 user_id 字段长度分别是？", "type": "direct", "variant": "multi_doc", "expected_sources": ["云帆科技-SLA服务等级说明.md", "云帆科技-数据字典.md"]}
+{"id": "C045", "query": "会议室最长预订时长和访客预约要求分别是？", "type": "direct", "variant": "multi_doc", "expected_sources": ["云帆科技-会议室预订说明.html", "云帆科技-访客参观须知.txt"]}
+{"id": "C046", "query": "现行弹性打卡窗口是多久？差旅住宿上限是多少？", "type": "direct", "variant": "multi_doc", "expected_sources": ["云帆科技-考勤制度v2.txt", "云帆科技-差旅管理办法v3.pdf"]}
+{"id": "C047", "query": "二类城市的住宿报销标准是每晚多少钱？", "type": "direct", "variant": "table", "expected_sources": ["云帆科技-差旅管理办法v3.pdf"]}
+{"id": "C048", "query": "三线城市的住宿标准和补贴分别是多少？", "type": "direct", "variant": "table", "expected_sources": ["云帆科技-差旅管理办法v3.pdf"]}
+{"id": "C049", "query": "采购金额 5 万到 20 万之间由谁审批？", "type": "direct", "variant": "table", "expected_sources": ["云帆科技-服务器采购流程.pdf"]}
+{"id": "C050", "query": "星尘 X2 计划在哪个窗口发布？", "type": "direct", "variant": "table", "expected_sources": ["云帆科技-2026年Q2产品路线图.pdf"]}
+{"id": "C051", "query": "司龄满 10 年的员工年假是多少天？", "type": "direct", "variant": "table", "expected_sources": ["云帆科技-员工手册.docx"]}
+{"id": "C052", "query": "市场部 2026 年的年度预算是多少万元？", "type": "direct", "variant": "table", "expected_sources": ["云帆科技-2026年部门预算.xlsx"]}
+{"id": "C053", "query": "资产编号 ZC-2048 是什么设备？放在哪里？", "type": "direct", "variant": "table", "expected_sources": ["云帆科技-固定资产清单.xlsx"]}
+{"id": "C054", "query": "2026 年 Q3 的销售额是多少万元？", "type": "direct", "variant": "table", "expected_sources": ["云帆科技-季度销售数据.xlsx"]}
+{"id": "C055", "query": "P2 级故障的响应时限是多长？", "type": "direct", "variant": "table", "expected_sources": ["云帆科技-售后服务条款.docx"]}
+{"id": "C056", "query": "IT 服务台的分机号是多少？", "type": "direct", "variant": "table", "expected_sources": ["云帆科技-通讯录.html"]}
+{"id": "C057", "query": "台账编号 SB-301 是什么设备？", "type": "direct", "variant": "noisy", "expected_sources": ["云帆科技-设备台账.txt"]}
+{"id": "C058", "query": "6 月 3 日的值班记录报告了什么告警？", "type": "direct", "variant": "noisy", "expected_sources": ["云帆科技-值班记录.txt"]}
+{"id": "C059", "query": "本期客户满意度调查综合得分是多少？", "type": "direct", "variant": "noisy", "expected_sources": ["云帆科技-客户反馈摘要.txt"]}
+{"id": "C060", "query": "显示器当前库存是多少台？", "type": "direct", "variant": "noisy", "expected_sources": ["云帆科技-库存清单.txt"]}
+{"id": "C061", "query": "会议室空调维修花了多长时间？", "type": "direct", "variant": "noisy", "expected_sources": ["云帆科技-维修日志.txt"]}
+{"id": "C062", "query": "工单 GD-889 目前是什么状态？", "type": "direct", "variant": "noisy", "expected_sources": ["云帆科技-工单导出.txt"]}
+{"id": "C063", "query": "门禁系统升级安排在什么时间？", "type": "direct", "variant": "noisy", "expected_sources": ["云帆科技-公告存档.txt"]}
+{"id": "C064", "query": "会议速记明确下季度聚焦几个目标？", "type": "direct", "variant": "noisy", "expected_sources": ["云帆科技-会议速记.txt"]}
+{"id": "C065", "query": "架构白皮书里的自研统一接入网关叫什么名字？", "type": "direct", "variant": "long_doc", "expected_sources": ["云帆科技-架构演进白皮书.md"]}
+{"id": "C066", "query": "架构白皮书设定的核心链路 P99 延迟目标是多少毫秒？", "type": "direct", "variant": "long_doc", "expected_sources": ["云帆科技-架构演进白皮书.md"]}
+{"id": "C067", "query": "核心链路迁移计划在哪一年完成？", "type": "direct", "variant": "long_doc", "expected_sources": ["云帆科技-架构演进白皮书.md"]}
+{"id": "C068", "query": "单元化改造按流量分几个阶段推进？", "type": "direct", "variant": "long_doc", "expected_sources": ["云帆科技-架构演进白皮书.md"]}
+{"id": "C069", "query": "服务网格选用了什么方案？", "type": "direct", "variant": "long_doc", "expected_sources": ["云帆科技-架构演进白皮书.md"]}
+{"id": "C070", "query": "异地多活的容灾目标 RPO 是多少秒？", "type": "direct", "variant": "long_doc", "expected_sources": ["云帆科技-架构演进白皮书.md"]}
+{"id": "C071", "query": "星尘 X2 的定价、发布窗口和发布会日期分别是？", "type": "direct", "variant": "cross_fmt", "expected_sources": ["云帆科技-2026年Q2产品路线图.pdf", "云帆科技-新品发布会.pptx"]}
+{"id": "C072", "query": "差旅住宿标准和员工手册里的年假上限分别是？", "type": "direct", "variant": "cross_fmt", "expected_sources": ["云帆科技-差旅管理办法v3.pdf", "云帆科技-员工手册.docx"]}
+{"id": "C073", "query": "质保期 12 个月和整机发布定价分别在哪些文件约定？", "type": "direct", "variant": "cross_fmt", "expected_sources": ["云帆科技-售后服务条款.docx", "云帆科技-2026年Q2产品路线图.pdf"]}
+{"id": "C074", "query": "工卡补办费用和门禁系统升级时间分别在哪些文件里？", "type": "direct", "variant": "cross_fmt", "expected_sources": ["云帆科技-常见问题FAQ.html", "云帆科技-公告存档.txt"]}
+{"id": "C075", "query": "值班响应要求和故障复盘时限分别是多少？", "type": "direct", "variant": "cross_fmt", "expected_sources": ["云帆科技-值班手册.md", "云帆科技-故障复盘模板.md"]}
+{"id": "C076", "query": "报销提交时限和迭代周期分别是多少？", "type": "direct", "variant": "cross_fmt", "expected_sources": ["云帆科技-报销制度.docx", "云帆科技-项目管理规范.docx"]}
+{"id": "C077", "query": "云帆科技 2027 年的营收目标是多少？", "type": "no_answer", "variant": "oov"}
+{"id": "C078", "query": "公司食堂的午餐价格是多少？", "type": "no_answer", "variant": "oov"}
+{"id": "C079", "query": "云帆科技的海外分部在哪个城市？", "type": "no_answer", "variant": "oov"}
+{"id": "C080", "query": "首席执行官的助理叫什么名字？", "type": "no_answer", "variant": "oov"}
+{"id": "C081", "query": "今年双十一的促销预算是多少？", "type": "no_answer", "variant": "oov"}
+{"id": "C082", "query": "公司通勤班车有几条线路？", "type": "no_answer", "variant": "oov"}
+{"id": "C083", "query": "云帆科技的主要竞争对手有哪些？", "type": "no_answer", "variant": "oov"}
+{"id": "C084", "query": "员工年度体检机构是哪家？", "type": "no_answer", "variant": "oov"}
+{"id": "C085", "query": "云帆科技上一季度的净利润是多少？", "type": "no_invent", "variant": "no_invent"}
+{"id": "C086", "query": "星尘 X2 的实际销量是多少台？", "type": "no_invent", "variant": "no_invent"}
+{"id": "C087", "query": "研发部今年实际招聘了多少人？", "type": "no_invent", "variant": "no_invent"}
+{"id": "C088", "query": "公司年会定在哪一天？", "type": "no_invent", "variant": "no_invent"}
+{"id": "C089", "query": "云帆科技最新取得的专利编号是什么？", "type": "no_invent", "variant": "no_invent"}
+{"id": "C090", "query": "服务器机房的具体经纬度是多少？", "type": "no_invent", "variant": "no_invent"}

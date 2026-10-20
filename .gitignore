@@ -16,6 +16,9 @@ build/
 .coverage
 .coverage.*
 htmlcov/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
 
 # ---- 运行时数据（Chroma、日志、报告） ----
 data/
@@ -34,7 +37,7 @@ reports/
 *.swp
 
 # ---- 前端（W7：node_modules 与 dev 日志不入库；frontend/dist 按 AGENTS.md 提交供托管） ----
-frontend/node_modules/
+node_modules/
 frontend/*.log
 npm-debug.log*
 # ---- 打包产物（electron-builder 输出；含二进制 App/DMG，不入库） ----

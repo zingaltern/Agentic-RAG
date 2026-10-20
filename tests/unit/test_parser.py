@@ -1,16 +1,20 @@
-"""Parser 契约测试（DEVELOPMENT.md 5.1）：六种格式 + 异常路径。"""
+"""Parser 契约测试（DEVELOPMENT.md 5.1 + 第 16 章）：既有格式 + 代码/JSON/旧版 Office + 异常路径。"""
 from __future__ import annotations
 
 import hashlib
 import io
+import pathlib
 import re
 
 import pytest
 
-from app.adapters.parser import SUPPORTED_EXTENSIONS, parse_file
+from app.adapters.parser import CODE_EXTENSIONS, SUPPORTED_EXTENSIONS, parse_file
+from app.core.config import load_config
 from app.core.errors import ParseError
 
 DOC_ID_RE = re.compile(r"^[0-9a-f]{12}$")
+
+_OLE2_HEADER = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
 
 
 def _parse_bytes(raw: bytes, filename: str):
@@ -18,8 +22,10 @@ def _parse_bytes(raw: bytes, filename: str):
 
 
 def test_supported_extensions():
-    assert SUPPORTED_EXTENSIONS == {".pdf", ".docx", ".xlsx", ".pptx", ".md", ".txt",
-                                    ".html", ".htm", ".eml", ".msg"}
+    assert SUPPORTED_EXTENSIONS == ({".pdf", ".docx", ".xlsx", ".pptx", ".md", ".txt",
+                                     ".html", ".htm", ".eml", ".msg", ".json", ".jsonl",
+                                     ".csv", ".tsv",
+                                     ".doc", ".xls", ".ppt"} | set(CODE_EXTENSIONS))
 
 
 def test_parse_txt():
@@ -51,6 +57,35 @@ def test_parse_pdf_single_page():
     assert "PDF test content" in doc.text
     assert doc.metadata["kind"] == "pdf"
     assert doc.metadata["page"] == 1
+
+
+def test_parse_pdf_table_first_class():
+    """P1-4 回归：PDF 表格须以 [TABLE] 块进正文并登记 metadata.tables。
+
+    拆分包后 pdf.py 曾漏 import `_table_rows`/`_rows_to_markdown`，NameError 被宽泛
+    except 吞掉 → 表格静默丢失（正文与 metadata 都没有），评测排序随之漂移。
+    """
+    import fitz
+
+    buf = io.BytesIO()
+    pdf = fitz.open()
+    page = pdf.new_page()
+    xs, ys = [72, 220, 360], [72, 100, 128]
+    for y in ys:
+        page.draw_line((xs[0], y), (xs[-1], y))
+    for x in xs:
+        page.draw_line((x, ys[0]), (x, ys[-1]))
+    for (x, y), cell in [((80, 92), "Product"), ((230, 92), "Price"),
+                         ((80, 120), "X2"), ((230, 120), "3999")]:
+        page.insert_text((x, y), cell)
+    pdf.save(buf)
+    pdf.close()
+
+    doc = _parse_bytes(buf.getvalue(), "路线图.pdf")
+    assert "[TABLE]" in doc.text and "| Product | Price |" in doc.text, "PDF 表格须 Markdown 化进正文"
+    assert doc.metadata["tables"], "表格须按阅读顺序登记 metadata.tables"
+    assert doc.metadata["tables"][0]["header"] == ["Product", "Price"]
+    assert doc.metadata["tables"][0]["rows"] == [["X2", "3999"]]
 
 
 def test_parse_docx():
@@ -271,3 +306,257 @@ def test_html_renamed_as_pdf_rejected():
     fake = "<html><body>不是真 PDF</body></html>".encode()
     with _pytest.raises(ParseError, match="非 PDF"):
         parse_file(_io.BytesIO(fake), "伪装.pdf")
+
+
+# -- 16.1 代码 / 配置类文件 ---------------------------------------------------------------
+
+def test_allowed_extensions_match_supported():
+    """16.4：配置白名单与解析器支持集必须一致（防止两处清单漂移）。"""
+    assert {f".{e}" for e in load_config().ingestion.allowed_extensions} == SUPPORTED_EXTENSIONS
+
+
+def test_parse_code_preserves_lines_and_language():
+    """原文保真（不重写源码）+ 前置 [CODE_INDEX] 符号索引块 + 语言标识。"""
+    src = "def add(a, b):\n    # 中文注释\n    return a + b\n"
+    doc = _parse_bytes(src.encode("utf-8"), "utils.py")
+    assert doc.text.endswith(src)                 # 源码原样保留（不做清洗/重排）
+    assert doc.text.startswith("[CODE_INDEX language=python symbols=1]")
+    assert doc.metadata["kind"] == "py"
+    assert doc.metadata["language"] == "python"
+    assert doc.metadata["symbols"] == [
+        {"name": "add", "kind": "function", "line_start": 1, "line_end": 3}]
+
+
+def test_parse_code_ast_symbols_python_class_method():
+    """AST 符号提取：类 + 方法（方法名带容器前缀）+ 行号。"""
+    src = "class A:\n    def m(self):\n        pass\n\ndef f():\n    pass\n"
+    doc = _parse_bytes(src.encode("utf-8"), "a.py")
+    assert doc.metadata["symbols"] == [
+        {"name": "A", "kind": "class", "line_start": 1, "line_end": 3},
+        {"name": "A.m", "kind": "method", "line_start": 2, "line_end": 3},
+        {"name": "f", "kind": "function", "line_start": 5, "line_end": 6},
+    ]
+    assert doc.metadata["symbol_count"] == 3
+
+
+def test_parse_code_symbols_disabled_falls_back_plain_text():
+    """code_symbols.enabled=false → 纯文本解码（无索引块、无 symbols）。"""
+    cfg = load_config().ingestion
+    cfg.code_symbols.enabled = False
+    doc = parse_file(io.BytesIO(b"def f():\n    pass\n"), "a.py", cfg)
+    assert doc.text == "def f():\n    pass\n"
+    assert "symbols" not in doc.metadata
+
+
+def test_parse_code_no_grammar_falls_back_plain_text():
+    """未接 grammar 的配置类扩展名 → 纯文本（不报错）。"""
+    doc = _parse_bytes(b"server:\n  port: 8000\n", "conf.yaml")
+    assert doc.text == "server:\n  port: 8000\n"
+    assert doc.metadata["language"] == "yaml"
+    assert "symbols" not in doc.metadata
+
+
+def test_parse_code_max_symbols_truncates():
+    cfg = load_config().ingestion
+    cfg.code_symbols.max_symbols = 2
+    src = b"def a():\n    pass\n\ndef b():\n    pass\n\ndef c():\n    pass\n"
+    doc = parse_file(io.BytesIO(src), "many.py", cfg)
+    assert doc.metadata["symbol_count"] == 2
+
+
+def test_parse_code_config_formats_have_language():
+    assert _parse_bytes(b"server:\n  port: 8000\n", "app.yaml").metadata["language"] == "yaml"
+    assert _parse_bytes(b"[tool]\nname = 'x'\n", "pyproject.toml").metadata["language"] == "toml"
+    assert _parse_bytes(b"<root><a>1</a></root>", "conf.xml").metadata["language"] == "xml"
+
+
+def test_parse_code_gbk_fallback():
+    """GBK 编码的中文注释可正确解码（不产生 U+FFFD）。"""
+    doc = _parse_bytes("# 中文注释\nprint('你好')\n".encode("gbk"), "gbk_file.py")
+    assert "中文注释" in doc.text and "你好" in doc.text
+    assert doc.metadata["text_stats"]["garbled_ratio"] == 0.0
+
+
+def test_parse_code_all_extensions_dispatch():
+    for ext in CODE_EXTENSIONS:
+        assert ext in SUPPORTED_EXTENSIONS
+        doc = _parse_bytes(b"x = 1\n", f"a{ext}")
+        assert doc.metadata["kind"] == ext.lstrip(".")
+
+
+# -- 16.4 CSV / TSV ----------------------------------------------------------------------
+
+def test_parse_csv_rows_and_columns():
+    raw = "姓名,部门,工号\n张三,研发部,1001\n李四,市场部,1002\n".encode("utf-8")
+    doc = _parse_bytes(raw, "员工.csv")
+    assert doc.text == "姓名\t部门\t工号\n张三\t研发部\t1001\n李四\t市场部\t1002"
+    assert doc.metadata["columns"] == ["姓名", "部门", "工号"]
+    assert doc.metadata["kind"] == "csv"
+
+
+def test_parse_csv_skips_empty_cells_and_blank_lines():
+    raw = "a,b,c\n1,,3\n\n4,5,\n".encode("utf-8")
+    doc = _parse_bytes(raw, "t.csv")
+    assert doc.text == "a\tb\tc\n1\t3\n4\t5"
+
+
+def test_parse_csv_quoted_field_with_delimiter():
+    raw = 'a,b\n"含,逗号","第二列"\n'.encode("utf-8")
+    doc = _parse_bytes(raw, "q.csv")
+    assert "含,逗号\t第二列" in doc.text
+
+
+def test_parse_csv_gbk_encoding():
+    raw = "姓名,部门\n张三,研发部\n".encode("gbk")
+    doc = _parse_bytes(raw, "gbk.csv")
+    assert "张三\t研发部" in doc.text
+    assert doc.metadata["text_stats"]["garbled_ratio"] == 0.0
+
+
+def test_parse_tsv_tab_delimited():
+    doc = _parse_bytes(b"a\tb\n1\t2\n", "t.tsv")
+    assert doc.text == "a\tb\n1\t2"
+    assert doc.metadata["kind"] == "tsv"
+
+
+def test_parse_csv_empty_file_ok():
+    assert _parse_bytes(b"", "empty.csv").text == ""
+
+
+# -- 16.3 JSON / JSONL -------------------------------------------------------------------
+
+def test_parse_json_flattens_paths():
+    raw = ('{"user": {"name": "张三", "tags": ["a", "b"]}, '
+           '"n": 3, "ok": true, "none": null}').encode("utf-8")
+    doc = _parse_bytes(raw, "data.json")
+    assert "user.name: 张三" in doc.text
+    assert "user.tags[0]: a" in doc.text and "user.tags[1]: b" in doc.text
+    assert "n: 3" in doc.text
+    assert "ok: true" in doc.text
+    assert "none: null" in doc.text
+    assert doc.metadata["kind"] == "json"
+
+
+def test_parse_json_empty_containers():
+    doc = _parse_bytes(b'{"a": {}, "b": []}', "empty.json")
+    assert "a: {}" in doc.text and "b: []" in doc.text
+
+
+def test_parse_json_invalid_raises():
+    with pytest.raises(ParseError, match="JSON 解析失败"):
+        _parse_bytes(b"{not json", "bad.json")
+
+
+def test_parse_json_empty_file_ok():
+    """空文件沿用既有语义（空文本，不报错）。"""
+    assert _parse_bytes(b"", "empty.json").text == ""
+    assert _parse_bytes(b"", "empty.jsonl").text == ""
+
+
+def test_parse_jsonl_prefixes_records_and_counts():
+    doc = _parse_bytes(b'{"a": 1}\n\n{"b": 2}\n', "rows.jsonl")
+    assert doc.text.splitlines() == ["[1].a: 1", "[2].b: 2"]
+    assert doc.metadata["records"] == 2
+
+
+def test_parse_jsonl_invalid_line_raises():
+    with pytest.raises(ParseError, match="第 2 行"):
+        _parse_bytes(b'{"a": 1}\nnot-json\n', "bad.jsonl")
+
+
+def test_json_max_items_truncates():
+    cfg = load_config().ingestion
+    cfg.json_flatten.max_items = 3
+    doc = parse_file(io.BytesIO(b'{"a": 1, "b": 2, "c": 3, "d": 4}'), "big.json", cfg)
+    lines = doc.text.splitlines()
+    assert lines[:3] == ["a: 1", "b: 2", "c: 3"]
+    assert lines[-1] == "…（已截断，共 3 行）"
+
+
+def test_json_max_depth_placeholder():
+    cfg = load_config().ingestion
+    cfg.json_flatten.max_depth = 1
+    doc = parse_file(io.BytesIO(b'{"a": {"b": {"c": 1}}}'), "deep.json", cfg)
+    assert "<max-depth>" in doc.text
+
+
+# -- 16.2 旧版 Office --------------------------------------------------------------------
+
+def test_parse_xls_fixture():
+    """真实 .xls 样本（tests/unit/fixtures/sample.xls）：逐 sheet 逐行 → 制表符文本。"""
+    raw = (pathlib.Path(__file__).parent / "fixtures" / "sample.xls").read_bytes()
+    doc = _parse_bytes(raw, "员工.xls")
+    assert "姓名\t部门\t工号" in doc.text
+    assert "张三\t研发部\t1001" in doc.text        # 整数浮点归一为 1001（非 1001.0）
+    assert doc.metadata["sheets"] == ["员工", "备注"]
+    assert doc.metadata["kind"] == "xls"
+
+
+def test_parse_xls_bad_magic_rejected():
+    with pytest.raises(ParseError, match="非旧版 Office OLE2"):
+        _parse_bytes(b"PK\x03\x04not-ole", "fake.xls")
+
+
+def test_parse_doc_without_soffice_reports_install_hint(monkeypatch):
+    """soffice 缺失 → 明确报错 + 安装指引（不静默降级）。"""
+    monkeypatch.setattr("app.adapters.parser.office_convert.shutil.which", lambda name: None)
+    with pytest.raises(ParseError, match="LibreOffice") as exc_info:
+        _parse_bytes(_OLE2_HEADER + b"\x00" * 32, "old.doc")
+    assert "brew install" in str(exc_info.value)
+
+
+def test_parse_doc_disabled_by_config():
+    cfg = load_config().ingestion
+    cfg.office_convert.enabled = False
+    with pytest.raises(ParseError, match="已关闭"):
+        parse_file(io.BytesIO(_OLE2_HEADER + b"\x00" * 32), "old.ppt", cfg)
+
+
+def test_parse_doc_via_soffice_conversion(monkeypatch):
+    """monkeypatch 转换器产出真实 docx → 复用 _parse_docx 并写溯源 metadata。"""
+    from docx import Document as DocxDocument
+
+    def _fake_run(cmd, capture_output=True, timeout=None, check=False):
+        out_dir = pathlib.Path(cmd[cmd.index("--outdir") + 1])
+        document = DocxDocument()
+        document.add_paragraph("旧版 Word 转换后的正文内容，用于验证复用 docx 解析链路。")
+        document.save(str(out_dir / "input.docx"))
+
+        class _Result:
+            returncode = 0
+            stderr = b""
+
+        return _Result()
+
+    monkeypatch.setattr("app.adapters.parser.office_convert.shutil.which", lambda name: "/usr/bin/soffice")
+    monkeypatch.setattr("app.adapters.parser.office_convert.subprocess.run", _fake_run)
+    doc = _parse_bytes(_OLE2_HEADER + b"\x00" * 32, "old.doc")
+    assert "旧版 Word 转换后的正文内容" in doc.text
+    assert doc.metadata["parser"] == "soffice_convert"
+    assert doc.metadata["converted_from"] == "doc"
+
+
+def test_parse_doc_soffice_timeout(monkeypatch):
+    import subprocess as _subprocess
+
+    def _timeout(cmd, capture_output=True, timeout=None, check=False):
+        raise _subprocess.TimeoutExpired(cmd, timeout)
+
+    monkeypatch.setattr("app.adapters.parser.office_convert.shutil.which", lambda name: "/usr/bin/soffice")
+    monkeypatch.setattr("app.adapters.parser.office_convert.subprocess.run", _timeout)
+    with pytest.raises(ParseError, match="转换超时"):
+        _parse_bytes(_OLE2_HEADER + b"\x00" * 32, "old.doc")
+
+
+def test_parse_doc_soffice_no_output(monkeypatch):
+    """转换进程正常退出但无产物 → ParseError（含 stderr 摘要）。"""
+
+    class _Result:
+        returncode = 1
+        stderr = b"Error: source file could not be loaded"
+
+    monkeypatch.setattr("app.adapters.parser.office_convert.shutil.which", lambda name: "/usr/bin/soffice")
+    monkeypatch.setattr("app.adapters.parser.office_convert.subprocess.run",
+                        lambda *a, **k: _Result())
+    with pytest.raises(ParseError, match="未产出"):
+        _parse_bytes(_OLE2_HEADER + b"\x00" * 32, "old.ppt")

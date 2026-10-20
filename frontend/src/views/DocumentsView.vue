@@ -6,8 +6,10 @@ import { getBaseUrl } from '../api/base'
 import { useAppStore } from '../stores/app'
 
 const store = useAppStore()
-const SUPPORTED_ACCEPT = '.pdf,.docx,.xlsx,.pptx,.md,.txt,.html,.htm,.eml,.msg'
-const SUPPORTED_TYPES = 'PDF / Word(.docx) / Excel / PPT / Markdown / 文本 / 网页 / 邮件'
+const SUPPORTED_ACCEPT = '.pdf,.docx,.xlsx,.pptx,.doc,.xls,.ppt,.md,.txt,.html,.htm,.eml,.msg' +
+  ',.json,.jsonl,.csv,.tsv,.py,.js,.mjs,.cjs,.ts,.tsx,.jsx,.java,.go,.rs,.c,.h,.cpp,.hpp,.cs' +
+  ',.rb,.php,.kt,.swift,.sh,.sql,.vue,.css,.scss,.yaml,.yml,.toml,.ini,.xml'
+const SUPPORTED_TYPES = 'PDF / Word(.doc/.docx) / Excel(.xls/.xlsx) / PPT(.ppt/.pptx) / Markdown / 文本 / 网页 / 邮件 / JSON / CSV / 代码与配置'
 const MAX_FILE_SIZE = 50 * 1024 * 1024   // 与服务端 max_file_size_mb: 50 对齐，上传前预检
 const UPLOAD_TIMEOUT_MS = 2 * 60 * 1000  // XHR 上传整体超时，避免永久挂起
 const kbs = ref([])
@@ -282,7 +284,7 @@ async function batchDeleteDocs() {
           该知识库暂无文档——共享库需由管理员上传文档
         </template>
         <template v-else>
-          暂无文档——点击「选择文件上传」将文档加入知识库（支持 {{ SUPPORTED_TYPES }}；老版 .doc 请先另存为 .docx）
+          暂无文档——点击「选择文件上传」将文档加入知识库（支持 {{ SUPPORTED_TYPES }}；.doc/.ppt 需服务端安装 LibreOffice）
         </template>
       </div>
     </div>
