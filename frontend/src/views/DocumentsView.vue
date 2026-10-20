@@ -9,7 +9,7 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import {
   Clock, CopyDocument, Delete, Document, Files, FolderOpened, Lock,
-  Refresh, RefreshRight, Search, UploadFilled, View,
+  Refresh, RefreshRight, Search, UploadFilled, View, WarningFilled,
 } from '@element-plus/icons-vue'
 import PageHeader from '../components/PageHeader.vue'
 import EmptyState from '../components/EmptyState.vue'
@@ -35,6 +35,8 @@ const MAX_FILE_SIZE = 50 * 1024 * 1024   // 与服务端 max_file_size_mb: 50 �
 const files = ref([])
 const total = ref(0)
 const loading = ref(false)
+/** 列表加载失败原因：常驻显示 + 可重试，避免旧数据静默残留让人误判“文档丢了”。 */
+const listError = ref('')
 const query = ref('')
 const kindFilter = ref('all')
 const sortBy = ref('recent')
@@ -82,9 +84,11 @@ async function refreshDocs({ silent = false } = {}) {
     if (kbId !== store.kbId) return   // 期间切了库：丢弃过期响应
     if (res.code !== 0) {
       // 失败保留上一次数据：清空列表比旧数据更容易让人误判“文档丢了”
-      if (!silent) store.pushError(`列表刷新失败：${friendlyError(res.code, res.message)}`)
+      listError.value = friendlyError(res.code, res.message)
+      if (!silent) store.pushError(`列表刷新失败：${listError.value}`)
       return
     }
+    listError.value = ''
     files.value = (res.data.items || []).map((d) => ({
       ...d,
       created: formatDateTime(d.created_at),
@@ -502,6 +506,12 @@ function kindStyle(kind) {
         <span>共享知识库仅管理员可上传/删除文档；可切换到自己的私有知识库后再操作。</span>
       </div>
 
+      <div v-if="listError" class="inline-error" role="alert">
+        <el-icon><WarningFilled /></el-icon>
+        <span>文档列表加载失败：{{ listError }}</span>
+        <el-button size="small" text type="primary" @click="refreshDocs">重试</el-button>
+      </div>
+
       <!-- 拖拽上传区 -->
       <div v-if="!readOnly" class="dropzone-wrap">
         <el-upload
@@ -701,6 +711,18 @@ function kindStyle(kind) {
 </template>
 
 <style scoped>
+.inline-error {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 12px;
+  padding: 9px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-size: 12.5px;
+}
+.inline-error .el-button { margin-left: auto; color: var(--danger); }
 .stat-row { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
 .kb-select { width: 190px; }
 

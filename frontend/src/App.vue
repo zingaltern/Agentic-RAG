@@ -8,7 +8,7 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import zhCn from 'element-plus/es/locale/lang/zh-cn'
-import { DataLine, Operation, RefreshRight, Search, WarningFilled } from '@element-plus/icons-vue'
+import { DataLine, Menu, RefreshRight, Search, WarningFilled } from '@element-plus/icons-vue'
 import AppSidebar from './components/AppSidebar.vue'
 import CommandPalette from './components/CommandPalette.vue'
 import ErrorBar from './components/ErrorBar.vue'
@@ -138,7 +138,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
       <!-- 移动端顶栏：汉堡 + 当前页 + 搜索 -->
       <header v-if="isMobile" class="mobile-bar">
         <button type="button" class="btn-icon" aria-label="打开导航" @click="mobileNavOpen = true">
-          <el-icon><Operation /></el-icon>
+          <el-icon><Menu /></el-icon>
         </button>
         <span class="mobile-title">{{ appTitle }}</span>
         <button type="button" class="btn-icon" aria-label="打开命令面板" @click="openCommand">

@@ -9,8 +9,8 @@
  */
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import {
-  Connection, Cpu, Download, Key, Moon, QuestionFilled, Refresh, Setting,
-  Sunny, SwitchButton, User, UserFilled,
+  Connection, Cpu, Download, Key, QuestionFilled, Refresh, Setting,
+  SwitchButton, User, UserFilled,
 } from '@element-plus/icons-vue'
 import PageHeader from '../components/PageHeader.vue'
 import SegmentedControl from '../components/SegmentedControl.vue'
@@ -428,16 +428,6 @@ const providerName = (p) => PROVIDER_NAMES[p] || p
               :title="a.label"
               @click="setAccent(a.id)"
             />
-          </div>
-        </div>
-        <div class="setting-row">
-          <div class="setting-label">
-            <b>提示</b>
-            <small>浅色 ↔ 深色可用侧栏底部的月亮按钮一键切换</small>
-          </div>
-          <div class="row--tight">
-            <el-button size="small" aria-label="切换到浅色外观" @click="setThemeMode('light')"><el-icon><Sunny /></el-icon></el-button>
-            <el-button size="small" aria-label="切换到深色外观" @click="setThemeMode('dark')"><el-icon><Moon /></el-icon></el-button>
           </div>
         </div>
       </section>
