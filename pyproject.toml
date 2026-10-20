@@ -54,7 +54,9 @@ dependencies = [
     "tree-sitter-swift",
     "tree-sitter-css",
     # LLM（OpenAI 兼容协议）
-    "openai>=1.30",
+    # 上限 3：openai 3.x 改用 httpx2，单测的 respx(httpx 传输层) mock 不再生效、
+    # 会真实请求 api.deepseek.com（CI 因此 401）。升级需同步改造 HTTP mock，另立批次。
+    "openai>=1.30,<3",
 ]
 
 [project.optional-dependencies]
