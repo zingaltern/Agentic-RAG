@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import re
 
-from app.adapters.parser.quality import _table_to_markdown
+from app.adapters.parser.quality import _rows_to_markdown, _table_rows
 from app.core.errors import ParseError
 from app.core.logging import get_logger
 
@@ -136,8 +136,9 @@ def _extract_page_with_tables(page, tables_out: list | None = None) -> str:
             if md:
                 blocks.append((table.bbox[1], f"[TABLE]\n{md}\n[/TABLE]"))
                 raw_tables.append((table.bbox[1], rows))
-    except Exception:
-        pass  # 表格抽取失败不阻断正文
+    except Exception as exc:  # noqa: BLE001
+        # 表格抽取失败不阻断正文，但必须可观测（曾因宽泛 except 吞掉 NameError 导致表格静默丢失）
+        logger.warning("PDF 表格抽取失败（不影响正文）：%s", exc)
     blocks.sort(key=lambda b: b[0])
     if tables_out is not None:
         for _y, rows in sorted(raw_tables, key=lambda t: t[0]):
