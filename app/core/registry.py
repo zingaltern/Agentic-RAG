@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     from app.services.documents_store import DocumentsStore
     from app.services.ingestion import IngestionPipeline
     from app.services.jobs_store import JobStore
+    from app.services.agent.runtime import AgentRuntime
     from app.services.orchestration import OrchestrationService
     from app.services.session_store import SessionStore
 
@@ -70,6 +71,7 @@ class Dependencies:
     rewriter: "QueryRewriter | None" = None
     detector: "HallucinationDetector | None" = None
     orchestration: "OrchestrationService | None" = None
+    agent_runtime: "AgentRuntime | None" = None
     jobs: "JobStore | None" = None
     documents: "DocumentsStore | None" = None
     pipeline: "IngestionPipeline | None" = None
@@ -111,7 +113,8 @@ def wire(config: "SystemConfig", components: bool = True, *,
          normalizer: "QueryNormalizer | None" = None,
          boundary: "BoundaryDetector | None" = None,
          query_guard: "Any | None" = None,
-         sessions: "SessionStore | None" = None) -> Dependencies:
+         sessions: "SessionStore | None" = None,
+         agent_runtime: "Any | None" = None) -> Dependencies:
     """按 config 装配默认实现。
 
     - components=False：仅返回 config（契约/UI 冒烟测试用，不加载模型）。
@@ -224,10 +227,30 @@ def wire(config: "SystemConfig", components: bool = True, *,
         config=config, embedding=embedding, vector_store=vector_store,
         jobs=deps.jobs, documents=deps.documents, kbs=deps.kbs,   # P2-6：解析库级 pii 策略
     )
+    # P-D：AgentRuntime（默认关闭；开启时装配只读工具与规划/反思/合成适配器）
+    if agent_runtime is None and config.orchestration.agent.enabled:
+        from app.adapters.retriever.web_retriever import WebRetriever
+        from app.services.agent.runtime import AgentRuntime
+
+        web_retriever = None
+        if config.web.enabled:
+            web_retriever = WebRetriever(
+                api_key_env=config.web.api_key_env,
+                max_results=config.web.max_results,
+                search_depth=config.web.search_depth,
+                timeout_seconds=config.web.timeout_seconds,
+            )
+        agent_runtime = AgentRuntime(
+            config=config, llm=llm, retriever=retriever, reranker=deps.reranker,
+            vector_store=vector_store, documents=deps.documents,
+            detector=deps.detector, web_retriever=web_retriever,
+            normalizer=deps.normalizer, kbs=deps.kbs,
+        )
+    deps.agent_runtime = agent_runtime
     deps.orchestration = OrchestrationService(
         config=config, retriever=retriever, reranker=deps.reranker,
         evaluator=deps.evaluator, rewriter=deps.rewriter,
         detector=deps.detector, llm=llm, vector_store=vector_store,
-        normalizer=deps.normalizer,
+        normalizer=deps.normalizer, agent_runtime=agent_runtime,
     )
     return deps

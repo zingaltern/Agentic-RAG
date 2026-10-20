@@ -41,6 +41,7 @@ class QueryRequest(BaseModel):
     kb_id: str | None = None        # 13.5：与 collection 二选一，kb_id 优先，缺省 default
     web_search: bool = False     # A5：联网搜索（前端开关；服务端 web.enabled 为全局默认）
     debug: bool = False
+    mode: str | None = None      # P-D：auto | reflect | agentic；缺省走 orchestration.mode
 
 
 def _detection_payload(answer) -> dict:
@@ -137,6 +138,8 @@ def _query_impl(payload: QueryRequest, request: Request,
         history=resolved_history,
         web_search=payload.web_search,
         allow_clarify=_session_allow_clarify(request, session),
+        mode=payload.mode,
+        kb_id=info.kb_id,
     )
     # 13.12.6 问答结束回写会话（历史/澄清计数/最后提问）
     _update_session(request, deps, payload, session, result, payload.query)
@@ -165,9 +168,20 @@ def _query_impl(payload: QueryRequest, request: Request,
         "hallucination_check": det["hallucination_check"],
         "iterations": result.iterations,
         "elapsed_ms": result.elapsed_ms,
+        "mode": result.mode,
+        "agent_steps": result.agent_steps,
+        "termination_reason": result.termination_reason,
     }
+    if result.usage:
+        data["usage"] = result.usage
     if payload.debug and result.debug_trace:
         data["debug_trace"] = result.debug_trace
+    if payload.debug and result.plan:
+        data["plan"] = result.plan
+    if payload.debug and result.steps:
+        data["steps"] = result.steps
+    if payload.debug and result.agent_trace:
+        data["agent_trace"] = result.agent_trace
     if dna_mismatch:
         data["index_dna_mismatch"] = True   # P1-3：索引 dna 与当前配置不一致（audit 模式标记）
     if result.code != 0:

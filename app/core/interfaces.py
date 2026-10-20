@@ -3,9 +3,24 @@
 所有实现位于 app/adapters/，接口是运行契约，实现必须满足签名与语义。
 """
 from abc import ABC, abstractmethod
-from typing import Iterable
+from typing import Any, Iterable
 
-from app.core.domain import Chunk, DetectionResult, EvaluationResult, ScoredChunk
+from app.core.domain import (
+    AgentAction,
+    AgentState,
+    Budget,
+    Chunk,
+    DetectionResult,
+    EvaluationResult,
+    Evidence,
+    LLMResponse,
+    Plan,
+    ReflectionResult,
+    ScoredChunk,
+    ToolCall,
+    ToolContext,
+    ToolResult,
+)
 
 
 class VectorEngine(ABC):
@@ -60,10 +75,13 @@ class Retriever(ABC):
     """混合检索器（3.3）。"""
 
     @abstractmethod
-    def retrieve(self, query: str, k: int, filters: dict | None = None) -> list[ScoredChunk]:
+    def retrieve(self, query: str, k: int, filters: dict | None = None,
+                 path: str = "hybrid", collection: str | None = None) -> list[ScoredChunk]:
         """返回降序排列的 k 条候选，且带 bm25/vector 混合评分（见 5.4）。
         filters: 检索过滤条件，形如 {"metadata": {"department": "HR"}}，
-                 透传给 VectorStore.search（全文检索侧也按同条件过滤）。"""
+                 透传给 VectorStore.search（全文检索侧也按同条件过滤）。
+        path: hybrid（默认）| bm25 | vector；collection: 多库作用域（缺省实现默认库）。
+        两者为 P-D 工具化补齐的可选参，默认值保持旧行为。"""
 
 
 class Reranker(ABC):
@@ -144,3 +162,81 @@ class LLM(ABC):
     def chat(self, messages: list[dict[str, str]],
              temperature: float = 0.1, max_tokens: int = 1024) -> str:
         """messages: [{"role":"system"...},{"role":"user"...}...]；返回 assistant 文本。"""
+
+
+# ---------------------------------------------------------------------------
+# P-D：真 Agentic 契约（DEVELOPMENT.md 17.3）
+# ---------------------------------------------------------------------------
+
+
+class ToolCallingLLM(LLM):
+    """支持原生工具调用的 LLM（OpenAI 兼容 tools/tool_calls）。
+
+    实现需把 `messages` 原样交给 provider（含 assistant.tool_calls / tool 消息），
+    返回结构化 `LLMResponse`；JSON 解析失败由适配器抛 AgentProtocolError。
+    """
+
+    @abstractmethod
+    def chat_with_tools(self, messages: list[dict[str, Any]],
+                        tools: list[dict[str, Any]],
+                        tool_choice: str = "auto",
+                        temperature: float = 0.1,
+                        max_tokens: int = 1024) -> LLMResponse: ...
+
+
+class Tool(ABC):
+    """只读工具契约；作用域/权限/预算由 ToolContext 注入。"""
+
+    name: str = ""
+    description: str = ""
+    args_model: Any = None          # pydantic BaseModel 子类；registry 生成 JSON Schema
+    timeout_ms: int = 3000
+    max_result_chars: int = 4000
+    side_effect: str = "none"      # none | external
+
+    @abstractmethod
+    def invoke(self, ctx: ToolContext, args: Any) -> ToolResult: ...
+
+
+class Planner(ABC):
+    """规划器：产出/修订 Plan，并决定每一步动作。"""
+
+    @abstractmethod
+    def plan(self, state: AgentState, budget: Budget) -> Plan | None: ...
+
+    @abstractmethod
+    def next_action(self, state: AgentState, budget: Budget) -> AgentAction: ...
+
+    @abstractmethod
+    def replan(self, state: AgentState, reflection: ReflectionResult) -> Plan | None: ...
+
+
+class Reflector(ABC):
+    """反思器：判断子目标是否充分、缺口与下一步。"""
+
+    @abstractmethod
+    def reflect(self, state: AgentState, result: ToolResult | None = None) -> ReflectionResult: ...
+
+    @abstractmethod
+    def sufficient(self, state: AgentState) -> bool: ...
+
+    @abstractmethod
+    def missing(self, state: AgentState) -> list[str]: ...
+
+
+class Synthesizer(ABC):
+    """答案合成：只使用证据账本，返回答案与实际引用证据。"""
+
+    @abstractmethod
+    def synthesize(self, state: AgentState) -> tuple[str, list[Evidence]]: ...
+
+
+class Verifier(ABC):
+    """答案校验：引用/幻觉检测与最小修复。"""
+
+    @abstractmethod
+    def verify(self, answer: str, cited: list[Evidence]) -> DetectionResult: ...
+
+    @abstractmethod
+    def repair(self, answer: str, state: AgentState, unsupported: list[str],
+               cited: list[Evidence]) -> str: ...
