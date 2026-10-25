@@ -46,6 +46,7 @@ const kindFilter = ref('all')
 const sortBy = ref('recent')
 const page = ref(1)
 const pageSize = ref(25)
+const pageSizes = [25, 50, 100]
 const stats = ref({ chunks: 0, latest: 0 })
 const selection = ref([])
 
@@ -148,6 +149,13 @@ function onSearch() {
   page.value = 1
   if (searchTimer) clearTimeout(searchTimer)
   searchTimer = setTimeout(() => refreshDocs({ silent: true }), 250)
+}
+
+/** 每页条数变化：回到第一页重新请求。 */
+function onPageSizeChange(size) {
+  pageSize.value = size
+  page.value = 1
+  refreshDocs()
 }
 
 /** 类型/排序变化：回到第一页并重新请求（筛选在服务端完成）。 */
@@ -569,15 +577,16 @@ function kindStyle(kind) {
           v-model="query"
           class="search"
           placeholder="搜索文件名…"
+          aria-label="搜索文件名"
           clearable
           :prefix-icon="Search"
           @input="onSearch"
         />
-        <el-select v-model="kindFilter" class="filter" placeholder="类型" @change="onFilterChange">
+        <el-select v-model="kindFilter" class="filter" placeholder="类型" aria-label="按类型筛选" @change="onFilterChange">
           <el-option label="全部类型" value="all" />
           <el-option v-for="k in kindOptions" :key="k.value" :label="k.label" :value="k.value" />
         </el-select>
-        <el-select v-model="sortBy" class="filter" placeholder="排序" @change="onFilterChange">
+        <el-select v-model="sortBy" class="filter" placeholder="排序" aria-label="排序方式" @change="onFilterChange">
           <el-option label="最新优先" value="recent" />
           <el-option label="名称 A→Z" value="name" />
           <el-option label="片段数最多" value="chunks" />
@@ -672,17 +681,31 @@ function kindStyle(kind) {
           </template>
         </EmptyState>
 
-        <div v-if="total > pageSize" class="table-foot">
-          <span class="muted">共 {{ total }} 条 · 第 {{ page }} / {{ Math.ceil(total / pageSize) }} 页</span>
-          <el-pagination
-            v-model:current-page="page"
-            :page-size="pageSize"
-            :total="total"
-            layout="prev, pager, next"
-            background
-            size="small"
-            @current-change="refreshDocs()"
-          />
+        <div v-if="total > 0" class="table-foot">
+          <span class="muted">
+            共 {{ total }} 条<template v-if="total > pageSize"> · 第 {{ page }} / {{ Math.ceil(total / pageSize) }} 页</template>
+          </span>
+          <div class="foot-controls">
+            <el-select
+              :model-value="pageSize"
+              class="page-size"
+              size="small"
+              aria-label="每页条数"
+              @change="onPageSizeChange"
+            >
+              <el-option v-for="n in pageSizes" :key="n" :label="`${n} 条/页`" :value="n" />
+            </el-select>
+            <el-pagination
+              v-if="total > pageSize"
+              v-model:current-page="page"
+              :page-size="pageSize"
+              :total="total"
+              layout="prev, pager, next"
+              background
+              size="small"
+              @current-change="refreshDocs()"
+            />
+          </div>
         </div>
       </div>
     </div>
@@ -815,7 +838,10 @@ function kindStyle(kind) {
   gap: 12px;
   padding: 10px 2px 4px;
   border-top: 1px solid var(--hairline);
+  flex-wrap: wrap;
 }
+.foot-controls { display: flex; align-items: center; gap: 10px; }
+.page-size { width: 108px; }
 .hidden-input { display: none; }
 .limit-hint { margin: 6px 2px 0; }
 
