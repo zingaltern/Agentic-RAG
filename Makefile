@@ -16,7 +16,7 @@ export HF_ENDPOINT ?= https://hf-mirror.com
 # 否则 sentence-transformers 加载缓存模型时仍会联网查 PEFT adapter 配置，卡在 socket 连接上（表现为"评测无输出"）。
 export HF_HUB_OFFLINE ?= 0
 
-.PHONY: bootstrap run test eval review perf coverage integration demo-ingest demo-query rebuild docker-up docker-down clean
+.PHONY: bootstrap run test eval eval-quality review perf coverage integration demo-ingest demo-query rebuild docker-up docker-down clean frontend-install frontend-test
 
 ## 首次：创建虚拟环境（python3.11 优先）并安装依赖（含 dev 依赖）
 bootstrap:
@@ -44,6 +44,16 @@ coverage:
 ## 评测（8.3/13.6）：全库（default+docs）进程内评测，输出 reports/eval-*.md（含按库汇总）
 eval:
 	$(PYTHON) -m app.cli.rageval --in-process --all-kbs
+
+## 质量评测 smoke（P0-P2，设计稿 docs/specs/测试与评测体系设计.md）：IR 指标 + 可选 judge
+## 用法：make eval-quality（不调 LLM）；JUDGE=1 加 judge；REAL=1 真实生成；LIMIT=N 试点条数
+## 默认 --fresh-kb：每次清空 quality_smoke，保证 fixture/分块变更后可复现
+eval-quality:
+	$(PYTHON) -m app.cli.eval_quality --pairs tests/quality/datasets/smoke_quality.jsonl \
+		--docs tests/quality/fixtures --kb quality_smoke --fresh-kb \
+		--out reports/eval-quality-$$(date +%Y%m%d-%H%M%S).md \
+		$(if $(filter 1,$(JUDGE)),--judge,) $(if $(filter 1,$(REAL)),--real-llm,) \
+		$(if $(LIMIT),--limit $(LIMIT),)
 
 ## 外部基准测试集评测（8.4）：CMRC 2018 → 独立 kb cmrc，--fresh-kb 全新入库可复现。
 ## 与验证集（make eval，tests/eval/）物理分离；报告 reports/review-*.md。
@@ -91,6 +101,10 @@ docker-down:
 ## 安装前端依赖（首次）
 frontend-install:
 	cd frontend && npm install
+
+## 前端单测（P1，零新增依赖：node --test）
+frontend-test:
+	cd frontend && npm run test:unit
 
 ## 启动 vite dev server（proxy /api → 127.0.0.1:8000，需先 make run）
 frontend-dev:

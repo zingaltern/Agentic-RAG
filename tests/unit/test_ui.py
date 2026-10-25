@@ -39,7 +39,10 @@ def test_plugins_status_envelope(client):
 def test_documents_list_empty(client):
     body = client.get("/api/documents").json()
     assert body["code"] == 0
-    assert body["data"] == {"items": [], "total": 0}
+    assert body["data"]["items"] == []
+    assert body["data"]["total"] == 0
+    # 服务端分页附带统计（顶部指标/分页总数都来自这里）
+    assert body["data"]["stats"] == {"chunks": 0, "latest": 0}
 
 
 def test_documents_not_found_error_code(client):
@@ -96,3 +99,15 @@ def test_s4_security_response_headers_present(client):
     csp = resp.headers.get("content-security-policy", "")
     assert "default-src 'self'" in csp
     assert "unsafe-eval" not in csp, "CSP 不允许 unsafe-eval"
+
+
+def test_spa_html_not_cached(client):
+    """history 路由回退的 index.html 必须 no-store。
+
+    否则 /documents 等子路由被浏览器缓存，重新构建后仍引用已删除的旧 chunk，
+    直接刷新会出现整页空白（生产上已实际发生）。
+    """
+    for path in ("/", "/documents", "/kbs", "/settings"):
+        resp = client.get(path)
+        assert resp.status_code == 200, path
+        assert resp.headers.get("cache-control") == "no-store", path

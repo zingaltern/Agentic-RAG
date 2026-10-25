@@ -107,10 +107,18 @@ class ChunkerConfig(BaseModel):
 
     parent_target_tokens: int = 512
     child_target_tokens: int = 128
-    token_char_ratio: float = 1.8            # 中文 token≈len(text)/1.8 估算
+    token_char_ratio: float = 1.8            # 仅 ratio 口径/回退使用（中文约 1.0 字符/token）
+    measure: str = "auto"                    # auto=优先引擎 count_tokens（精确）；ratio=强制估算
     table_aware: TableAwareConfig = TableAwareConfig()   # P1-4：表格原子块（默认关）
     hard_boundary: HardBoundaryConfig = HardBoundaryConfig()     # P1-5：标题硬边界（默认关）
     context_prefix: ContextPrefixConfig = ContextPrefixConfig()  # P1-5：上下文前缀（默认关）
+
+    @field_validator("measure")
+    @classmethod
+    def _measure_valid(cls, value: str) -> str:
+        if value not in ("auto", "ratio"):
+            raise SystemConfigError(f"chunker.measure 必须为 auto 或 ratio，实际为 {value!r}")
+        return value
 
 
 class VectorStoreConfig(BaseModel):
@@ -176,9 +184,114 @@ class LlmConfig(BaseModel):
     candidates: list[dict] = []
     circuit_fail_threshold: int = 3
     circuit_cooldown_seconds: int = 60
+    # P-D：原生工具调用能力（auto=先 native，不支持则 JSON/回退）
+    tool_calling: str = "auto"                 # auto | native | json | off
+    tool_call_timeout_seconds: int = 30
+    max_tool_calls_per_turn: int = 4
+
+
+class AgentRoutingConfig(BaseModel):
+    """auto 模式规则路由（17.2）。"""
+
+    enabled: bool = True
+    agentic_threshold: int = 3
+    reflect_threshold: int = 1
+    escalate_on_reflect_failure: bool = True
+    max_escalations: int = 1
+    escalate_min_budget_ratio: float = 0.5
+
+
+class AgentPlanningConfig(BaseModel):
+    enabled: bool = True
+    max_subgoals: int = 4
+    temperature: float = 0.1
+
+
+class AgentReflectionConfig(BaseModel):
+    llm_judge: bool = False
+    max_llm_judgements: int = 2
+    min_evidence_per_subgoal: int = 1
+
+
+class AgentSynthesisConfig(BaseModel):
+    citation_repair: bool = True
+    max_repair_attempts: int = 1
+    strict_verify: bool = False
+
+
+class AgentFallbackConfig(BaseModel):
+    on_plan_error: str = "reflect"
+    on_tool_error: str = "reflect"
+    on_protocol_error: str = "reflect"
+
+
+class AgentKbSearchToolConfig(BaseModel):
+    enabled: bool = True
+    default_k: int = 8
+    max_k: int = 20
+
+
+class AgentKbFetchToolConfig(BaseModel):
+    enabled: bool = True
+    max_chars: int = 4000
+
+
+class AgentKbListDocumentsToolConfig(BaseModel):
+    enabled: bool = True
+    max_items: int = 50
+
+
+class AgentKbOutlineToolConfig(BaseModel):
+    enabled: bool = False
+    max_sections: int = 40
+
+
+class AgentWebSearchToolConfig(BaseModel):
+    enabled: bool = False
+    max_results: int = 5
+    allowed_domains: list[str] = []
+
+
+class AgentAskUserToolConfig(BaseModel):
+    enabled: bool = True
+
+
+class AgentToolsConfig(BaseModel):
+    kb_search: AgentKbSearchToolConfig = AgentKbSearchToolConfig()
+    kb_fetch: AgentKbFetchToolConfig = AgentKbFetchToolConfig()
+    kb_list_documents: AgentKbListDocumentsToolConfig = AgentKbListDocumentsToolConfig()
+    kb_outline: AgentKbOutlineToolConfig = AgentKbOutlineToolConfig()
+    web_search: AgentWebSearchToolConfig = AgentWebSearchToolConfig()
+    ask_user: AgentAskUserToolConfig = AgentAskUserToolConfig()
+
+
+class AgentConfig(BaseModel):
+    """P-D 真 Agentic（17.6）；默认关闭，保持 reflect 零回归。"""
+
+    enabled: bool = False
+    max_steps: int = 8
+    max_llm_calls: int = 8
+    max_tool_calls: int = 12
+    max_parallel_tools: int = 3
+    max_replans: int = 2
+    max_parse_failures: int = 2
+    max_concurrent_queries: int = 2
+    acquire_timeout_seconds: float = 0.5
+    request_timeout_seconds: int = 45
+    max_context_tokens: int = 6000
+    max_evidence_items: int = 24
+    max_evidence_chars: int = 4000
+    min_evidence_score: float = 0.25
+    routing: AgentRoutingConfig = AgentRoutingConfig()
+    planning: AgentPlanningConfig = AgentPlanningConfig()
+    reflection: AgentReflectionConfig = AgentReflectionConfig()
+    synthesis: AgentSynthesisConfig = AgentSynthesisConfig()
+    fallback: AgentFallbackConfig = AgentFallbackConfig()
+    tools: AgentToolsConfig = AgentToolsConfig()
 
 
 class OrchestrationConfig(BaseModel):
+    mode: str = "reflect"                  # reflect | agentic | auto（17.2）
     max_reflection_iterations: int = 3
     search_timeout_seconds: int = 10
     request_timeout_seconds: int = 30
@@ -187,6 +300,7 @@ class OrchestrationConfig(BaseModel):
     # 13.13 T1 绝望短路：首轮评估分远低于阈值且无联网候选 → 跳过改写轮直接 21001 兜底
     hopeless_shortcut: bool = True
     hopeless_score_threshold: float = 0.15
+    agent: AgentConfig = AgentConfig()
 
 
 class QualityGateConfig(BaseModel):
@@ -306,6 +420,10 @@ class IngestionConfig(BaseModel):
     # S2（V5.1）：zip 系格式解压防御上限（防止 zip 炸弹炸内存/CPU）
     zip_max_total_mb: int = 200
     zip_max_entries: int = 1000
+    # V5.2：解析健壮性 —— 页数上限 / 表格行数上限 / 空结果策略
+    max_pages: int = 2000                                # PDF 页数上限（超限截断 + text_stats 打标）
+    tabular_max_rows: int = 200_000                      # xlsx/xls/csv/tsv 行数上限（超限截断 + 打标）
+    empty_result: str = "reject"                         # reject=0 块拒收（30007）| allow=旧行为
     quality_gate: QualityGateConfig = QualityGateConfig()   # P0-1：解析质量门禁（默认关）
     archive: ArchiveConfig = ArchiveConfig()                # P0-2：原件归档（默认关）
     pii: PiiConfig = PiiConfig()                            # P2-6：PII 全局策略（默认关；kb 级可覆盖）
@@ -314,17 +432,43 @@ class IngestionConfig(BaseModel):
     code_symbols: CodeSymbolsConfig = CodeSymbolsConfig()   # 16.5：代码 AST 符号提取（tree-sitter）
     office_convert: OfficeConvertConfig = OfficeConvertConfig()  # 16.2：.doc/.ppt 转换开关
 
+    @field_validator("empty_result")
+    @classmethod
+    def _empty_result_valid(cls, value: str) -> str:
+        if value not in ("reject", "allow"):
+            raise SystemConfigError(
+                f"ingestion.empty_result 必须为 reject 或 allow，实际为 {value!r}")
+        return value
+
 
 class CleanerConfig(BaseModel):
     """数据清洗层（解析后、分块前，app/adapters/cleaner）。默认关闭：不改现有入库行为。"""
 
     enabled: bool = False
-    normalize: bool = True       # 全半角/空白/控制字符归一
+    normalize: bool = True       # 宽度归一（全角字母数字/表意空格/控制字符）
+    normalize_punct: bool = False  # V5.2：中文标点→半角 ASCII（。→. 等；默认关，避免改写中文排版）
     noise: bool = True           # 页码/页眉页脚/模板串去噪
     dedup: bool = True           # 段落级 simhash 近重复去重
     quality: bool = True         # 质量过滤（过短/无实词）
     dedup_threshold: float = 0.9
     min_chunk_chars: int = 20
+    # V5.2：分段与安全阀
+    paragraph_mode: str = "auto"   # auto=空行优先/无空行按行 | blank=仅空行 | line=按行
+    max_drop_ratio: float = 0.5    # 质量过滤删除占比超限则整体跳过（防把整篇当废话清空）
+    dedup_max_paragraphs: int = 5000  # 段落数超限跳过 dedup（防 O(n²) 卡死超大文档）
+    exempt_kinds: list[str] = [    # 代码/结构化类文档豁免 quality/dedup（防误杀）
+        "py", "js", "mjs", "cjs", "ts", "tsx", "jsx", "java", "go", "rs", "c", "h",
+        "cpp", "hpp", "cs", "rb", "php", "kt", "swift", "sh", "sql", "vue", "css", "scss",
+        "yaml", "yml", "toml", "ini", "xml", "json", "jsonl", "csv", "tsv", "xlsx", "xls",
+    ]
+
+    @field_validator("paragraph_mode")
+    @classmethod
+    def _paragraph_mode_valid(cls, value: str) -> str:
+        if value not in ("auto", "blank", "line"):
+            raise SystemConfigError(
+                f"cleaner.paragraph_mode 必须为 auto/blank/line，实际为 {value!r}")
+        return value
 
 
 class InjectionConfig(BaseModel):
@@ -616,6 +760,83 @@ class SystemConfig(BaseSettings):
         if self.dialogue.session.ttl_seconds < 0 or self.dialogue.session.max_rounds < 0 \
                 or self.dialogue.max_sessions < 1:
             raise SystemConfigError("dialogue 会话参数非法（ttl_seconds/max_rounds >= 0，max_sessions >= 1）")
+        # P-D（17.2/17.6）：Agentic 枚举与数值护栏；非法值启动即失败，禁止静默降级
+        if self.orchestration.mode not in ("reflect", "agentic", "auto"):
+            raise SystemConfigError(
+                f"orchestration.mode 必须为 reflect/agentic/auto，实际为 {self.orchestration.mode!r}")
+        if self.llm.tool_calling not in ("auto", "native", "json", "off"):
+            raise SystemConfigError(
+                f"llm.tool_calling 必须为 auto/native/json/off，实际为 {self.llm.tool_calling!r}")
+        agent = self.orchestration.agent
+        if not 1 <= agent.max_steps <= 16:
+            raise SystemConfigError("orchestration.agent.max_steps 必须在 [1,16]")
+        if not 1 <= agent.max_llm_calls <= 12:
+            raise SystemConfigError("orchestration.agent.max_llm_calls 必须在 [1,12]")
+        if not 1 <= agent.max_tool_calls <= 32:
+            raise SystemConfigError("orchestration.agent.max_tool_calls 必须在 [1,32]")
+        if not 0 <= agent.max_replans <= 3:
+            raise SystemConfigError("orchestration.agent.max_replans 必须在 [0,3]")
+        if not 1 <= agent.max_concurrent_queries <= 8:
+            raise SystemConfigError("orchestration.agent.max_concurrent_queries 必须在 [1,8]")
+        if not 0 <= agent.acquire_timeout_seconds <= 5:
+            raise SystemConfigError("orchestration.agent.acquire_timeout_seconds 必须在 [0,5]")
+        if not 1 <= agent.request_timeout_seconds <= 120:
+            raise SystemConfigError("orchestration.agent.request_timeout_seconds 必须在 [1,120]")
+        if not 1 <= self.llm.tool_call_timeout_seconds <= 120:
+            raise SystemConfigError("llm.tool_call_timeout_seconds 必须在 [1,120]")
+        if not 0 <= agent.synthesis.max_repair_attempts <= 1:
+            raise SystemConfigError("orchestration.agent.synthesis.max_repair_attempts 必须在 [0,1]")
+        if not 0 <= agent.min_evidence_score <= 1:
+            raise SystemConfigError("orchestration.agent.min_evidence_score 必须在 [0,1]")
+        if not 0 <= agent.routing.escalate_min_budget_ratio <= 1:
+            raise SystemConfigError("orchestration.agent.routing.escalate_min_budget_ratio 必须在 [0,1]")
+        if not 0 <= agent.routing.max_escalations <= 1:
+            raise SystemConfigError("orchestration.agent.routing.max_escalations 必须在 [0,1]")
+        if agent.routing.agentic_threshold <= agent.routing.reflect_threshold:
+            raise SystemConfigError("orchestration.agent.routing.agentic_threshold 必须大于 reflect_threshold")
+        if not 1 <= agent.planning.max_subgoals <= 8:
+            raise SystemConfigError("orchestration.agent.planning.max_subgoals 必须在 [1,8]")
+        if not 0 <= agent.planning.temperature <= 2:
+            raise SystemConfigError("orchestration.agent.planning.temperature 必须在 [0,2]")
+        if not 0 <= agent.reflection.max_llm_judgements <= agent.max_llm_calls:
+            raise SystemConfigError(
+                "orchestration.agent.reflection.max_llm_judgements 必须在 [0,max_llm_calls]")
+        if not 1 <= agent.reflection.min_evidence_per_subgoal <= 5:
+            raise SystemConfigError(
+                "orchestration.agent.reflection.min_evidence_per_subgoal 必须在 [1,5]")
+        for name, value, low, high in (
+            ("max_parallel_tools", agent.max_parallel_tools, 1, 8),
+            ("max_parse_failures", agent.max_parse_failures, 0, 5),
+            ("max_context_tokens", agent.max_context_tokens, 1000, 32000),
+            ("max_evidence_items", agent.max_evidence_items, 1, 64),
+            ("max_evidence_chars", agent.max_evidence_chars, 200, 8000),
+        ):
+            if not low <= value <= high:
+                raise SystemConfigError(
+                    f"orchestration.agent.{name} 必须在 [{low},{high}]")
+        if not 1 <= agent.tools.kb_search.max_k <= 1000:
+            raise SystemConfigError("orchestration.agent.tools.kb_search.max_k 必须在 [1,1000]")
+        if not 1 <= agent.tools.kb_search.default_k <= agent.tools.kb_search.max_k:
+            raise SystemConfigError(
+                "orchestration.agent.tools.kb_search.default_k 必须在 [1,max_k]")
+        for name, value in (("kb_list_documents.max_items", agent.tools.kb_list_documents.max_items),
+                            ("kb_outline.max_sections", agent.tools.kb_outline.max_sections),
+                            ("web_search.max_results", agent.tools.web_search.max_results)):
+            if not 1 <= value <= 1000:
+                raise SystemConfigError(f"orchestration.agent.tools.{name} 必须在 [1,1000]")
+        if agent.tools.kb_fetch.max_chars < 200:
+            raise SystemConfigError("orchestration.agent.tools.kb_fetch.max_chars 必须 >= 200")
+        if agent.tools.web_search.enabled and not self.web.enabled:
+            raise SystemConfigError("agent.tools.web_search.enabled=true 需要 web.enabled=true")
+        if agent.tools.web_search.enabled and not [
+                d for d in agent.tools.web_search.allowed_domains if str(d).strip()]:
+            raise SystemConfigError(
+                "agent.tools.web_search.enabled=true 必须显式配置 allowed_domains（禁止全放开）")
+        # V1 回退矩阵只实现 reflect；其余值启动即失败，避免“可填但忽略”
+        for field_name in ("on_plan_error", "on_tool_error", "on_protocol_error"):
+            if getattr(agent.fallback, field_name) != "reflect":
+                raise SystemConfigError(
+                    f"orchestration.agent.fallback.{field_name} 目前只支持 reflect")
         return self
 
 

@@ -35,6 +35,9 @@ class DocEntry:
     created_at: float = 0.0
     archive_path: str | None = None  # P0-2：归档原件路径（None=未归档；旧数据兼容缺省）
     index_dna: str | None = None     # P1-3：入库时的索引 DNA（None=存量 legacy）
+    version: int = 1                 # V5.2：逻辑文档版本（同文件名 upsert 递增）
+    updated_at: float = 0.0          # V5.2：最近更新时刻
+    content_hash: str = ""           # V5.2：内容指纹（doctor 校验/替换用；旧数据为空）
 
 
 class DocumentsStore:
@@ -63,6 +66,9 @@ class DocumentsStore:
                     created_at=item.get("created_at", 0.0),
                     archive_path=item.get("archive_path"),
                     index_dna=item.get("index_dna"),
+                    version=item.get("version", 1),
+                    updated_at=item.get("updated_at", 0.0),
+                    content_hash=item.get("content_hash", ""),
                 )
                 self._docs[entry.document_id] = entry
             for kb_id, content_hash, doc_id in raw.get("by_hash", []):
@@ -121,22 +127,73 @@ class DocumentsStore:
 
     def register(self, doc: Document, chunk_count: int,
                  archive_path: str | None = None) -> DocEntry:
-        kb_id = doc.metadata.get("kb_id", "default")
-        entry = DocEntry(
+        entry = self._make_entry(doc, chunk_count, archive_path, version=1)
+        with self._lock:
+            self._docs[entry.document_id] = entry
+            self._by_hash[(entry.kb_id, doc.content_hash)] = doc.document_id
+        self._persist()
+        return entry
+
+    @staticmethod
+    def _make_entry(doc: Document, chunk_count: int, archive_path: str | None,
+                    version: int) -> DocEntry:
+        return DocEntry(
             document_id=doc.document_id,
             filename=doc.filename,
             title=doc.title,
-            kb_id=kb_id,
+            kb_id=doc.metadata.get("kb_id", "default"),
             chunk_count=chunk_count,
             created_at=time.time(),
             archive_path=archive_path,   # P0-2：归档原件路径（None=未归档/归档关闭）
             index_dna=doc.metadata.get("index_dna"),   # P1-3：入库时的索引 DNA
+            version=version,
+            updated_at=time.time(),
+            content_hash=doc.content_hash,
         )
+
+    def replace(self, old_document_id: str, doc: Document, chunk_count: int,
+                archive_path: str | None = None) -> DocEntry:
+        """V5.2 增量更新：以新条目替换旧条目（同一次锁+落盘，版本递增）。
+
+        调用方保证同库同名语义；向量与旧归档的清理由调用方在替换成功后执行
+        （先写新、后删旧，保证更新期间查询不中断）。
+        """
+        old = self.get(old_document_id)
+        version = (old.version + 1) if old is not None else 1
+        entry = self._make_entry(doc, chunk_count, archive_path, version=version)
         with self._lock:
+            self._docs.pop(old_document_id, None)
+            for key, doc_id in list(self._by_hash.items()):
+                if doc_id == old_document_id:
+                    del self._by_hash[key]
             self._docs[entry.document_id] = entry
-            self._by_hash[(kb_id, doc.content_hash)] = doc.document_id
+            self._by_hash[(entry.kb_id, doc.content_hash)] = entry.document_id
         self._persist()
         return entry
+
+    def by_filename(self, kb_id: str, filename: str) -> DocEntry | None:
+        """V5.2：按（库, 文件名）查逻辑文档（upsert 判定同一逻辑文档的新版本）。"""
+        with self._lock:
+            for entry in self._docs.values():
+                if entry.kb_id == kb_id and entry.filename == filename:
+                    return entry
+        return None
+
+    def audit_hash_map(self) -> list[tuple[str, str, str]]:
+        """V5.2 doctor：返回失效幂等映射 (kb_id, content_hash, document_id)（指向不存在条目）。"""
+        with self._lock:
+            return [(kb, h, doc_id) for (kb, h), doc_id in self._by_hash.items()
+                    if doc_id not in self._docs]
+
+    def prune_hash_map(self) -> int:
+        """V5.2 doctor --fix：清理失效幂等映射，返回清理条数。"""
+        with self._lock:
+            bad = [key for key, doc_id in self._by_hash.items() if doc_id not in self._docs]
+            for key in bad:
+                del self._by_hash[key]
+        if bad:
+            self._persist()
+        return len(bad)
 
     def get(self, document_id: str) -> DocEntry | None:
         with self._lock:
@@ -199,6 +256,10 @@ class DocumentsStore:
         except OSError as exc:
             logger.warning("归档原件删除失败（忽略）：%s（%s）", archive_path, exc)
 
+    def remove_archive(self, archive_path: str | None) -> None:
+        """V5.2：公共入口（增量更新替换旧版本后清理旧归档）。"""
+        self._remove_archive(archive_path)
+
     # -- P1-3：重建支持（仅动索引元数据，不触碰归档原件） ------------------------
 
     def forget_kb_index(self, kb_id: str) -> tuple[list[DocEntry], list[tuple[str, str, str]]]:
@@ -239,4 +300,6 @@ class DocumentsStore:
             "kb_id": entry.kb_id,
             "chunk_count": entry.chunk_count,
             "created_at": entry.created_at,
+            "version": entry.version,             # V5.2：逻辑文档版本
+            "updated_at": entry.updated_at,       # V5.2：最近更新时间
         }

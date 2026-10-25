@@ -1,10 +1,18 @@
 """默认文档清洗器（入库链路：解析后、分块前）。
 
 按序执行（每步可独立开关，config.cleaner.*）：
-1. normalize   格式归一：全半角、压缩连续空白、去除控制字符。
+1. normalize   格式归一：全角字母数字/表意空格/控制字符（V5.2 拆两档：
+               宽度归一默认开；中文标点→半角 ASCII 由 `normalize_punct` 控制，默认关）。
 2. noise       噪声去除：连续页码、页眉/页脚重复行、固定模板串（可配置正则）。
 3. dedup       段落级近重复去重：simhash + 汉明距离阈值，保留信息最全者。
 4. quality     质量过滤：丢弃过短段、去停用词后无实词的废话段。
+
+V5.2 增强（全部向后兼容，默认值保持/可回退）：
+- 分段 `paragraph_mode=auto`：空行优先；整篇无空行（PDF/纯行文本）时按行细分，
+  修复"整篇=一段"导致 dedup/quality 失效；[TABLE] 原子块始终独立成段。
+- 按类型豁免 `kind`（代码/JSON/CSV/表格类）：跳过 quality/dedup，防误杀。
+- 安全阀：`max_drop_ratio`（质量过滤删除占比超限则整体跳过）；
+  `dedup_max_paragraphs`（段落数超限跳过 dedup，防 O(n²) 卡死）。
 
 默认 enabled=false：不改变现有入库行为（验收总原则 1）。
 """
@@ -15,11 +23,22 @@ import re
 from dataclasses import dataclass, field
 
 from app.core.interfaces import Cleaner
+from app.core.logging import get_logger
 
-# 全角 → 半角（与 rule_rewriter.normalize_query 同款映射，文档侧复用）
-_FULL_TO_HALF = {
-    "！": "!", "？": "?", "，": ",", "。": ".", "：": ":", "；": ";", "（": "(", "）": ")",
-    "“": '"', "”": '"', "‘": "'", "’": "'", "—": "-", "％": "%", "　": " ",
+logger = get_logger("cleaner")
+
+# 宽度归一（默认开）：全角字母/数字 → 半角；表意空格 → 普通空格；全角百分号 → 半角
+_WIDTH_MAP = {
+    **{chr(0xFF10 + i): chr(ord("0") + i) for i in range(10)},      # ０-９
+    **{chr(0xFF21 + i): chr(ord("A") + i) for i in range(26)},      # Ａ-Ｚ
+    **{chr(0xFF41 + i): chr(ord("a") + i) for i in range(26)},      # ａ-ｚ
+    "％": "%", "　": " ",
+}
+
+# 中文标点 → 半角 ASCII（V5.2：独立开关 normalize_punct，默认关——避免改写中文排版）
+_PUNCT_MAP = {
+    "！": "!", "？": "?", "，": ",", "。": ".", "：": ":", "；": ";",
+    "（": "(", "）": ")", "“": '"', "”": '"', "‘": "'", "’": "'", "—": "-",
 }
 
 # 噪声正则（默认）：连续页码、Page N、第 N 页、纯分隔线、孤立数字行
@@ -89,25 +108,42 @@ def _is_meaningful(text: str, min_chars: int = _MIN_CHUNK_CHARS) -> bool:
         return True
 
 
+def _normalize_text(text: str, punct: bool) -> str:
+    """格式归一：宽度（默认）+ 可选中文标点→半角；去除控制字符并压缩空白。"""
+    for full, half in _WIDTH_MAP.items():
+        text = text.replace(full, half)
+    if punct:
+        for full, half in _PUNCT_MAP.items():
+            text = text.replace(full, half)
+    text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", text)
+    return re.sub(r"[ \t]+", " ", text).strip()
+
+
 @dataclass
 class DefaultCleaner(Cleaner):
     """规则清洗器：全部步骤可独立开关；dedup 用 simhash + 汉明阈值。"""
 
     enabled: bool = False
     normalize: bool = True
+    normalize_punct: bool = False     # V5.2：中文标点→半角 ASCII（默认关）
     noise: bool = True
     dedup: bool = True
     quality: bool = True
     noise_patterns: list[str] = field(default_factory=lambda: list(_DEFAULT_NOISE_PATTERNS))
     dedup_threshold: float = 0.9      # simhash 相似度 = 1 - hamming/bits
     min_chunk_chars: int = _MIN_CHUNK_CHARS
+    paragraph_mode: str = "auto"      # auto|blank|line（V5.2）
+    max_drop_ratio: float = 0.5       # V5.2：质量过滤删除占比超限则跳过
+    dedup_max_paragraphs: int = 5000  # V5.2：超限跳过 dedup
+    exempt_kinds: tuple[str, ...] = ()  # V5.2：豁免 quality/dedup 的文档类型
 
     def __post_init__(self) -> None:
         self._noise_re = [re.compile(p) for p in self.noise_patterns]
 
-    def clean(self, text: str) -> str:
+    def clean(self, text: str, kind: str | None = None) -> str:
         if not self.enabled:
             return text
+        exempt = bool(kind) and kind in set(self.exempt_kinds)
         # P1-4：normalize / noise 仅作用于非 [TABLE] 段（表格内容白名单豁免——
         # 全角转半角等改写会让 tables JSON 与正文错位，且单元格内容无噪声可言）
         rebuilt: list[str] = []
@@ -122,30 +158,38 @@ class DefaultCleaner(Cleaner):
             rebuilt.append(seg)
         text = "".join(rebuilt)
         paragraphs = self._split_paragraphs(text)
-        if self.dedup:
-            paragraphs = self._dedup_paragraphs(paragraphs)
-        if self.quality:
-            # P1-4：含 [TABLE] 的段落豁免质量过滤（双 \n 分段粒度下整页成一段，
-            # 不豁免会把表格整页当"过短/无实词"误杀）
-            paragraphs = [p for p in paragraphs
-                          if "[TABLE]" in p or _is_meaningful(p, self.min_chunk_chars)]
+        if self.dedup and not exempt:
+            if len(paragraphs) > self.dedup_max_paragraphs:
+                logger.warning(
+                    "段落数 %d 超过 dedup 上限 %d，跳过近重复去重（防 O(n²) 卡死）",
+                    len(paragraphs), self.dedup_max_paragraphs,
+                )
+            else:
+                paragraphs = self._dedup_paragraphs(paragraphs)
+        if self.quality and not exempt:
+            # P1-4：含 [TABLE] 的段落豁免质量过滤（分段粒度下表格页可能被判"无实词"）
+            kept = [p for p in paragraphs
+                    if "[TABLE]" in p or _is_meaningful(p, self.min_chunk_chars)]
+            # V5.2 安全阀：删除占比超限说明判定过于激进 → 整体跳过并告警
+            total_chars = sum(len(p) for p in paragraphs) or 1
+            dropped = total_chars - sum(len(p) for p in kept)
+            if dropped / total_chars > self.max_drop_ratio:
+                logger.warning(
+                    "质量过滤删除占比 %.0f%% 超过上限 %.0f%%，整体跳过质量过滤",
+                    100 * dropped / total_chars, 100 * self.max_drop_ratio,
+                )
+            else:
+                paragraphs = kept
         return "\n\n".join(paragraphs).strip()
 
     # -- 步骤实现 --------------------------------------------------------------
 
-    @staticmethod
-    def _normalize(text: str) -> str:
-        for full, half in _FULL_TO_HALF.items():
-            text = text.replace(full, half)
-        text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", text)
-        return re.sub(r"[ \t\u3000]+", " ", text).strip()
-
-    @staticmethod
-    def _normalize_preserve_breaks(text: str) -> str:
+    def _normalize_preserve_breaks(self, text: str) -> str:
         """归一化但保留段首/段尾换行（P1-4：分段清洗时不得吞掉与 [TABLE] 块的边界换行）。"""
         lead = text[:len(text) - len(text.lstrip("\n"))]
         trail = text[len(text.rstrip("\n")):]
-        return lead + DefaultCleaner._normalize(text.strip("\n")) + trail
+        body = _normalize_text(text.strip("\n"), punct=self.normalize_punct)
+        return lead + body + trail
 
     def _strip_noise(self, text: str) -> str:
         lines = text.split("\n")
@@ -168,9 +212,30 @@ class DefaultCleaner(Cleaner):
             out.append(line)
         return "\n".join(out)
 
-    @staticmethod
-    def _split_paragraphs(text: str) -> list[str]:
-        return [p.strip() for p in text.split("\n\n") if p.strip()]
+    def _split_paragraphs(self, text: str) -> list[str]:
+        """V5.2 分段：表格块独立成段；普通文本按模式分段。
+
+        - blank：仅按空行分段（旧行为）；
+        - line：按行分段；
+        - auto：空行优先；整段无空行且行数 ≥3 时按行细分（修复"整篇=一段"）。
+        """
+        paragraphs: list[str] = []
+        for is_table, seg in _split_table_segments(text):
+            if is_table:
+                stripped = seg.strip()
+                if stripped:
+                    paragraphs.append(stripped)
+                continue
+            paragraphs.extend(self._split_plain(seg))
+        return paragraphs
+
+    def _split_plain(self, seg: str) -> list[str]:
+        if self.paragraph_mode == "line":
+            return [ln.strip() for ln in seg.split("\n") if ln.strip()]
+        blocks = [p.strip() for p in seg.split("\n\n") if p.strip()]
+        if self.paragraph_mode == "auto" and len(blocks) == 1 and seg.count("\n") >= 2:
+            return [ln.strip() for ln in seg.split("\n") if ln.strip()]
+        return blocks
 
     def _dedup_paragraphs(self, paragraphs: list[str]) -> list[str]:
         """simhash 近重复去重：按文档顺序保留首个，相似度超阈值丢弃后续（保留信息最全者）。

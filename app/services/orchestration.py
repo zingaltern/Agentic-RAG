@@ -17,13 +17,22 @@ import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
 from typing import Any
 
 from app.adapters.rewriter.rule_rewriter import _STOP_PHRASES, normalize_query
 from app.core.config import SystemConfig
-from app.core.domain import DetectionResult, EvaluationResult, ScoredChunk
-from app.core.errors import ClarifyError, LLMUnavailableError, RequestTimeoutError, ValidationError
+from app.core.domain import Answer, DetectionResult, EvaluationResult, ScoredChunk, TerminationReason
+from app.core.errors import (
+    AgentInternalError,
+    AgentPlanError,
+    AgentProtocolError,
+    AgentToolError,
+    ClarifyError,
+    LLMUnavailableError,
+    RequestTimeoutError,
+    ValidationError,
+)
+from app.services.agent.router import route_decision
 from app.core.interfaces import (
     BoundaryDetector,
     Evaluator,
@@ -114,28 +123,13 @@ def _strip_stopwords(query: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
-@dataclass
-class Answer:
-    """编排结果（code=0 正常；code=21001 反思超限兜底）。"""
-
-    text: str
-    sources: list[dict] = field(default_factory=list)
-    iterations: int = 0
-    hallucination: DetectionResult | None = None
-    debug_trace: list[dict] = field(default_factory=list)
-    code: int = 0
-    message: str = "ok"
-    need_clarify: bool = False      # A2：主动澄清（21003）时置真
-    elapsed_ms: int = 0
-    contexts: list[dict] = field(default_factory=list)   # P0：评测用完整上下文（capture_contexts=True）
-
-
 class OrchestrationService:
     def __init__(self, config: SystemConfig, retriever: Retriever,
                  reranker: Reranker, evaluator: Evaluator,
                  rewriter: QueryRewriter, detector: HallucinationDetector,
                  llm: LLM | None, vector_store: VectorStore,
-                 normalizer: QueryNormalizer | None = None, **_: Any):
+                 normalizer: QueryNormalizer | None = None,
+                 agent_runtime: Any | None = None, **_: Any):
         self.config = config
         self.retriever = retriever
         self.reranker = reranker
@@ -145,13 +139,17 @@ class OrchestrationService:
         self.llm = llm
         self.vector_store = vector_store
         self.normalizer = normalizer       # 13.12.2：输入标准化管线（None=未启用，零开销）
+        self.agent_runtime = agent_runtime  # P-D：None=Agentic 未启用
         self._parent_cache: dict[str, tuple[int, int, dict[str, ScoredChunk]]] = {}
         self._parent_cache_lock = threading.Lock()   # 并发查询互斥（缓存读写）
 
     # -- 工具 ----------------------------------------------------------------
 
     @staticmethod
-    def _check_budget(start: float, timeout_seconds: int | float) -> None:
+    def _check_budget(start: float, timeout_seconds: int | float,
+                      deadline: float | None = None) -> None:
+        if deadline is not None and time.time() > deadline:
+            raise RequestTimeoutError("请求超过统一 deadline，强制终止")
         if time.perf_counter() - start > timeout_seconds:
             raise RequestTimeoutError(f"请求超过 {timeout_seconds}s 预算，强制终止")
 
@@ -311,8 +309,129 @@ class OrchestrationService:
             history: list[dict] | None = None,
             web_search: bool = False,
             allow_clarify: bool = True,
-            capture_contexts: bool = False) -> Answer:
+            capture_contexts: bool = False,
+            mode: str | None = None,
+            kb_id: str | None = None) -> Answer:
+        """模式分发（DEVELOPMENT.md 17.2）：reflect | agentic | auto。
+
+        - reflect：旧链路，行为不变；
+        - agentic：AgentRuntime；任何 Agent 内部错误回退 reflect；
+        - auto：规则路由；不确定时先 reflect，失败且预算充足再升级 agentic。
+        """
+        requested = (mode or self.config.orchestration.mode or "reflect").strip().lower()
+        if requested not in ("reflect", "agentic", "auto"):
+            raise ValidationError(f"mode 必须为 reflect/agentic/auto，实际为 {requested!r}")
+        started_ts = time.time()
+        requested_timeout = (self.config.orchestration.agent.request_timeout_seconds
+                             if requested in ("agentic", "auto")
+                             else self.config.orchestration.request_timeout_seconds)
+        deadline = started_ts + requested_timeout
+        agent_cfg = self.config.orchestration.agent
+        can_agent = bool(agent_cfg.enabled and self.agent_runtime is not None)
+        # L0 问候/闲聊快路：即使显式 agentic 也不启动规划器（省时且避免误检索）
+        greeting = self._match_greeting(query)
+        if greeting and requested != "reflect":
+            return Answer(text=greeting, iterations=0, mode="reflect",
+                          termination_reason="answered",
+                          debug_trace=[{"iter": 0, "fast_path": "greeting"}] if debug else [])
+        if requested == "reflect" or not can_agent:
+            return self._run_reflect(
+                query, filters=filters, collection=collection, top_k=top_k,
+                debug=debug, history=history, web_search=web_search,
+                allow_clarify=allow_clarify, capture_contexts=capture_contexts,
+                deadline=deadline)
+        if requested == "agentic":
+            return self._run_agentic_or_fallback(
+                query, filters=filters, collection=collection, top_k=top_k,
+                debug=debug, history=history, web_search=web_search,
+                allow_clarify=allow_clarify, capture_contexts=capture_contexts,
+                kb_id=kb_id, deadline=deadline)
+
+        decision = route_decision(query, agent_cfg, history)
+        if decision == "direct":
+            return self._run_reflect(
+                query, filters=filters, collection=collection, top_k=top_k,
+                debug=debug, history=history, web_search=web_search,
+                allow_clarify=allow_clarify, capture_contexts=capture_contexts,
+                deadline=deadline)
+        if decision == "agentic":
+            return self._run_agentic_or_fallback(
+                query, filters=filters, collection=collection, top_k=top_k,
+                debug=debug, history=history, web_search=web_search,
+                allow_clarify=allow_clarify, capture_contexts=capture_contexts,
+                kb_id=kb_id, deadline=deadline)
+
+        # reflect_first：先跑旧链路；失败且剩余预算充足时升级（最多 1 次）
+        started = time.perf_counter()
+        reflect_answer = self._run_reflect(
+            query, filters=filters, collection=collection, top_k=top_k,
+            debug=debug, history=history, web_search=web_search,
+            allow_clarify=allow_clarify, capture_contexts=capture_contexts,
+            deadline=deadline)
+        max_escalations = min(1, int(agent_cfg.routing.max_escalations))
+        if (reflect_answer.code not in (21001, 21002)
+                or not agent_cfg.routing.escalate_on_reflect_failure
+                or max_escalations <= 0):
+            return reflect_answer
+        elapsed = time.perf_counter() - started
+        total = max(1, int(agent_cfg.request_timeout_seconds))
+        remaining_ratio = 1.0 - (elapsed / total)
+        if remaining_ratio < float(agent_cfg.routing.escalate_min_budget_ratio):
+            return reflect_answer
+        last_error: Exception | None = None
+        for _attempt in range(max_escalations):
+            try:
+                return self.agent_runtime.run(
+                    query=query, filters=filters, collection=collection, top_k=top_k,
+                    debug=debug, history=history, web_search=web_search,
+                    allow_clarify=allow_clarify, capture_contexts=capture_contexts,
+                    kb_id=kb_id, deadline=deadline)
+            except Exception as exc:  # noqa: BLE001
+                last_error = exc
+                logger.warning("Agentic 升级失败（尝试 %s/%s）：%s",
+                               _attempt + 1, max_escalations, exc)
+        logger.warning("Agentic 升级耗尽，保留 reflect 结果：%s", last_error)
+        reflect_answer.termination_reason = TerminationReason.FALLBACK_REFLECT.value
+        return reflect_answer
+
+    def _run_agentic_or_fallback(self, query: str, filters: dict | None = None,
+                                 collection: str | None = None,
+                                 top_k: int | None = None, debug: bool = False,
+                                 history: list[dict] | None = None,
+                                 web_search: bool = False,
+                                 allow_clarify: bool = True,
+                                 capture_contexts: bool = False,
+                                 kb_id: str | None = None,
+                                 deadline: float | None = None) -> Answer:
+        """Agent 内部失败回退 reflect；保留旧链路作为永久兜底。"""
+        try:
+            return self.agent_runtime.run(
+                query=query, filters=filters, collection=collection, top_k=top_k,
+                debug=debug, history=history, web_search=web_search,
+                allow_clarify=allow_clarify, capture_contexts=capture_contexts,
+                kb_id=kb_id, deadline=deadline)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Agentic 失败，回退 reflect（%s）：%s", type(exc).__name__, exc)
+            answer = self._run_reflect(
+                query, filters=filters, collection=collection, top_k=top_k,
+                debug=debug, history=history, web_search=web_search,
+                allow_clarify=allow_clarify, capture_contexts=capture_contexts,
+                deadline=deadline)
+            answer.termination_reason = TerminationReason.FALLBACK_REFLECT.value
+            return answer
+
+    def _run_reflect(self, query: str, filters: dict | None = None,
+            collection: str | None = None,
+            top_k: int | None = None, debug: bool = False,
+            history: list[dict] | None = None,
+            web_search: bool = False,
+            allow_clarify: bool = True,
+            capture_contexts: bool = False,
+            deadline: float | None = None) -> Answer:
         start = time.perf_counter()
+        timeout_seconds = self.config.orchestration.request_timeout_seconds
+        if deadline is not None:
+            timeout_seconds = min(timeout_seconds, max(0.1, deadline - time.time()))
         # 预热（幂等，已加载时零成本）：模型加载属装配开销，不计入请求/检索预算，
         # 避免冷启动首次请求误触发 21002
         for holder in (getattr(self.reranker, "ready", None),
@@ -361,7 +480,7 @@ class OrchestrationService:
         trace: list[dict] = []
 
         while True:
-            self._check_budget(start, cfg.request_timeout_seconds)
+            self._check_budget(start, timeout_seconds, deadline)
 
             # 1) 多路检索（13.3.2：每个变体分别检索；filters 贯穿所有变体）
             search_start = time.perf_counter()
@@ -373,7 +492,7 @@ class OrchestrationService:
             for vq, path in variants:
                 variant_results.append(self.retriever.retrieve(
                     vq, k=k, filters=filters, path=path, collection=active_collection))
-                self._check_budget(start, cfg.request_timeout_seconds)
+                self._check_budget(start, timeout_seconds, deadline)
             if time.perf_counter() - search_start > cfg.search_timeout_seconds:
                 raise RequestTimeoutError(f"检索超过 {cfg.search_timeout_seconds}s 预算")
             # A5：收口联网结果（若已提交）；仅首轮，超时/无 key 返回空不阻塞
@@ -387,10 +506,18 @@ class OrchestrationService:
 
             # 2) 精排（13.2）：RRF 输出 → rerank → rerank_top_k
             reranked = self.reranker.rerank(normalized, candidates)
-            # A5 冲突优先级：KB 块恒排 web 之前（即使 web 相关度更高，仍以知识库为准）
-            if self.config.web.kb_priority and web_active:
-                reranked = sorted(reranked, key=_kb_first_key)
+            # 名额先按相关度选，再谈优先级：
+            #   旧实现先按 KB 优先排序再截断，KB 候选 ≥ rerank_top_k 时 web 会被整体截掉，
+            #   导致前端勾选“联网”却永远拿不到网页结果（web_active 为真但 top 里没有 web）。
             top = reranked[:rerank_top_k]
+            if web_active and rerank_top_k > 0 and not any(_is_web_chunk(c) for c in top):
+                web_candidates = [c for c in reranked if _is_web_chunk(c)]
+                if web_candidates:
+                    top = (top[:-1] + [web_candidates[0]]) if len(top) >= rerank_top_k \
+                        else (top + [web_candidates[0]])
+            # A5 冲突优先级：入选集合内 KB 块恒排 web 之前（即使 web 相关度更高，仍以知识库为准）
+            if self.config.web.kb_priority and web_active:
+                top = sorted(top, key=_kb_first_key)
 
             # 3) 评估（输入必须是 rerank 后的 top_n，13.3.1）
             result = self.evaluator.evaluate(normalized, top)
@@ -439,10 +566,10 @@ class OrchestrationService:
                     temperature=self.config.llm.temperature,
                     max_tokens=self.config.llm.max_tokens,
                 )
-                self._check_budget(start, cfg.request_timeout_seconds)
+                self._check_budget(start, timeout_seconds, deadline)
                 llm_ms = round((time.perf_counter() - llm_start) * 1000)
                 detection = self.detector.detect(answer_text, context)
-                self._check_budget(start, cfg.request_timeout_seconds)
+                self._check_budget(start, timeout_seconds, deadline)
                 elapsed_ms = round((time.perf_counter() - start) * 1000)
                 trace.append({"iter": iteration, "llm_ms": llm_ms,
                               "detection": {"verified": detection.verified,
@@ -471,8 +598,10 @@ class OrchestrationService:
                                             "trace_id": get_trace_id()}},
                 )
                 return Answer(text=FALLBACK_TEXT, iterations=iteration,
+                              contexts=self._full_contexts(top) if capture_contexts else [],
                               debug_trace=trace if debug else [],
                               code=21001, message="首轮未检索到相关依据",
+                              termination_reason="abstain_insufficient",
                               elapsed_ms=round((time.perf_counter() - start) * 1000))
 
             # 5) 反思上限 → 21003 主动澄清（意图不清）或 21001 兜底
@@ -483,13 +612,17 @@ class OrchestrationService:
                     clarify = self._build_clarification(normalized, top)
                     if clarify:
                         return Answer(text=clarify, iterations=iteration,
+                                      contexts=self._full_contexts(top) if capture_contexts else [],
                                       debug_trace=trace if debug else [],
                                       code=ClarifyError.code,
                                       message="需要澄清：请明确您的意图",
+                                      termination_reason="clarify",
                                       need_clarify=True, elapsed_ms=elapsed_ms)
                 return Answer(text=FALLBACK_TEXT, iterations=iteration,
+                              contexts=self._full_contexts(top) if capture_contexts else [],
                               debug_trace=trace if debug else [],
                               code=21001, message="反思达到上限仍未找到可靠答案",
+                              termination_reason="abstain_insufficient",
                               elapsed_ms=elapsed_ms)
             # 6) 改写（仅 passed=False；13.3.3：query 必须与上轮不同）
             iteration += 1

@@ -68,6 +68,9 @@ class CaseResult:
     faithful: bool = False
     elapsed_ms: int = 0
     contexts: list[dict] = field(default_factory=list)   # P0：完整上下文（--export-jsonl/质量评测用）
+    expected_sources: list[str] = field(default_factory=list)
+    reference_answer: str = ""
+    expected_behavior: str = ""
     error: str = ""
 
 
@@ -125,10 +128,20 @@ class _StubLLM:
         return "根据知识库上下文，请参考编号 [1] 对应来源。"
 
 
+def _doc_files(docs_dir: Path) -> list[Path]:
+    """P0：进程内评测入库文件列表——跳过隐藏文件与不支持扩展（如 .DS_Store）。"""
+    from app.adapters.parser.formats import SUPPORTED_EXTENSIONS
+
+    return sorted(p for p in docs_dir.iterdir()
+                  if p.is_file() and not p.name.startswith(".")
+                  and p.suffix.lower() in SUPPORTED_EXTENSIONS)
+
+
 def _run_in_process(config, docs_dir: Path, pairs: list[dict],
                     kb_id: str = "default", debug: bool = False,
-                    fresh: bool = False, capture_contexts: bool = False) -> list[dict]:
-    from app.adapters.parser.formats import SUPPORTED_EXTENSIONS
+                    fresh: bool = False, capture_contexts: bool = False,
+                    llm=None, embedding=None, reranker=None) -> list[dict]:
+    """进程内评测；llm/embedding/reranker 可注入（默认 Stub LLM + 真实 BGE/Chroma）。"""
     from app.core.config import load_config
     from app.core.registry import wire
     from app.services.kb_store import DEFAULT_KB_ID, KbStore
@@ -138,7 +151,7 @@ def _run_in_process(config, docs_dir: Path, pairs: list[dict],
     if kb_id != DEFAULT_KB_ID and not ks.exists(kb_id):
         ks.create(kb_id)                     # 物理集合随评测创建（进程内隔离）
     collection = ks.collection_of(kb_id)
-    deps = wire(config, llm=_StubLLM(), kbs=ks)
+    deps = wire(config, llm=llm or _StubLLM(), embedding=embedding, reranker=reranker, kbs=ks)
     if fresh and collection and deps.vector_store is not None:
         # 8.4 --fresh-kb：评测前清空该库（集合 + 文档幂等表），保证全新入库可复现；
         # 不清幂等表会因 content_hash 命中跳过重嵌、块却已删 → 检索必空
@@ -146,11 +159,7 @@ def _run_in_process(config, docs_dir: Path, pairs: list[dict],
         if deps.documents is not None:
             deps.documents.delete_by_kb(kb_id)
 
-    # P0：跳过隐藏文件与不支持扩展（如 .DS_Store），避免“入库失败”噪声与污染
-    files = sorted(p for p in docs_dir.iterdir()
-                   if p.is_file() and not p.name.startswith(".")
-                   and p.suffix.lower() in SUPPORTED_EXTENSIONS)
-    for path in files:
+    for path in _doc_files(docs_dir):
         job = deps.pipeline.ingest(path.read_bytes(), path.name,
                                    kb_id=kb_id, collection=collection)
         if job.status != "success":
@@ -196,14 +205,23 @@ def eval_pair(pair: dict, response: dict) -> CaseResult:
     r = CaseResult(id=pair["id"], kind=pair["type"], query=pair["query"],
                    variant=pair.get("variant", ""))
     kind = pair["type"]
-    expected = set(pair.get("expected_sources", []))
+    r.expected_sources = list(pair.get("expected_sources") or pair.get("expected_doc") or [])
+    r.reference_answer = (pair.get("reference_answer") or pair.get("golden_answer")
+                          or pair.get("golden") or "")
+    r.expected_behavior = pair.get("expected_behavior", "") or ""
+    expected = set(r.expected_sources)
     r.code = response.get("code", 50001)
     data = response.get("data", {}) or {}
     r.answer = data.get("answer", "") or ""
     r.sources = [s.get("filename", "") for s in data.get("sources", [])]
+    r.contexts = data.get("contexts", []) or []
+    if not r.sources and r.contexts:
+        # 兜底/澄清路径只有 contexts：IR 不应把“生成兜底”误记为“检索未命中”
+        r.sources = [str(c.get("filename", "")) for c in r.contexts if c.get("filename")]
     r.iterations = data.get("iterations", -1)
     r.hallucination_check = data.get("hallucination_check", "")
-    r.elapsed_ms = data.get("elapsed_ms") or 0
+    # P0：兼容进程内（顶层 elapsed_ms）与 HTTP（data.elapsed_ms）两种响应形状
+    r.elapsed_ms = data.get("elapsed_ms") or response.get("elapsed_ms") or 0
     r.faithful = r.hallucination_check == "passed"
 
     if kind in ("direct", "rewrite"):
@@ -258,17 +276,39 @@ def _aggregate(results: list[CaseResult]) -> dict:
 
 
 def _parse_baseline(path: Path) -> dict[str, float]:
-    """解析基线报告 Markdown 的聚合表（| 指标 | 值 |）。"""
+    """解析基线报告 Markdown 的聚合表（| 指标 | 值 |）。
+
+    P0：支持百分比（`90.00%`）与计数比（`18/21`）两种值形态；
+    后者用于“通过率”行（修复此前基线 diff 拿不到通过率的问题）。
+    """
     out: dict[str, float] = {}
     if not path.exists():
         return out
+    in_diff = False
     for line in path.read_text(encoding="utf-8").splitlines():
-        m = re.match(r"\|\s*([^|]+?)\s*\|\s*([0-9.]+)%", line)
-        if m:
+        if line.startswith("## "):
+            # 基线报告本身可能含“与基线 diff”表：跳过，避免把现状当基线
+            in_diff = "diff" in line.lower()
+            continue
+        if in_diff:
+            continue
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if len(cells) < 2:
+            continue
+        name, value = cells[0], cells[1]
+        if not name or not value:
+            continue
+        if name in out:
+            continue  # 报告含多库聚合表：只取第一张（与 render_report 的 diff 口径一致）
+        if value.endswith("%"):
             try:
-                out[m.group(1).strip()] = float(m.group(2)) / 100.0
+                out[name] = float(value[:-1]) / 100.0
             except ValueError:
                 continue
+        elif re.fullmatch(r"\d+\s*/\s*\d+", value):
+            num, den = (int(x) for x in value.split("/"))
+            if den:
+                out[name] = num / den
     return out
 
 
@@ -280,6 +320,22 @@ def _diff_text(now: float, base: float | None) -> str:
     return f"{sign}{delta:.0%}"
 
 # -- 报告 ----------------------------------------------------------------------
+
+def _metric_values(agg: dict) -> dict[str, float]:
+    """聚合指标 → 可比较的 0~1 数值（用于基线 diff；P0 修复通过率不可比问题）。"""
+    total = agg["total"] or 1
+    return {
+        "通过率": agg["ok"] / total,
+        "Hit@1": agg["hit1"],
+        "Hit@5": agg["hit5"],
+        "ContextPrecision": agg["context_precision"],
+        "ContextRecall": agg["context_recall"],
+        "AnswerRelevancy": agg["answer_relevancy"],
+        "Faithfulness": agg["faithfulness"],
+        "Faithfulness(direct)": agg["faithfulness_direct"],
+        "兜底率": agg["fallback_rate"],
+    }
+
 
 def _agg_rows(agg: dict) -> list[tuple[str, str]]:
     return [
@@ -308,10 +364,10 @@ def render_report(args, kb_results: dict[str, list[CaseResult]],
     if baseline:
         lines += ["## 与基线 diff（13.6 对比模式）", "",
                   "| 指标 | 基线 | 现状 | Δ |", "|---|---|---|---|"]
-        for name, value in _agg_rows(next(iter(kb_aggs.values()))):
+        for name, value in _metric_values(next(iter(kb_aggs.values()))).items():
             base = baseline.get(name)
-            lines.append(f"| {name} | {base:.0%} | {value} | {_diff_text(_pct(value), base)} |"
-                         if base is not None else f"| {name} | - | {value} | 新指标 |")
+            lines.append(f"| {name} | {base:.0%} | {value:.0%} | {_diff_text(value, base)} |"
+                         if base is not None else f"| {name} | - | {value:.0%} | 新指标 |")
         lines.append("")
 
     # 按库汇总表（13.6）
@@ -363,13 +419,6 @@ def render_report(args, kb_results: dict[str, list[CaseResult]],
     return "\n".join(lines)
 
 
-def _pct(value: str) -> float:
-    try:
-        return float(value.rstrip("%")) / 100.0
-    except ValueError:
-        return 0.0
-
-
 def _merge_aggs(aggs: list[dict]) -> dict:
     out = {"total": 0, "ok": 0, "hit1": 0.0, "hit5": 0.0, "context_precision": 0.0,
            "context_recall": 0.0, "answer_relevancy": 0.0, "faithfulness": 0.0,
@@ -411,7 +460,13 @@ def main() -> int:
     parser.add_argument("--token", default=None, help="HTTP 模式：Bearer token（认证启用时）")
     parser.add_argument("--login", nargs=2, metavar=("USER", "PASS"),
                         help="HTTP 模式：现场登录换取 token")
+    parser.add_argument("--export-jsonl", default=None,
+                        help="P0：每案原始结果（含完整 contexts/gold）导出为 JSONL；仅支持 --in-process")
     args = parser.parse_args()
+    if args.export_jsonl and not args.in_process:
+        parser.error("--export-jsonl 仅支持 --in-process（HTTP 响应不含完整 contexts）")
+    if args.fresh_kb and (args.kb == "default" or args.all_kbs):
+        parser.error("拒绝 --fresh-kb 作用于 default/--all-kbs：会清空生产默认库")
 
     from app.core.config import load_config
 
@@ -432,7 +487,8 @@ def main() -> int:
         pairs = load_pairs(pairs_path)
         docs = Path(args.docs) if (args.docs and len(kbs) == 1) else Path(_default_docs(kb))
         if args.in_process:
-            responses = _run_in_process(config, docs, pairs, kb_id=kb, fresh=args.fresh_kb)
+            responses = _run_in_process(config, docs, pairs, kb_id=kb, fresh=args.fresh_kb,
+                                        capture_contexts=bool(args.export_jsonl))
         else:
             token = args.token
             if args.login:
@@ -449,6 +505,17 @@ def main() -> int:
         results = [eval_pair(p, resp) for p, resp in zip(pairs, responses)]
         kb_results[kb] = results
         kb_aggs[kb] = _aggregate(results)
+
+    if args.export_jsonl:
+        export_path = Path(args.export_jsonl)
+        export_path.parent.mkdir(parents=True, exist_ok=True)
+        with export_path.open("w", encoding="utf-8") as fh:
+            for kb, results in kb_results.items():
+                for r in results:
+                    record = asdict(r)
+                    record["kb_id"] = kb
+                    fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+        print(f"原始结果已导出：{export_path}")
 
     baseline = _parse_baseline(Path(args.baseline)) if args.baseline else None
     out = Path(args.out or f"reports/eval-{time.strftime('%Y%m%d-%H%M%S')}.md")

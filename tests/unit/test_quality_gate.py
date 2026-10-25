@@ -35,7 +35,7 @@ def _make_pdf(page_texts: list[str]) -> bytes:
     return buf.getvalue()
 
 
-def _config(tmp_path, *, gate_enabled=False, mode="reject"):
+def _config(tmp_path, *, gate_enabled=False, mode="reject", empty_result="reject"):
     """单测配置：临时 Chroma/持久化文件，门禁参数可注入（_hermetic_env 已屏蔽 .env）。"""
     config = load_config()
     config.vector_store.persist_dir = str(tmp_path / "chroma")
@@ -43,6 +43,7 @@ def _config(tmp_path, *, gate_enabled=False, mode="reject"):
     config.kbs.persist_file = str(tmp_path / "kb.json")
     config.ingestion.quality_gate.enabled = gate_enabled
     config.ingestion.quality_gate.mode = mode
+    config.ingestion.empty_result = empty_result
     return config
 
 
@@ -50,8 +51,9 @@ def _config(tmp_path, *, gate_enabled=False, mode="reject"):
 def make_deps(tmp_path, isolated_stores):
     """装配工厂：真实 Chroma（临时目录）+ 桩嵌入；按用例开关门禁（仿 test_ingestion deps）。"""
 
-    def _make(*, gate_enabled=False, mode="reject"):
-        config = _config(tmp_path, gate_enabled=gate_enabled, mode=mode)
+    def _make(*, gate_enabled=False, mode="reject", empty_result="reject"):
+        config = _config(tmp_path, gate_enabled=gate_enabled, mode=mode,
+                         empty_result=empty_result)
         return wire(config, embedding=StubEmbedding(dimension=512),
                     kbs=isolated_stores["kbs"], users=isolated_stores["users"],
                     documents=isolated_stores["documents"], jobs=isolated_stores["jobs"])
@@ -140,14 +142,34 @@ def test_evaluate_combined_flags_ordered():
 # -- ingestion 门禁（5.10） ----------------------------------------------------
 
 
-def test_gate_disabled_scan_pdf_unchanged(make_deps):
-    """enabled=false 回归：扫描件维持现状（成功入库 0 块），不产生任何质量拦截。"""
-    deps = make_deps(gate_enabled=False)
+def test_empty_result_reject_scan_pdf_job_failed_30007(make_deps):
+    """V5.2 默认（empty_result=reject）：空文本扫描件（质量门禁关）→ Job failed=30007。
+
+    杜绝"成功入库 0 块"的静默失败：入库必须给出明确信号。
+    """
+    deps = make_deps(gate_enabled=False, empty_result="reject")
+    job = deps.pipeline.ingest(_make_pdf(["", ""]), "scan.pdf")
+    assert job.status == "failed"
+    assert job.error_code == "30007"
+    assert deps.vector_store.count() == 0
+    assert deps.documents.count() == 0
+
+
+def test_empty_result_allow_legacy_scan_pdf_success_zero_chunks(make_deps):
+    """empty_result=allow 回归：扫描件维持旧行为（成功入库 0 块），不产生质量拦截。"""
+    deps = make_deps(gate_enabled=False, empty_result="allow")
     job = deps.pipeline.ingest(_make_pdf(["", ""]), "scan.pdf")
     assert job.status == "success"
     assert job.chunk_count == 0
     assert job.error_code is None
     assert deps.vector_store.count() == 0
+
+
+def test_empty_result_reject_empty_txt(make_deps):
+    """空 txt（0 字节）同样受 empty_result=reject 约束。"""
+    deps = make_deps(gate_enabled=False, empty_result="reject")
+    job = deps.pipeline.ingest(b"", "空白.txt")
+    assert job.status == "failed" and job.error_code == "30007"
 
 
 def test_gate_reject_scan_pdf_job_failed_30005(make_deps):

@@ -3,16 +3,22 @@
  * V5.1：Authorization: Bearer <token>；40101 清除 token 并触发登录视图（不重复弹错）。
  * 网络/超时失败一律返回 {code:50001} 契约包不 throw（与后端失败语义一致），调用方无需 catch。
  * 文档原文一律不在此层拼 HTML（S3，由组件模板插值渲染）。
+ *
+ * 新增（可取消请求）：
+ *   api(path, { signal }) —— 调用方传入 AbortSignal（如「停止生成」按钮），
+ *   用户主动取消返回 {code:49901}，不弹全局错误；超时仍返回 50001。
  */
-import { getBaseUrl, getToken, clearToken } from './base'
+import { getBaseUrl, getToken } from './base'
 import { useAppStore } from '../stores/app'
 
 export const REQUEST_TIMEOUT_MS = 90000
+export const CANCELLED_CODE = 49901
 
 const USER_FACING = {
   40101: '请先登录',
   50001: '无法连接服务，请确认应用已启动、网络正常',
   21002: '本次处理超时，请换个问法或稍后再试',
+  49901: '已取消本次请求',
 }
 
 // 技术性原文（令牌/ trace_id / 抛异常细节等）一律不上界面 → 回落错误码映射
@@ -31,49 +37,70 @@ export function friendlyError(code, message) {
 
 export async function api(path, options = {}) {
   const store = useAppStore()
-  const silent = !!options.silent   // 调用方自行处理错误语义时跳过全局错误弹条（如登录态探测）
-  delete options.silent
+  const {
+    silent = false,        // 调用方自行处理错误语义时跳过全局错误弹条（如登录态探测）
+    timeout = REQUEST_TIMEOUT_MS,
+    signal: externalSignal,
+    ...rest
+  } = options
   const traceId = (crypto.randomUUID && crypto.randomUUID()) || String(Date.now())
   const headers = { 'X-Trace-Id': traceId }
   const token = getToken()
   if (token) headers['Authorization'] = `Bearer ${token}`
-  if (options.body && !(options.body instanceof FormData)) {
+  if (rest.body && !(rest.body instanceof FormData)) {
     headers['Content-Type'] = 'application/json'
   }
+
+  // 内部控制器统一承载「超时」与「外部取消」两个来源
   const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
+  const timer = setTimeout(() => controller.abort('timeout'), timeout)
+  let relayAbort = null
+  if (externalSignal) {
+    if (externalSignal.aborted) {
+      controller.abort('cancelled')
+    } else {
+      relayAbort = () => controller.abort('cancelled')
+      externalSignal.addEventListener('abort', relayAbort, { once: true })
+    }
+  }
+
   let resp
   try {
-    resp = await fetch(getBaseUrl() + path, { ...options, headers, signal: controller.signal })
+    resp = await fetch(getBaseUrl() + path, { ...rest, headers, signal: controller.signal })
   } catch (e) {
-    clearTimeout(timer)
-    if (!silent) {
-      store.pushError(USER_FACING[50001])
+    const cancelled = Boolean(externalSignal && externalSignal.aborted)
+    if (cancelled) {
+      // 用户主动取消：静默返回，不写 error 日志（不算故障）
+      return { code: CANCELLED_CODE, message: USER_FACING[CANCELLED_CODE], data: {}, trace_id: traceId }
     }
+    if (!silent) store.pushError(USER_FACING[50001])
     console.error(`[rag-api] network error trace=${traceId}`, e)
     return { code: 50001, message: USER_FACING[50001], data: {}, trace_id: traceId }
+  } finally {
+    clearTimeout(timer)
+    if (externalSignal && relayAbort) externalSignal.removeEventListener('abort', relayAbort)
   }
-  clearTimeout(timer)
+
   let json = null
   try {
     json = await resp.json()
   } catch (e) {
-    if (!silent) {
-      store.pushError('服务响应异常，请重试')
-    }
+    if (!silent) store.pushError('服务响应异常，请重试')
     console.error(`[rag-api] parse error trace=${traceId} http=${resp.status}`, e)
     return { code: 50001, message: '服务响应异常，请重试', data: {}, trace_id: traceId }
   }
-  if (!silent && json && json.code !== 0) {
-    if (json.code === 40101 && getToken()) {
-      clearToken()
-      store.clearAuth()
-      store.pushError('登录已失效，请重新登录')
-    } else if (json.code === 40101) {
+  // 401 的「清理」不受 silent 影响：探测/后台轮询拿到的失效 Token 也必须清掉，
+  // 否则界面会停在“看似已登录、实际所有请求都 401”的状态；silent 只抑制提示条。
+  if (json && json.code === 40101) {
+    if (getToken()) {
+      store.logout()
+      if (!silent) store.pushError('登录已失效，请重新登录')
+    } else if (!silent) {
       store.pushError(USER_FACING[40101])
-    } else {
-      store.pushError(friendlyError(json.code, json.message))
     }
+    if (!silent) console.error(`[rag-api] unauthorized trace=${traceId}`)
+  } else if (!silent && json && json.code !== 0) {
+    store.pushError(friendlyError(json.code, json.message))
     console.error(`[rag-api] error code=${json.code} trace=${traceId}`, json)
   }
   return { ...(json || {}), trace_id: resp.headers.get('X-Trace-Id') || traceId }

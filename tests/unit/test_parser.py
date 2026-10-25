@@ -496,7 +496,7 @@ def test_parse_xls_fixture():
 
 
 def test_parse_xls_bad_magic_rejected():
-    with pytest.raises(ParseError, match="非旧版 Office OLE2"):
+    with pytest.raises(ParseError, match="非 OLE2 复合文档"):
         _parse_bytes(b"PK\x03\x04not-ole", "fake.xls")
 
 
@@ -563,3 +563,123 @@ def test_parse_doc_soffice_no_output(monkeypatch):
                         lambda *a, **k: _Result())
     with pytest.raises(ParseError, match="未产出"):
         _parse_bytes(_OLE2_HEADER + b"\x00" * 32, "old.ppt")
+
+
+# -- V5.2 解析健壮性 ----------------------------------------------------------------
+
+
+def test_parse_txt_gbk_decodes_clean():
+    """V5.2：txt 走统一解码链（gb18030 回退），GBK 老文档不再整篇乱码。"""
+    doc = _parse_bytes("年假制度：入职满一年享受五天。".encode("gbk"), "制度.txt")
+    assert "年假制度" in doc.text
+    assert "\ufffd" not in doc.text
+
+
+def test_parse_md_gbk_decodes_clean():
+    doc = _parse_bytes("# 员工手册\n年假需提前申请。".encode("gbk"), "手册.md")
+    assert "员工手册" in doc.text and "\ufffd" not in doc.text
+
+
+def test_parse_html_skips_nav_footer():
+    """V5.2：HTML 解析跳过导航/页脚/脚本等噪声容器。"""
+    html = ("<html><body><nav>导航链接甲</nav><p>正文内容乙</p>"
+            "<footer>版权信息丙</footer><script>var a=1;</script></body></html>")
+    doc = _parse_bytes(html.encode("utf-8"), "页面.html")
+    assert "正文内容乙" in doc.text
+    assert "导航链接甲" not in doc.text and "版权信息丙" not in doc.text
+
+
+def test_parse_pdf_encrypted_clear_error():
+    """V5.2：加密 PDF 给出明确错误（不误报"文件损坏"）。"""
+    import fitz
+
+    buf = io.BytesIO()
+    pdf = fitz.open()
+    page = pdf.new_page()
+    page.insert_text((72, 72), "secret content")
+    pdf.save(buf, encryption=fitz.PDF_ENCRYPT_AES_256, owner_pw="owner", user_pw="user")
+    pdf.close()
+    with pytest.raises(ParseError, match="加密"):
+        _parse_bytes(buf.getvalue(), "加密.pdf")
+
+
+def test_parse_pdf_max_pages_truncates():
+    """V5.2：超过 max_pages 的 PDF 截断解析 + text_stats 打标。"""
+    import fitz
+
+    buf = io.BytesIO()
+    pdf = fitz.open()
+    for i in range(4):
+        page = pdf.new_page()
+        page.insert_text((72, 72), f"page content {i}")
+    pdf.save(buf)
+    pdf.close()
+
+    config = load_config().ingestion
+    config.max_pages = 2
+    doc = parse_file(io.BytesIO(buf.getvalue()), "多页.pdf", config=config)
+    stats = doc.metadata["text_stats"]
+    assert stats["truncated_pages"] is True
+    assert stats["page_count"] == 2
+    assert stats["total_pages"] == 4
+
+
+def test_parse_msg_explicit_unsupported_hint():
+    """V5.2：.msg（OLE2）不再报"二进制冒充"，而是明确"请导出为 .eml"。"""
+    with pytest.raises(ParseError, match=".eml"):
+        _parse_bytes(_OLE2_HEADER + b"\x00" * 64, "邮件.msg")
+
+
+def test_parse_msg_non_ole2_rejected_as_mismatch():
+    with pytest.raises(ParseError, match="OLE2"):
+        _parse_bytes(b"not an ole2 file" * 4, "伪装.msg")
+
+
+def test_parse_docx_entity_bomb_rejected():
+    """V5.2：OOXML 部件含 <!ENTITY → 直接拒绝（防实体膨胀/XXE）。"""
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("[Content_Types].xml", "<Types/>")
+        zf.writestr("word/document.xml", "<!DOCTYPE x [<!ENTITY a 'b'>]><x/>")
+    with pytest.raises(ParseError, match="实体"):
+        _parse_bytes(buf.getvalue(), "bomb.docx")
+
+
+def test_parse_xlsx_row_cap_truncates():
+    """V5.2：xlsx 行数上限截断 + truncated 打标（与 csv 同口径）。"""
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["列A", "列B"])
+    for i in range(20):
+        ws.append([f"值{i}", i])
+    buf = io.BytesIO()
+    wb.save(buf)
+
+    config = load_config().ingestion
+    config.tabular_max_rows = 5
+    doc = parse_file(io.BytesIO(buf.getvalue()), "大表.xlsx", config=config)
+    assert "已截断" in doc.text
+    assert doc.metadata["truncated"] is True
+    assert len(doc.text.split("\n")) <= 6
+
+
+def test_pdf_page_text_fallback_when_dict_empty():
+    """V5.2：dict 抽取为空但纯文本抽取有内容时回退（异常排版 PDF 不丢页）。"""
+    from app.adapters.parser.pdf import _extract_page_with_tables
+
+    class _FakePage:
+        number = 0
+
+        def get_text(self, mode="text"):
+            if mode == "dict":
+                return {"blocks": []}
+            return "fallback 正文内容"
+
+        def find_tables(self):
+            return []
+
+    assert _extract_page_with_tables(_FakePage()) == "fallback 正文内容"

@@ -2,11 +2,15 @@
 
 契约（3.9）：`split_chunks(doc: Document) -> list[Chunk]`
 规则：
-1. 以自然段落为切割单元；段落超目标按 `。！？；` 句子切，禁止在词中断（尽量在空白处断）。
-2. 父块 ≤ parent_target_tokens（必要完整）；父块再按 child_target_tokens 切子块。
-   - 父块本身未超子块目标（≤ child 目标 token）时不再产出重复子块。
+1. 以自然段落/行为切割单元聚合成父块，块内以 `\n` 连接（保留行结构）；
+   段落超目标按 `。！？；` 与英文 `.?!`（空白后断句）切句，禁止在词中断（尽量在空白处断）。
+2. 父块 ≤ parent_target_tokens（按 `token_counter` 精确计数，缺省回退 ratio 估算）；
+   父块再按 child_target_tokens 切子块。父块本身未超子块目标时不再产出重复子块。
 3. 父块 parent_id=None；子块 parent_id=父块 chunk_id。
 4. chunk_id = sha256(document_id + ":" + str(order))[:16]（2.1）。
+
+V5.2：token 计量支持注入 `token_counter`（引擎可选能力，如 BGE 真实分词器）——
+不注入时行为与旧版完全一致（ratio 估算）；计量口径变化由索引 DNA `pipeline_version` 兜底。
 """
 from __future__ import annotations
 
@@ -14,6 +18,7 @@ import hashlib
 import json
 import math
 import re
+from typing import Callable
 
 from app.core.domain import Chunk, Document
 from app.core.logging import get_logger
@@ -21,17 +26,36 @@ from app.core.logging import get_logger
 logger = get_logger("chunker")
 
 _SENTENCE_END = "。！？；"
+# 英文断句：句末标点后跟空白才切（避免 3.14 / v2.1 等误切）
+_EN_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
 
 
 def _estimate_tokens(text: str, token_char_ratio: float) -> int:
-    """中文 token 估算：len(text)/token_char_ratio 向上取整（5.2）。"""
+    """中文 token 估算：len(text)/token_char_ratio 向上取整（5.2；回退口径）。"""
     return max(1, math.ceil(len(text) / token_char_ratio))
 
 
+def _make_counter(token_char_ratio: float,
+                  token_counter: Callable[[str], int] | None) -> Callable[[str], int]:
+    """构造计数函数：优先 token_counter（精确），异常/缺失/非法返回时回退 ratio 估算。"""
+    def _count(text: str) -> int:
+        if token_counter is not None:
+            try:
+                value = token_counter(text)
+                if isinstance(value, int) and value > 0:
+                    return value
+            except Exception:  # noqa: BLE001 计数失败不阻塞入库（回退估算）
+                logger.warning("token_counter 调用失败，回退 ratio 估算")
+        return _estimate_tokens(text, token_char_ratio)
+    return _count
+
+
 def _split_sentences(text: str) -> list[str]:
-    """按句末标点切句（保留标点），丢弃空白段。"""
-    parts = re.split(rf"(?<=[{_SENTENCE_END}])", text)
-    return [p.strip() for p in parts if p.strip()]
+    """按句末标点切句（保留标点）：中文标点 + 英文句末（空白后）双口径，丢弃空白段。"""
+    out: list[str] = []
+    for part in re.split(rf"(?<=[{_SENTENCE_END}])", text):
+        out.extend(p.strip() for p in _EN_SENTENCE_SPLIT.split(part) if p.strip())
+    return out
 
 
 def _hard_cut(text: str, limit_chars: int) -> tuple[str, str]:
@@ -43,11 +67,12 @@ def _hard_cut(text: str, limit_chars: int) -> tuple[str, str]:
     return head, tail
 
 
-def _split_overlong(text: str, target_tokens: int, token_char_ratio: float) -> list[str]:
-    """把超目标的单句切成 ≤ target_tokens 的若干段。"""
+def _split_overlong(text: str, target_tokens: int, count: Callable[[str], int],
+                    token_char_ratio: float) -> list[str]:
+    """把超目标的单句切成 ≤ target_tokens 的若干段（按 count 计量，硬切窗口按 ratio 折算）。"""
     limit_chars = max(1, int(target_tokens * token_char_ratio))
     parts: list[str] = []
-    while _estimate_tokens(text, token_char_ratio) > target_tokens and len(text) > limit_chars:
+    while count(text) > target_tokens and len(text) > limit_chars:
         head, text = _hard_cut(text, limit_chars)
         head = head.strip()
         if head:
@@ -58,19 +83,21 @@ def _split_overlong(text: str, target_tokens: int, token_char_ratio: float) -> l
     return parts
 
 
-def _group_to_target(segments: list[str], target_tokens: int, token_char_ratio: float) -> list[str]:
+def _group_to_target(segments: list[str], target_tokens: int,
+                     count: Callable[[str], int],
+                     token_char_ratio: float) -> list[str]:
     """把句子序列按目标 token 数聚合成块（超长单句先硬切，返回文本列表）。"""
     expanded: list[str] = []
     for seg in segments:
-        if _estimate_tokens(seg, token_char_ratio) > target_tokens:
-            expanded.extend(_split_overlong(seg, target_tokens, token_char_ratio))
+        if count(seg) > target_tokens:
+            expanded.extend(_split_overlong(seg, target_tokens, count, token_char_ratio))
         else:
             expanded.append(seg)
     groups: list[str] = []
     current: list[str] = []
     current_tokens = 0
     for seg in expanded:
-        seg_tokens = _estimate_tokens(seg, token_char_ratio)
+        seg_tokens = count(seg)
         if current and current_tokens + seg_tokens > target_tokens:
             groups.append("".join(current))
             current, current_tokens = [], 0
@@ -94,6 +121,12 @@ def _build_line_sections(text: str, sections: list) -> list:
     return line_section
 
 
+def _is_md_table_separator(line: str) -> bool:
+    """Markdown 表格分隔行：|---|:---:|---:|（每格至少 3 个短横线，可带对齐冒号）。"""
+    cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+    return bool(cells) and all(re.fullmatch(r":?-{3,}:?", cell or "") for cell in cells)
+
+
 def _markdown_lines(block: str) -> tuple[str, str, list[str]]:
     """从 [TABLE] 块文本提取 (表头行, 分隔行, 数据行)——均为原始管道行文本。"""
     md_lines = [ln for ln in block.split("\n") if ln.strip().startswith("|")]
@@ -114,6 +147,7 @@ def split_chunks(
     table_aware: dict | None = None,
     hard_boundary: dict | None = None,
     context_prefix: dict | None = None,
+    token_counter: Callable[[str], int] | None = None,
 ) -> list[Chunk]:
     """按父子分块规则产出一组 Chunk（纯函数；配置缺省值与 settings.yaml 一致）。
 
@@ -122,10 +156,12 @@ def split_chunks(
           context_prefix={"enabled", "template", "include_page"}——chunk.text 加
           `{doc_title} > {section}` 上下文前缀（不计切块 token、计 embedding，>64 token 截断），
           并按 doc.metadata["page_spans"] 写 chunk 级 page。
+    V5.2：token_counter（可选）——精确 token 计数；缺省/异常回退 token_char_ratio 估算。
     """
     text = (doc.text or "").strip()
     if not text:
         return []
+    count = _make_counter(token_char_ratio, token_counter)
     chunks: list[Chunk] = []
     order = 0
     ta_enabled = bool(table_aware and table_aware.get("enabled"))
@@ -170,7 +206,7 @@ def split_chunks(
         prefix = cp_template.format(doc_title=doc_title, section=section) if section else doc_title
         if cp_include_page and page:
             prefix = f"{prefix} (p{page})"
-        if _estimate_tokens(prefix, token_char_ratio) > 64:
+        if count(prefix) > 64:
             prefix = prefix[:max(1, int(64 * token_char_ratio))].rstrip()
             logger.warning(
                 "上下文前缀超 64 token 截断（防挤占嵌入模型输入上限）",
@@ -224,10 +260,21 @@ def split_chunks(
                 )
             extra["table_json"] = table_json
         rows = _markdown_lines(block)
-        if _estimate_tokens(block, token_char_ratio) <= parent_target_tokens or len(rows) <= 1:
+        if count(block) <= parent_target_tokens or len(rows) <= 1:
             emit(block, None, section, extra, page=page)
             return
         header_line, sep_line, data_lines = rows
+        if not _is_md_table_separator(sep_line):
+            # 无表头行组（源文档如此）：按行组切，不把前两行当表头重复
+            all_rows = [header_line, sep_line, *data_lines]
+            groups = [all_rows[k:k + max_rows] for k in range(0, len(all_rows), max_rows)]
+            total = len(groups)
+            for gi, group_rows in enumerate(groups, 1):
+                part_extra = dict(extra)
+                if total > 1:
+                    part_extra["table_part"] = f"{gi}/{total}"
+                emit("\n".join(group_rows), None, section, part_extra, page=page)
+            return
         groups: list[list[str]] = [data_lines[i:i + max_rows]
                                    for i in range(0, len(data_lines), max_rows)]
         total = len(groups)
@@ -244,8 +291,16 @@ def split_chunks(
     items: list[tuple[int, str, bool]] = []      # (起始行号, 文本, 是否表格原子)
     if ta_enabled:
         i = 0
+        in_fence = False
         while i < len(raw_lines):
-            if raw_lines[i].strip() == "[TABLE]":
+            stripped = raw_lines[i].strip()
+            # 代码围栏内的管道文本不当作表格（避免误切代码示例）
+            if stripped.startswith("```"):
+                in_fence = not in_fence
+                items.append((i, stripped, False))
+                i += 1
+                continue
+            if stripped == "[TABLE]":
                 j = i
                 while j < len(raw_lines) and raw_lines[j].strip() != "[/TABLE]":
                     j += 1
@@ -254,8 +309,20 @@ def split_chunks(
                     items.append((i, block, True))
                 i = j + 1
                 continue
-            if raw_lines[i].strip():
-                items.append((i, raw_lines[i].strip(), False))
+            # Markdown 管道表格：整体作为表格原子块，与 [TABLE] 同等待遇。
+            # 兼容两种来源：标准表（表头 + 分隔行 + 数据行）与源文档本身缺表头的
+            # “连续管道行组”（如 jvm.md 里的 OOM 对照表），避免行被正文聚合切断。
+            if not in_fence and stripped.startswith("|"):
+                j = i
+                while j + 1 < len(raw_lines) and raw_lines[j + 1].strip().startswith("|"):
+                    j += 1
+                if j > i:          # 至少两行才视为表格行组
+                    block = "\n".join(raw_lines[i:j + 1]).strip()
+                    items.append((i, block, True))
+                    i = j + 1
+                    continue
+            if stripped:
+                items.append((i, stripped, False))
             i += 1
     else:
         items = [(i, line.strip(), False) for i, line in enumerate(raw_lines) if line.strip()]
@@ -269,34 +336,37 @@ def split_chunks(
     for line_no, para, is_table in items:
         if is_table:
             if current:
-                parents.append(("".join(current), current_start, False, -1))
+                parents.append(("\n".join(current), current_start, False, -1))
                 current, current_tokens = [], 0
             parents.append((para, line_no, True, table_ordinal))
             table_ordinal += 1
             continue
-        para_tokens = _estimate_tokens(para, token_char_ratio)
+        para_tokens = count(para)
         # P1-5：标题硬边界——section 归属变更即断块（同 section 连续内容不受影响）
         para_section = section_of(line_no)
         if current and hb_enabled and para_section != current_section:
-            parents.append(("".join(current), current_start, False, -1))
+            parents.append(("\n".join(current), current_start, False, -1))
             current, current_tokens = [], 0
-        if current and current_tokens + para_tokens > parent_target_tokens:
-            parents.append(("".join(current), current_start, False, -1))
+        # V5.2：加入下一段后的 token（含 1 个换行分隔符）不得超父块目标
+        add_tokens = para_tokens + (1 if current else 0)
+        if current and current_tokens + add_tokens > parent_target_tokens:
+            parents.append(("\n".join(current), current_start, False, -1))
             current, current_tokens = [], 0
         if para_tokens > parent_target_tokens:
             if current:
-                parents.append(("".join(current), current_start, False, -1))
+                parents.append(("\n".join(current), current_start, False, -1))
                 current, current_tokens = [], 0
-            for group in _group_to_target(_split_sentences(para), parent_target_tokens, token_char_ratio):
+            for group in _group_to_target(_split_sentences(para), parent_target_tokens,
+                                          count, token_char_ratio):
                 parents.append((group, line_no, False, -1))
         else:
             if not current:
                 current_start = line_no
                 current_section = para_section
             current.append(para)
-            current_tokens += para_tokens
+            current_tokens += para_tokens + (1 if len(current) > 1 else 0)
     if current:
-        parents.append(("".join(current), current_start, False, -1))
+        parents.append(("\n".join(current), current_start, False, -1))
 
     # 2) 按文档顺序产出：正文父块（+子块）与表格块统一编号（P1-4 顺序保序）
     for parent_text, start_line, is_table, ordinal in parents:
@@ -309,9 +379,10 @@ def split_chunks(
             emit_table(parent_text, start_line, ordinal)
             continue
         parent_chunk_id = emit(parent_text, None, section, page=page)
-        if _estimate_tokens(parent_text, token_char_ratio) <= child_target_tokens:
+        if count(parent_text) <= child_target_tokens:
             continue  # 父块本身已在子块目标内，不产出重复子块
-        for group in _group_to_target(_split_sentences(parent_text), child_target_tokens, token_char_ratio):
+        for group in _group_to_target(_split_sentences(parent_text), child_target_tokens,
+                                      count, token_char_ratio):
             emit(group, parent_chunk_id, section, page=page)
 
     return chunks

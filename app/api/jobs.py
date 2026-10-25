@@ -32,4 +32,5 @@ def get_job(job_id: str, request: Request,
         "document_id": job.document_id,
         "chunk_count": job.chunk_count,
         "error_code": job.error_code,
+        "replaced_document_id": job.replaced_document_id,   # V5.2：增量更新替换的旧版本
     })

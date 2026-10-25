@@ -8,6 +8,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "desktop": "electron .",
+    "test:unit": "node --test src/api/*.test.js src/utils/*.test.js",
     "test:desktop": "node --test electron/*.test.cjs"
   },
   "dependencies": {

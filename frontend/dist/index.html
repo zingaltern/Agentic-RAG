@@ -2,10 +2,27 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="description" content="Agentic RAG 智能知识库：反思式检索、逐句引用与多库隔离的本地化问答系统。" />
+    <meta name="theme-color" content="#f5f5f7" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <!-- 内联 SVG favicon：免额外请求，也避免 /favicon.ico 404 噪音 -->
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%23f5632f'/%3E%3Cg fill='none' stroke='white' stroke-width='4' stroke-linecap='round'%3E%3Cpath d='M18 22h28M18 32h20M18 42h24'/%3E%3C/g%3E%3C/svg%3E"
+    />
     <title>Agentic RAG 智能知识库</title>
-    <script type="module" crossorigin src="/assets/index-BhpKgNFM.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-DXUnBtZN.css">
+    <!-- 首帧主题：外部脚本而非内联 —— FastAPI CSP 为 script-src 'self'，内联会被拦截。
+         必须保持 parser-blocking（不加 defer/async），且在 module 之前执行。 -->
+    <script src="/theme-init.js"></script>
+    <script type="module" crossorigin src="/assets/index-CoqEbw7y.js"></script>
+    <link rel="modulepreload" crossorigin href="/assets/vendor-vue-Jo2b_ax-.js">
+    <link rel="modulepreload" crossorigin href="/assets/vendor-wXbKU0em.js">
+    <link rel="modulepreload" crossorigin href="/assets/vendor-element-DDDa1jHG.js">
+    <link rel="stylesheet" crossorigin href="/assets/vendor-element-v9bpaD_8.css">
+    <link rel="stylesheet" crossorigin href="/assets/index-DqsQ4Y77.css">
   </head>
   <body>
     <div id="app"></div>

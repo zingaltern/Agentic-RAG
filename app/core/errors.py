@@ -67,6 +67,10 @@ class LLMUnavailableError(AppError):
     message = "LLM 调用失败或超时"
 
 
+class LLMToolsUnsupportedError(LLMUnavailableError):
+    """Provider 明确不支持 tools/function 参数（可安全降级 JSON 动作）。"""
+
+
 class EmbeddingError(AppError):
     """向量化失败。"""
 
@@ -104,6 +108,13 @@ class ParseError(AppError):
 
     code = 30003
     message = "文档解析失败"
+
+
+class EmptyDocumentError(AppError):
+    """未提取到有效文本（V5.2）：解析/清洗后 0 块，empty_result=reject 时抛出（30007）。"""
+
+    code = 30007
+    message = "未提取到有效文本（空文档/扫描件无文本层/清洗后为空）"
 
 
 class ReflectionLimitError(AppError):
@@ -160,3 +171,42 @@ class InternalError(AppError):
 
     code = 50001
     message = "未知内部错误"
+
+
+# ---------------------------------------------------------------------------
+# P-D：Agent 内部异常（不直接对外暴露；编排层负责回退 reflect 或映射到既有 code）
+# ---------------------------------------------------------------------------
+
+
+class AgentInternalError(Exception):
+    """Agent 运行期内部错误基类；`reason` 对应 TerminationReason。"""
+
+    reason: str = "error"
+
+    def __init__(self, message: str = "Agent 执行失败", reason: str | None = None):
+        self.reason = reason or self.reason
+        super().__init__(message)
+
+
+class AgentBudgetExceeded(AgentInternalError):
+    """步数/工具/LLM/时间/上下文预算耗尽。"""
+
+    reason = "budget_steps"
+
+
+class AgentProtocolError(AgentInternalError):
+    """LLM/工具协议错误（非法 JSON、未知工具、参数不合法等）。"""
+
+    reason = "protocol_error"
+
+
+class AgentToolError(AgentInternalError):
+    """工具不可用/执行失败（可回退或换工具）。"""
+
+    reason = "tool_error"
+
+
+class AgentPlanError(AgentInternalError):
+    """规划失败（JSON 非法/schema 校验失败/计划为空）。"""
+
+    reason = "plan_invalid"

@@ -57,7 +57,7 @@ from app.adapters.parser.registry import (
 )
 from app.adapters.parser.security import _check_magic, _check_zip_bomb
 from app.adapters.parser.tabular import _parse_csv, _parse_tsv
-from app.adapters.parser.text import _parse_eml, _parse_html, _parse_text
+from app.adapters.parser.text import _parse_eml, _parse_html, _parse_msg, _parse_text
 
 __all__ = [
     "CODE_EXTENSIONS", "CODE_LANGUAGES", "LEGACY_OFFICE_EXTENSIONS",
@@ -73,7 +73,9 @@ _register_parser(ParserSpec("openpyxl", (".xlsx",), _parse_xlsx))
 _register_parser(ParserSpec("python-pptx", (".pptx",), _parse_pptx))
 _register_parser(ParserSpec("native_text", (".md", ".txt"), _parse_text))
 _register_parser(ParserSpec("html_std", (".html", ".htm"), _parse_html))
-_register_parser(ParserSpec("email_std", (".eml", ".msg"), _parse_eml))
+_register_parser(ParserSpec("email_std", (".eml",), _parse_eml))
+# V5.2：.msg（Outlook OLE2）不解析——注册为明确报错实现（白名单保留以给出导出 .eml 指引）
+_register_parser(ParserSpec("email_msg_unsupported", (".msg",), _parse_msg))
 # 16.4：表格类文本（与 xlsx/xls 同口径）
 _register_parser(ParserSpec("csv_std", (".csv",), _parse_csv))
 _register_parser(ParserSpec("tsv_std", (".tsv",), _parse_tsv))

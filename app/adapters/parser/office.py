@@ -73,24 +73,41 @@ def _parse_docx(raw: bytes, config: object | None = None) -> tuple[str, dict]:
         metadata["author"] = None
     return "\n".join(lines), metadata
 
+def _tabular_limit(config: object | None) -> int:
+    """V5.2：表格类行数上限（xlsx/xls/csv/tsv 统一口径，缺省 200000）。"""
+    return int(getattr(config, "tabular_max_rows", 200_000)) if config is not None else 200_000
+
+
 def _parse_xlsx(raw: bytes, config: object | None = None) -> tuple[str, dict]:
-    """Excel：每 sheet 每行判为一段文本；metadata 记录 sheet 名。"""
+    """Excel：每 sheet 每行判为一段文本；metadata 记录 sheet 名；V5.2：行数上限截断。"""
     from openpyxl import load_workbook
 
     try:
         wb = load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
     except Exception as exc:
         raise ParseError(f"Excel 解析失败（文件损坏或非 xlsx）: {exc}") from exc
+    limit = _tabular_limit(config)
     try:
         lines: list[str] = []
         sheets: list[str] = []
+        truncated = False
         for ws in wb.worksheets:
             sheets.append(ws.title)
+            if truncated:
+                break
             for row in ws.iter_rows(values_only=True):
+                if len(lines) >= limit:
+                    truncated = True
+                    break
                 vals = [str(v).strip() for v in row if v is not None and str(v).strip()]
                 if vals:
                     lines.append("\t".join(vals))
-        return "\n".join(lines), {"page": None, "author": None, "sheets": sheets}
+        if truncated:
+            lines.append(f"…（已截断，共 {limit} 行）")
+        meta: dict = {"page": None, "author": None, "sheets": sheets}
+        if truncated:
+            meta["truncated"] = True
+        return "\n".join(lines), meta
     finally:
         wb.close()
 
@@ -124,23 +141,35 @@ def _cell_text(value: object) -> str:
     return str(value).strip()
 
 def _parse_xls(raw: bytes, config: object | None = None) -> tuple[str, dict]:
-    """旧版 Excel .xls（16.2，xlrd）：逐 sheet 逐行取值，与 xlsx 同款「制表符连接」文本。"""
+    """旧版 Excel .xls（16.2，xlrd）：逐 sheet 逐行取值，与 xlsx 同款「制表符连接」文本；V5.2 行数上限。"""
     import xlrd
 
     try:
         book = xlrd.open_workbook(file_contents=raw)
     except Exception as exc:
         raise ParseError(f"Excel(.xls) 解析失败（文件损坏或非 xls）: {exc}") from exc
+    limit = _tabular_limit(config)
     lines: list[str] = []
     sheets: list[str] = []
+    truncated = False
     for sheet in book.sheets():
         sheets.append(sheet.name)
+        if truncated:
+            break
         for row_index in range(sheet.nrows):
+            if len(lines) >= limit:
+                truncated = True
+                break
             vals = [_cell_text(sheet.cell_value(row_index, col)) for col in range(sheet.ncols)]
             vals = [v for v in vals if v]
             if vals:
                 lines.append("\t".join(vals))
-    return "\n".join(lines), {"page": None, "author": None, "sheets": sheets}
+    if truncated:
+        lines.append(f"…（已截断，共 {limit} 行）")
+    meta: dict = {"page": None, "author": None, "sheets": sheets}
+    if truncated:
+        meta["truncated"] = True
+    return "\n".join(lines), meta
 
 def _parse_legacy_office(raw: bytes, source_ext: str, target_ext: str,
                          config: object | None) -> tuple[str, dict]:

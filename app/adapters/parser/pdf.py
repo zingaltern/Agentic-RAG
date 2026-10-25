@@ -17,12 +17,17 @@ def _normalize_pdf_date(raw: str | None) -> str | None:
     m = re.match(r"D:(\d{4})(\d{2})(\d{2})", raw)
     return f"{m.group(1)}-{m.group(2)}-{m.group(3)}" if m else None
 
-def _pdf_body_size(pdf) -> float:
-    """PDF 主体字号估计：全部 span 字号的中位数（标题字号显著大于主体）。"""
+def _pdf_body_size(pdf, max_pages: int = 2000) -> float:
+    """PDF 主体字号估计：全部 span 字号的中位数（标题字号显著大于主体）。
+
+    V5.2：扫描页数受 max_pages 限制（超大 PDF 不因字号统计而全量遍历）。
+    """
     import statistics
 
     sizes: list[float] = []
-    for page in pdf:
+    for index, page in enumerate(pdf):
+        if index >= max_pages:
+            break
         for block in page.get_text("dict").get("blocks", []):
             if block.get("type") != 0:
                 continue
@@ -55,18 +60,29 @@ def _parse_pdf(raw: bytes, config: object | None = None) -> tuple[str, dict]:
     except Exception as exc:
         raise ParseError(f"PDF 解析失败（文件损坏或非 PDF）: {exc}") from exc
     try:
-        body_size = _pdf_body_size(pdf)
+        # V5.2：加密 PDF 明确报错（不误报"文件损坏"）
+        if getattr(pdf, "needs_pass", False) or getattr(pdf, "is_encrypted", False):
+            raise ParseError("PDF 已加密（需要口令打开），请解除密码后上传")
+        # V5.2：页数上限（超大 PDF 防拖垮解析；超限截断 + 打标）
+        max_pages = int(getattr(config, "max_pages", 2000)) if config is not None else 2000
+        body_size = _pdf_body_size(pdf, max_pages)
         parts: list[str] = []
         sections: list[tuple[str, int]] = []
         global_line = 0
         # P0-1 探针：逐页统计（total_chars / pages_with_text），供解析质量门禁识别扫描件
         total_chars = 0
         pages_with_text = 0
+        parsed_pages = 0
+        truncated_pages = False
         # P1-4：按阅读顺序登记全文档表格（index 在汇合后统一补齐）
         all_tables: list[dict] = []
         # P1-5：页码行号区间 [[start_line, end_line, page], ...]，chunk 按段落起始行查表
         page_spans: list[list[int]] = []
         for page in pdf:
+            if parsed_pages >= max_pages:
+                truncated_pages = True
+                break
+            parsed_pages += 1
             page_start = global_line
             page_text = _extract_page_with_tables(page, all_tables)
             page_lines = page_text.split("\n")
@@ -82,20 +98,28 @@ def _parse_pdf(raw: bytes, config: object | None = None) -> tuple[str, dict]:
             total_chars += len(page_text)
             if page_text.strip():
                 pages_with_text += 1
+        if truncated_pages:
+            logger.warning(
+                "PDF 页数超过上限（%d），已截断后 %d 页继续入库",
+                max_pages, parsed_pages,
+                extra={"extra_fields": {"max_pages": max_pages, "parsed_pages": parsed_pages}},
+            )
         metadata = {
             # 单页文档给出页码；多页文档页码按段归属留待 W2 细化（chunk 级 page 标注）
-            "page": 1 if pdf.page_count == 1 else None,
+            "page": 1 if parsed_pages == 1 else None,
             "author": (pdf.metadata or {}).get("author") or None,
             # P0-1：解析探针（garbled_ratio 由 _build_document 统一补齐）
             "text_stats": {
                 "total_chars": total_chars,
-                "page_count": pdf.page_count,
+                "page_count": parsed_pages,               # 实际解析页数（截断时为解析到的页数）
                 "pages_with_text": pages_with_text,
+                "total_pages": pdf.page_count,
+                **({"truncated_pages": True} if truncated_pages else {}),
             },
         }
         if sections:
             metadata["sections"] = sections   # T5：字号启发式章节标题
-        if pdf.page_count > 1 and page_spans:
+        if (truncated_pages or pdf.page_count > 1) and page_spans:
             metadata["page_spans"] = page_spans   # P1-5：多页 PDF 页码行号区间（单页已由 page=1 覆盖）
         if all_tables:
             for i, t in enumerate(all_tables):
@@ -140,8 +164,12 @@ def _extract_page_with_tables(page, tables_out: list | None = None) -> str:
         # 表格抽取失败不阻断正文，但必须可观测（曾因宽泛 except 吞掉 NameError 导致表格静默丢失）
         logger.warning("PDF 表格抽取失败（不影响正文）：%s", exc)
     blocks.sort(key=lambda b: b[0])
+    page_text = "\n".join(text for _, text in blocks)
+    if not page_text.strip():
+        # V5.2：dict 抽取为空（异常排版 PDF）→ 回退纯文本抽取，避免整页丢失
+        page_text = (page.get_text("text") or "").strip()
     if tables_out is not None:
         for _y, rows in sorted(raw_tables, key=lambda t: t[0]):
             tables_out.append({"header": rows[0], "rows": rows[1:],
                                "page": getattr(page, "number", None)})
-    return "\n".join(text for _, text in blocks)
+    return page_text

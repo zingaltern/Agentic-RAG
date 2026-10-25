@@ -94,3 +94,64 @@ def test_filters_apply_to_ingested_docs(deps):
     assert results == [], "不存在的 kind 过滤应返回空（两路都过滤）"
     results = deps.retriever.retrieve("年假", k=5, filters={"metadata": {"source": "员工手册.md"}})
     assert results and all(r.chunk.metadata["source"] == "员工手册.md" for r in results)
+
+
+# -- V5.2：分块精确计量接线 ---------------------------------------------------------
+
+LONG_TEXT = ("\n".join(f"第{i}段。" + "内容说明" * 40 for i in range(60))).encode("utf-8")
+
+
+class _CountingEmbedding(StubEmbedding):
+    """提供 count_tokens（1 字符=1 token 的确定性计数）的桩嵌入。"""
+
+    def __init__(self, dimension: int = 512):
+        super().__init__(dimension=dimension)
+        self.calls = 0
+
+    def count_tokens(self, text: str) -> int | None:
+        self.calls += 1
+        return len(text)
+
+
+def _make_deps(tmp_path, isolated_stores, *, measure: str, embedding):
+    """独立存储装配（避免同一 raw 命中幂等表导致第二次装配跳过入库）。"""
+    from app.services.documents_store import DocumentsStore
+    from app.services.jobs_store import JobStore
+    from app.services.kb_store import KbStore
+    from app.services.user_store import UserStore
+
+    tag = f"{measure}-{id(embedding)}"
+    config = load_config()
+    config.vector_store.persist_dir = str(tmp_path / f"chroma-{tag}")
+    config.documents.persist_file = str(tmp_path / f"documents-{tag}.json")
+    config.kbs.persist_file = str(tmp_path / f"kb-{tag}.json")
+    config.chunker.measure = measure
+    return wire(config, embedding=embedding,
+                kbs=KbStore(persist_file=str(tmp_path / f"kb-{tag}.json")),
+                users=UserStore(persist_file=str(tmp_path / f"users-{tag}.json")),
+                documents=DocumentsStore(persist_file=str(tmp_path / f"documents-{tag}.json")),
+                jobs=JobStore(persist_file=str(tmp_path / f"jobs-{tag}.json")))
+
+
+def test_measure_auto_uses_engine_token_counter(tmp_path, isolated_stores):
+    """V5.2：measure=auto 且引擎有 count_tokens → 精确计量（父块数多于 ratio 口径）。"""
+    exact_emb = _CountingEmbedding()
+    deps_exact = _make_deps(tmp_path, isolated_stores, measure="auto", embedding=exact_emb)
+    job_exact = deps_exact.pipeline.ingest(LONG_TEXT, "长文.md")
+    assert job_exact.status == "success" and job_exact.chunk_count > 0
+    assert exact_emb.calls > 0, "引擎计数器必须被调用"
+
+    deps_ratio = _make_deps(tmp_path, isolated_stores, measure="ratio",
+                            embedding=StubEmbedding(dimension=512))
+    job_ratio = deps_ratio.pipeline.ingest(LONG_TEXT, "长文.md")
+    assert job_ratio.status == "success"
+    assert job_exact.chunk_count > job_ratio.chunk_count, \
+        "1 字符/token 的中文文本：精确口径必须切得更碎（防截断）"
+
+
+def test_measure_ratio_ignores_engine_counter(tmp_path, isolated_stores):
+    """V5.2：measure=ratio 强制旧口径（引擎计数器不被调用）。"""
+    emb = _CountingEmbedding()
+    deps = _make_deps(tmp_path, isolated_stores, measure="ratio", embedding=emb)
+    job = deps.pipeline.ingest(LONG_TEXT, "长文.md")
+    assert job.status == "success" and emb.calls == 0

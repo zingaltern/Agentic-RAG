@@ -193,11 +193,18 @@ def create_app(settings_path: str = DEFAULT_SETTINGS_PATH,
 
         @app.middleware("http")
         async def no_cache_static(request: Request, call_next) -> Any:
-            """SPA 静态资源禁用缓存：vite rebuild 后桌面 Electron 拖缓存旧页面。"""
+            """SPA 静态资源禁用缓存：vite rebuild 后桌面 Electron 拖缓存旧页面。
+
+            除根路径外，`/documents`、`/kbs`、`/settings` 等 history 路由同样回退到
+            index.html；若这些响应被浏览器缓存，重新构建后直接刷新子路由会继续引用
+            已删除的旧 chunk，表现为整页空白。因此所有 HTML 响应一律 no-store。
+            """
             resp = await call_next(request)
             if not resp.headers.get("Cache-Control"):
                 path = request.url.path
-                if path == "" or path == "/" or path.startswith("/assets/") or path.startswith("/ui"):
+                content_type = (resp.headers.get("content-type") or "").lower()
+                if (path in ("", "/") or path.startswith("/assets/") or path.startswith("/ui")
+                        or content_type.startswith("text/html")):
                     resp.headers["Cache-Control"] = "no-store"
             return resp
 
