@@ -27,8 +27,8 @@ chunker:                           # 父子分块（DEVELOPMENT.md 5.2）
   child_target_tokens: 128
   token_char_ratio: 1.8            # 仅 ratio 口径/回退使用（中文约 1.0 字符/token）
   measure: auto                    # V5.2：auto=优先引擎 count_tokens（精确）；ratio=强制估算
-  table_aware:                     # P1-4：表格原子块（默认关；[TABLE] 行按普通文本聚合）
-    enabled: false
+  table_aware:                     # P1-4：表格原子块（整表/行组携带完整表头；新入库生效）
+    enabled: true
     max_rows_per_chunk: 30         # 超限大表按行组切，每组行数上限（强制带表头）
     json_max_bytes: 4096           # table_json 字节上限（超限截断+warning）
   hard_boundary:                   # P1-5：标题硬边界（默认关；section 变更即断块）
