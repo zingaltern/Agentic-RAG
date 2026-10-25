@@ -82,10 +82,13 @@ def test_parse_pdf_table_first_class():
     pdf.close()
 
     doc = _parse_bytes(buf.getvalue(), "路线图.pdf")
-    assert "[TABLE]" in doc.text and "| Product | Price |" in doc.text, "PDF 表格须 Markdown 化进正文"
-    assert doc.metadata["tables"], "表格须按阅读顺序登记 metadata.tables"
-    assert doc.metadata["tables"][0]["header"] == ["Product", "Price"]
-    assert doc.metadata["tables"][0]["rows"] == [["X2", "3999"]]
+    assert "[TABLE]" in doc.text, "PDF 表格须 Markdown 化进正文"
+    tables = doc.metadata.get("tables") or []
+    assert tables, "表格须按阅读顺序登记 metadata.tables"
+    # 列切分随 pymupdf 版本变化（1.x/2.x 对同一框线网格的空列判定不同），
+    # 这里只锁“内容按阅读顺序完整落位”，不锁空列数量。
+    cells = [c for row in [tables[0]["header"], *tables[0]["rows"]] for c in row if c]
+    assert cells == ["Product", "Price", "X2", "3999"], f"表格单元格解析异常: {cells}"
 
 
 def test_parse_docx():
