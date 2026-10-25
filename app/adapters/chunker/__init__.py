@@ -264,6 +264,17 @@ def split_chunks(
             emit(block, None, section, extra, page=page)
             return
         header_line, sep_line, data_lines = rows
+        if not _is_md_table_separator(sep_line):
+            # 无表头行组（源文档如此）：按行组切，不把前两行当表头重复
+            all_rows = [header_line, sep_line, *data_lines]
+            groups = [all_rows[k:k + max_rows] for k in range(0, len(all_rows), max_rows)]
+            total = len(groups)
+            for gi, group_rows in enumerate(groups, 1):
+                part_extra = dict(extra)
+                if total > 1:
+                    part_extra["table_part"] = f"{gi}/{total}"
+                emit("\n".join(group_rows), None, section, part_extra, page=page)
+            return
         groups: list[list[str]] = [data_lines[i:i + max_rows]
                                    for i in range(0, len(data_lines), max_rows)]
         total = len(groups)
@@ -298,18 +309,18 @@ def split_chunks(
                     items.append((i, block, True))
                 i = j + 1
                 continue
-            # Markdown 管道表格（表头 + 分隔行 + 数据行）：整体作为表格原子块，
-            # 与 [TABLE] 同等待遇——解析器未产出 tables 元数据时（如 .md）也能保住表头。
-            if (not in_fence and stripped.startswith("|")
-                    and i + 1 < len(raw_lines)
-                    and _is_md_table_separator(raw_lines[i + 1])):
-                j = i + 1
+            # Markdown 管道表格：整体作为表格原子块，与 [TABLE] 同等待遇。
+            # 兼容两种来源：标准表（表头 + 分隔行 + 数据行）与源文档本身缺表头的
+            # “连续管道行组”（如 jvm.md 里的 OOM 对照表），避免行被正文聚合切断。
+            if not in_fence and stripped.startswith("|"):
+                j = i
                 while j + 1 < len(raw_lines) and raw_lines[j + 1].strip().startswith("|"):
                     j += 1
-                block = "\n".join(raw_lines[i:j + 1]).strip()
-                items.append((i, block, True))
-                i = j + 1
-                continue
+                if j > i:          # 至少两行才视为表格行组
+                    block = "\n".join(raw_lines[i:j + 1]).strip()
+                    items.append((i, block, True))
+                    i = j + 1
+                    continue
             if stripped:
                 items.append((i, stripped, False))
             i += 1

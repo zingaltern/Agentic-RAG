@@ -181,3 +181,32 @@ def test_md_pipe_table_inside_code_fence_not_split():
     chunks = split_chunks(doc, table_aware={"enabled": True, "max_rows_per_chunk": 30,
                                             "json_max_bytes": 4096})
     assert not any(c.metadata.get("chunk_type") == "table" for c in chunks)
+
+
+def test_md_pipe_rows_without_header_stay_atomic():
+    """源文档本身缺表头/分隔行（jvm.md 的 OOM 对照表）：连续管道行仍整体成块，不被正文切断。"""
+    text = ("### 运行时数据区\n- 堆 Heap\n"
+            "| 对象头组成 | Mark Word + Klass Pointer |\n"
+            "| 堆OOM | Java heap space |\n"
+            "| 栈OOM | StackOverflowError |\n"
+            "| Metaspace OOM | 动态生成类过多 |\n"
+            "## 二、类文件与类加载\n")
+    doc = _doc(text)
+    chunks = split_chunks(doc, table_aware={"enabled": True, "max_rows_per_chunk": 30,
+                                            "json_max_bytes": 4096})
+    table = next(c for c in chunks if c.metadata.get("chunk_type") == "table")
+    assert "对象头组成" in table.text and "Metaspace OOM" in table.text
+    assert table.text.count("OOM") >= 3
+
+
+def test_md_headerless_long_rows_split_without_fake_header():
+    rows = "\n".join(f"| 行{i} | {'内容' * 30} |" for i in range(10))
+    doc = _doc(rows)
+    chunks = split_chunks(doc, parent_target_tokens=60, table_aware={"enabled": True,
+                                                                     "max_rows_per_chunk": 3,
+                                                                     "json_max_bytes": 4096})
+    tables = [c for c in chunks if c.metadata.get("chunk_type") == "table"]
+    assert len(tables) >= 2
+    joined = "\n".join(c.text for c in tables)
+    assert all(f"| 行{i} |" in joined for i in range(10)), "行数据不得丢失"
+    assert joined.count("| 行0 |") == 1, "首行只能出现一次（不得当表头复制）"
