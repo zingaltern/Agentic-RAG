@@ -42,6 +42,7 @@ const kindFilter = ref('all')
 const sortBy = ref('recent')
 const page = ref(1)
 const pageSize = ref(25)
+const stats = ref({ chunks: 0, latest: 0 })
 const selection = ref([])
 
 const queue = ref([])          // 等待上传的 { file, kbId }（kbId 为入队时快照）
@@ -80,7 +81,16 @@ async function refreshDocs({ silent = false } = {}) {
   selection.value = []
   const kbId = store.kbId
   try {
-    const res = await api(`/api/documents?page=1&size=500&kb_id=${encodeURIComponent(kbId)}`, { silent: true })
+    const params = new URLSearchParams({
+      page: String(page.value),
+      size: String(pageSize.value),
+      kb_id: kbId,
+      sort: sortBy.value,
+    })
+    const keyword = query.value.trim()
+    if (keyword) params.set('q', keyword)
+    if (kindFilter.value !== 'all') params.set('kind', kindFilter.value)
+    const res = await api(`/api/documents?${params.toString()}`, { silent: true })
     if (kbId !== store.kbId) return   // 期间切了库：丢弃过期响应
     if (res.code !== 0) {
       // 失败保留上一次数据：清空列表比旧数据更容易让人误判“文档丢了”
@@ -96,7 +106,13 @@ async function refreshDocs({ silent = false } = {}) {
       updatedRelative: d.updated_at ? formatRelative(d.updated_at) : '',
       kind: fileKind(d.filename),
     }))
-    total.value = res.data.total || files.value.length
+    total.value = Number(res.data.total) || 0
+    stats.value = res.data.stats || { chunks: 0, latest: 0 }
+    // 删除末页最后一条后回退一页，避免停留在空页
+    if (!files.value.length && page.value > 1) {
+      page.value -= 1
+      await refreshDocs({ silent: true })
+    }
   } finally {
     loading.value = false
   }
@@ -110,37 +126,30 @@ function onKbChange() {
   refreshDocs()
 }
 
-const kindOptions = computed(() => {
-  const set = new Set(files.value.map((f) => f.kind))
-  const label = { pdf: 'PDF', doc: 'Word', sheet: '表格', slide: '演示', md: 'Markdown', code: '代码', config: '配置', text: '文本', image: '图片' }
-  return [...set].map((k) => ({ value: k, label: label[k] || k }))
-})
+const kindOptions = [
+  { value: 'pdf', label: 'PDF' },
+  { value: 'doc', label: 'Word' },
+  { value: 'sheet', label: '表格' },
+  { value: 'slide', label: '演示' },
+  { value: 'md', label: 'Markdown' },
+  { value: 'code', label: '代码' },
+  { value: 'config', label: '配置' },
+  { value: 'text', label: '文本' },
+  { value: 'image', label: '图片' },
+]
 
-const filtered = computed(() => {
-  const q = query.value.trim().toLowerCase()
-  let list = files.value
-  if (q) list = list.filter((f) => (f.filename || '').toLowerCase().includes(q))
-  if (kindFilter.value !== 'all') list = list.filter((f) => f.kind === kindFilter.value)
-  const sorted = [...list]
-  if (sortBy.value === 'name') sorted.sort((a, b) => String(a.filename).localeCompare(String(b.filename), 'zh-CN'))
-  else if (sortBy.value === 'chunks') sorted.sort((a, b) => toNumber(b.chunk_count) - toNumber(a.chunk_count))
-  else sorted.sort((a, b) => toNumber(b.created_at) - toNumber(a.created_at))
-  return sorted
-})
-
-const paged = computed(() => {
-  const start = (page.value - 1) * pageSize.value
-  return filtered.value.slice(start, start + pageSize.value)
-})
-
-const stats = computed(() => {
-  const chunks = files.value.reduce((sum, f) => sum + toNumber(f.chunk_count), 0)
-  const latest = files.value.reduce((max, f) => Math.max(max, toNumber(f.created_at)), 0)
-  return { chunks, latest }
-})
-
+let searchTimer = null
+/** 搜索防抖：输入 250ms 后再请求，避免逐字符打服务端。 */
 function onSearch() {
   page.value = 1
+  if (searchTimer) clearTimeout(searchTimer)
+  searchTimer = setTimeout(() => refreshDocs({ silent: true }), 250)
+}
+
+/** 类型/排序变化：回到第一页并重新请求（筛选在服务端完成）。 */
+function onFilterChange() {
+  page.value = 1
+  refreshDocs()
 }
 
 /* ---------------- 上传（串行队列 + 可取消） ---------------- */
@@ -560,11 +569,11 @@ function kindStyle(kind) {
           :prefix-icon="Search"
           @input="onSearch"
         />
-        <el-select v-model="kindFilter" class="filter" placeholder="类型" @change="page = 1">
+        <el-select v-model="kindFilter" class="filter" placeholder="类型" @change="onFilterChange">
           <el-option label="全部类型" value="all" />
           <el-option v-for="k in kindOptions" :key="k.value" :label="k.label" :value="k.value" />
         </el-select>
-        <el-select v-model="sortBy" class="filter" placeholder="排序" @change="page = 1">
+        <el-select v-model="sortBy" class="filter" placeholder="排序" @change="onFilterChange">
           <el-option label="最新优先" value="recent" />
           <el-option label="名称 A→Z" value="name" />
           <el-option label="片段数最多" value="chunks" />
@@ -579,7 +588,7 @@ function kindStyle(kind) {
       <div class="card card--flush table-card">
         <el-table
           v-loading="loading"
-          :data="paged"
+          :data="files"
           row-key="document_id"
           size="default"
           @selection-change="(rows) => (selection = rows)"
@@ -638,7 +647,7 @@ function kindStyle(kind) {
         </el-table>
 
         <EmptyState
-          v-if="!paged.length && !loading"
+          v-if="!files.length && !loading"
           :icon="query || kindFilter !== 'all' ? Search : Document"
           :title="query || kindFilter !== 'all' ? '没有匹配的文档' : '这个知识库还没有文档'"
           :description="query || kindFilter !== 'all'
@@ -659,18 +668,16 @@ function kindStyle(kind) {
           </template>
         </EmptyState>
 
-        <p v-if="total > files.length" class="muted limit-hint">
-          已加载前 {{ files.length }} / {{ total }} 份文档，可用搜索缩小范围。
-        </p>
-        <div v-if="filtered.length > pageSize" class="table-foot">
-          <span class="muted">共 {{ filtered.length }} 条 · 第 {{ page }} / {{ Math.ceil(filtered.length / pageSize) }} 页</span>
+        <div v-if="total > pageSize" class="table-foot">
+          <span class="muted">共 {{ total }} 条 · 第 {{ page }} / {{ Math.ceil(total / pageSize) }} 页</span>
           <el-pagination
             v-model:current-page="page"
             :page-size="pageSize"
-            :total="filtered.length"
+            :total="total"
             layout="prev, pager, next"
             background
             size="small"
+            @current-change="refreshDocs()"
           />
         </div>
       </div>

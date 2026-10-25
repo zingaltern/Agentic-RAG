@@ -168,6 +168,24 @@ html[data-theme="dark"] {
   --el-color-error: var(--danger);
   --el-color-info: var(--info);
   --el-color-info-light-9: var(--info-soft);
+  /* 暗色语义色：Element Plus 自带的 light-3/5/7/8 是按纯黑底调的高饱和值，
+     放在深色卡片/弹层上偏亮刺眼；这里按与表面色混合的比例重算（与 EP 公式同口径）。 */
+  --el-color-success-light-3: #2e4a23;
+  --el-color-success-light-5: #3f6c29;
+  --el-color-success-light-7: #4f8e30;
+  --el-color-success-light-8: #57a033;
+  --el-color-warning-light-3: #544023;
+  --el-color-warning-light-5: #7e5c2a;
+  --el-color-warning-light-7: #a87831;
+  --el-color-warning-light-8: #bc8635;
+  --el-color-danger-light-3: #593031;
+  --el-color-danger-light-5: #864142;
+  --el-color-danger-light-7: #b25253;
+  --el-color-danger-light-8: #c85b5b;
+  --el-color-info-light-3: #3b3c3f;
+  --el-color-info-light-5: #535559;
+  --el-color-info-light-7: #6b6e72;
+  --el-color-info-light-8: #787a7f;
   /* 填充/阴影同样会被 html.dark 反超，一并映射到设计 token */
   --el-fill-color: var(--fill-2);
   --el-fill-color-light: var(--fill-1);
@@ -189,6 +207,23 @@ html[data-theme="dark"] {
     --el-color-primary-light-5: color-mix(in srgb, var(--accent) 52%, var(--surface));
     --el-color-primary-light-7: color-mix(in srgb, var(--accent) 32%, var(--surface));
     --el-color-primary-light-8: color-mix(in srgb, var(--accent) 22%, var(--surface));
+    /* 语义色同口径：跟随主题表面色，避免固定值在纯黑/深灰下不协调 */
+    --el-color-success-light-3: color-mix(in srgb, var(--success) 30%, var(--surface));
+    --el-color-success-light-5: color-mix(in srgb, var(--success) 50%, var(--surface));
+    --el-color-success-light-7: color-mix(in srgb, var(--success) 70%, var(--surface));
+    --el-color-success-light-8: color-mix(in srgb, var(--success) 80%, var(--surface));
+    --el-color-warning-light-3: color-mix(in srgb, var(--warning) 30%, var(--surface));
+    --el-color-warning-light-5: color-mix(in srgb, var(--warning) 50%, var(--surface));
+    --el-color-warning-light-7: color-mix(in srgb, var(--warning) 70%, var(--surface));
+    --el-color-warning-light-8: color-mix(in srgb, var(--warning) 80%, var(--surface));
+    --el-color-danger-light-3: color-mix(in srgb, var(--danger) 30%, var(--surface));
+    --el-color-danger-light-5: color-mix(in srgb, var(--danger) 50%, var(--surface));
+    --el-color-danger-light-7: color-mix(in srgb, var(--danger) 70%, var(--surface));
+    --el-color-danger-light-8: color-mix(in srgb, var(--danger) 80%, var(--surface));
+    --el-color-info-light-3: color-mix(in srgb, var(--info) 30%, var(--surface));
+    --el-color-info-light-5: color-mix(in srgb, var(--info) 50%, var(--surface));
+    --el-color-info-light-7: color-mix(in srgb, var(--info) 70%, var(--surface));
+    --el-color-info-light-8: color-mix(in srgb, var(--info) 80%, var(--surface));
   }
 }
 
@@ -614,6 +649,23 @@ a:hover { text-decoration: underline; }
     --el-color-primary-light-5: color-mix(in srgb, var(--accent) 52%, var(--surface));
     --el-color-primary-light-7: color-mix(in srgb, var(--accent) 32%, var(--surface));
     --el-color-primary-light-8: color-mix(in srgb, var(--accent) 22%, var(--surface));
+    /* 语义色同口径：跟随主题表面色，避免固定值在纯黑/深灰下不协调 */
+    --el-color-success-light-3: color-mix(in srgb, var(--success) 30%, var(--surface));
+    --el-color-success-light-5: color-mix(in srgb, var(--success) 50%, var(--surface));
+    --el-color-success-light-7: color-mix(in srgb, var(--success) 70%, var(--surface));
+    --el-color-success-light-8: color-mix(in srgb, var(--success) 80%, var(--surface));
+    --el-color-warning-light-3: color-mix(in srgb, var(--warning) 30%, var(--surface));
+    --el-color-warning-light-5: color-mix(in srgb, var(--warning) 50%, var(--surface));
+    --el-color-warning-light-7: color-mix(in srgb, var(--warning) 70%, var(--surface));
+    --el-color-warning-light-8: color-mix(in srgb, var(--warning) 80%, var(--surface));
+    --el-color-danger-light-3: color-mix(in srgb, var(--danger) 30%, var(--surface));
+    --el-color-danger-light-5: color-mix(in srgb, var(--danger) 50%, var(--surface));
+    --el-color-danger-light-7: color-mix(in srgb, var(--danger) 70%, var(--surface));
+    --el-color-danger-light-8: color-mix(in srgb, var(--danger) 80%, var(--surface));
+    --el-color-info-light-3: color-mix(in srgb, var(--info) 30%, var(--surface));
+    --el-color-info-light-5: color-mix(in srgb, var(--info) 50%, var(--surface));
+    --el-color-info-light-7: color-mix(in srgb, var(--info) 70%, var(--surface));
+    --el-color-info-light-8: color-mix(in srgb, var(--info) 80%, var(--surface));
     --el-color-primary-light-9: color-mix(in srgb, var(--accent) 16%, var(--surface));
   }
 }
