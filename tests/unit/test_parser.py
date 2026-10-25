@@ -59,6 +59,35 @@ def test_parse_pdf_single_page():
     assert doc.metadata["page"] == 1
 
 
+def test_parse_pdf_table_first_class():
+    """P1-4 回归：PDF 表格须以 [TABLE] 块进正文并登记 metadata.tables。
+
+    拆分包后 pdf.py 曾漏 import `_table_rows`/`_rows_to_markdown`，NameError 被宽泛
+    except 吞掉 → 表格静默丢失（正文与 metadata 都没有），评测排序随之漂移。
+    """
+    import fitz
+
+    buf = io.BytesIO()
+    pdf = fitz.open()
+    page = pdf.new_page()
+    xs, ys = [72, 220, 360], [72, 100, 128]
+    for y in ys:
+        page.draw_line((xs[0], y), (xs[-1], y))
+    for x in xs:
+        page.draw_line((x, ys[0]), (x, ys[-1]))
+    for (x, y), cell in [((80, 92), "Product"), ((230, 92), "Price"),
+                         ((80, 120), "X2"), ((230, 120), "3999")]:
+        page.insert_text((x, y), cell)
+    pdf.save(buf)
+    pdf.close()
+
+    doc = _parse_bytes(buf.getvalue(), "路线图.pdf")
+    assert "[TABLE]" in doc.text and "| Product | Price |" in doc.text, "PDF 表格须 Markdown 化进正文"
+    assert doc.metadata["tables"], "表格须按阅读顺序登记 metadata.tables"
+    assert doc.metadata["tables"][0]["header"] == ["Product", "Price"]
+    assert doc.metadata["tables"][0]["rows"] == [["X2", "3999"]]
+
+
 def test_parse_docx():
     from docx import Document as DocxDocument
 

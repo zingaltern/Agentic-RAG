@@ -283,3 +283,25 @@ def test_capture_contexts_opt_in():
     assert captured.contexts[0]["text"] == "年假需提前申请"
     assert captured.contexts[0]["filename"] == "员工手册.md"
     assert captured.contexts[0]["chunk_id"]
+def test_capture_contexts_export():
+    """评测出口回归（13.6）：capture_contexts=True 回传完整上下文；默认关、不影响响应体积。
+
+    背景：基线快照的 rageval 已按该参数取评测上下文，但 run() 曾缺此形参，
+    导致干净检出后 make eval 直接 TypeError —— 此用例锁死该契约。
+    """
+    retriever = _Retriever([_scored("年假需提前 3 个工作日申请", source="员工手册.md")])
+    evaluator = _Evaluator([EvaluationResult(True, 0.9, "ok"),
+                            EvaluationResult(True, 0.9, "ok")])   # 两次 run 各评估一次
+    svc = _build(retriever, evaluator, _Rewriter([]), _Detector(), _LLM())
+
+    default_answer = svc.run("年假怎么申请")
+    assert default_answer.contexts == [], "默认不导出上下文（HTTP 响应体积不变）"
+
+    export_answer = svc.run("年假怎么申请", capture_contexts=True)
+    assert export_answer.code == 0
+    assert len(export_answer.contexts) == 1
+    item = export_answer.contexts[0]
+    assert item["chunk_id"], "评测上下文需带 chunk_id 便于归因"
+    assert item["filename"] == "员工手册.md"
+    assert item["text"] == "年假需提前 3 个工作日申请"
+    assert 0.0 <= item["score"] <= 1.0

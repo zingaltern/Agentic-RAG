@@ -47,7 +47,7 @@ docs/
 | `dev-tasks/02-P-D-结构化Agent.md` | P-D 真 Agentic（结构化 Agent，单独立项大改造） | `DEVELOPMENT.md` 15.1/15.4/15.5 | 未开工（详细设计见 `specs/真Agentic_RAG设计.md`） |
 | `dev-tasks/03-P3-可选适配器包.md` | 13.10 P3 可选适配器（OCR/表格/多分块/多 embedding/多 LLM，默认关） | `DEVELOPMENT.md` 13.10/15.2 | 未开工 |
 | `dev-tasks/04-遗留项与元数据富化.md` | 14.4 遗留项 + 元数据富化（T5） | `DEVELOPMENT.md` 14.4 | 部分交付（T5 / CI / 事件钩子已完成） |
-| `dev-tasks/08-查询智能补强批次.md` | 查询智能 Q1 多策略改写 / Q2 Scope 路由 lite | 2026-09-06 企业级平台对标评估 | Q1 实现完成（随代码在途）；Q2 未开工 |
+| `dev-tasks/08-查询智能补强批次.md` | 查询智能 Q1 多策略改写 / Q2 Scope 路由 lite | 2026-09-06 企业级平台对标评估 | Q1 已交付（2026-10-21，默认关）；Q2 未开工（顺延） |
 
 **已归档（`docs/dev-tasks/archive/`，均已交付）**：
 
