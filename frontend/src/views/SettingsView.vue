@@ -22,6 +22,8 @@ import {
 } from '../composables/useTheme'
 import { openShortcuts } from '../composables/useUi'
 import { confirmDialog, promptPassword } from '../utils/confirm'
+import { ElTable, ElTableColumn } from 'element-plus/es/components/table/index.mjs'
+import ElUpload from 'element-plus/es/components/upload/index.mjs'
 import { PASSWORD_HINT, PASSWORD_RULE, validatePassword } from '../utils/password'
 
 const store = useAppStore()

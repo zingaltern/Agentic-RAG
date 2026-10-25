@@ -21,6 +21,10 @@ import { useKbs } from '../composables/useKbs'
 import { useIsMobile } from '../composables/useMedia'
 import { fileKind, formatDateTime, formatRelative, toNumber } from '../utils/format'
 import { confirmDialog } from '../utils/confirm'
+// 重组件局部注册：只随本页 chunk 加载，问答首屏不再下载 table/upload/pagination
+import { ElTable, ElTableColumn } from 'element-plus/es/components/table/index.mjs'
+import ElUpload from 'element-plus/es/components/upload/index.mjs'
+import ElPagination from 'element-plus/es/components/pagination/index.mjs'
 
 const store = useAppStore()
 const { kbs, load: loadKbs } = useKbs()

@@ -7,6 +7,8 @@
  *
  * 约定：模板里新增 <el-xxx> 时，必须在此登记组件与样式，否则运行期报
  * "Failed to resolve component"（Vue 只在控制台警告，界面会缺块）。
+ * 例外：表格 / 上传 / 分页体积大且只在文档、设置两个懒加载页使用，
+ *       改为在对应视图内局部 import（样式仍在此统一引入，避免 CSS 顺序问题）。
  */
 import ElButton from 'element-plus/es/components/button/index.mjs'
 import ElConfigProvider from 'element-plus/es/components/config-provider/index.mjs'
@@ -18,14 +20,11 @@ import ElDropdown, { ElDropdownItem, ElDropdownMenu } from 'element-plus/es/comp
 import ElForm, { ElFormItem } from 'element-plus/es/components/form/index.mjs'
 import ElIcon from 'element-plus/es/components/icon/index.mjs'
 import ElInput from 'element-plus/es/components/input/index.mjs'
-import ElPagination from 'element-plus/es/components/pagination/index.mjs'
 import ElProgress from 'element-plus/es/components/progress/index.mjs'
 import ElSelect, { ElOption } from 'element-plus/es/components/select/index.mjs'
 import ElSwitch from 'element-plus/es/components/switch/index.mjs'
-import ElTable, { ElTableColumn } from 'element-plus/es/components/table/index.mjs'
 import ElTag from 'element-plus/es/components/tag/index.mjs'
 import ElTooltip from 'element-plus/es/components/tooltip/index.mjs'
-import ElUpload from 'element-plus/es/components/upload/index.mjs'
 import { ElLoading } from 'element-plus/es/components/loading/index.mjs'
 
 import 'element-plus/es/components/button/style/css.mjs'
@@ -54,8 +53,8 @@ import 'element-plus/es/components/message-box/style/css.mjs'
 
 export const COMPONENTS = [
   ElButton, ElConfigProvider, ElDialog, ElDrawer, ElDropdown, ElDropdownItem, ElDropdownMenu,
-  ElForm, ElFormItem, ElIcon, ElInput, ElOption, ElPagination, ElProgress, ElSelect, ElSwitch,
-  ElTable, ElTableColumn, ElTag, ElTooltip, ElUpload,
+  ElForm, ElFormItem, ElIcon, ElInput, ElOption, ElProgress, ElSelect, ElSwitch,
+  ElTag, ElTooltip,
 ]
 
 export { ElLoading }
