@@ -39,7 +39,10 @@ def test_plugins_status_envelope(client):
 def test_documents_list_empty(client):
     body = client.get("/api/documents").json()
     assert body["code"] == 0
-    assert body["data"] == {"items": [], "total": 0}
+    assert body["data"]["items"] == []
+    assert body["data"]["total"] == 0
+    # 服务端分页附带统计（顶部指标/分页总数都来自这里）
+    assert body["data"]["stats"] == {"chunks": 0, "latest": 0}
 
 
 def test_documents_not_found_error_code(client):

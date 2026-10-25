@@ -112,13 +112,40 @@ async def upload(file: UploadFile = File(...),
     return ok(payload)
 
 
+_KIND_BY_SUFFIX = {
+    "pdf": {"pdf"},
+    "doc": {"doc", "docx"},
+    "sheet": {"xls", "xlsx", "csv", "tsv"},
+    "slide": {"ppt", "pptx"},
+    "md": {"md", "markdown"},
+    "image": {"png", "jpg", "jpeg", "gif", "webp", "svg"},
+    "config": {"json", "jsonl", "yaml", "yml", "toml", "ini", "xml"},
+    "code": {"py", "js", "mjs", "cjs", "ts", "tsx", "jsx", "java", "go", "rs", "c", "h",
+             "cpp", "hpp", "cs", "rb", "php", "kt", "swift", "sh", "sql", "vue", "css", "scss"},
+}
+
+
+def _file_kind(filename: str | None) -> str:
+    """按扩展名归类（与前端 utils/format.fileKind 同口径，服务端筛选/分页用）。"""
+    suffix = str(filename or "").rsplit(".", 1)[-1].lower()
+    for kind, suffixes in _KIND_BY_SUFFIX.items():
+        if suffix in suffixes:
+            return kind
+    return "text"
+
+
 @router.get("")
 def list_documents(page: int = 1, size: int = 20, kb_id: str | None = None,
+                   q: str | None = None, kind: str | None = None, sort: str = "recent",
                    request: Request = None,
                    deps: Dependencies = Depends(get_deps)) -> dict:
-    """分页列表（按创建时间倒序，6.5）；V5.1：仅返回当前用户可访问库的文档。"""
+    """分页列表（服务端筛选/排序，6.5）；V5.1：仅返回当前用户可访问库的文档。
+
+    前端不再一次拉 500 条做客户端过滤：`q/kind/sort/page/size` 都由服务端处理，
+    `stats` 始终按当前库全量统计（不受筛选影响），便于顶部指标展示。
+    """
     if deps.documents is None:
-        return ok({"items": [], "total": 0})
+        return ok({"items": [], "total": 0, "stats": {"chunks": 0, "latest": 0}})
     user = getattr(request.state, "user", None) if request else None
     authorizer = get_authorizer(request) if request else None
     accessible = set()
@@ -129,13 +156,34 @@ def list_documents(page: int = 1, size: int = 20, kb_id: str | None = None,
             raise ValidationError(f"知识库不存在: {kb_id!r}")
         if accessible and kb_id not in accessible:
             raise NotFoundError(f"文档不存在或无权访问: kb={kb_id}")
+
+    all_items = deps.documents.list(page=1, size=10000, kb_id=kb_id)
     if accessible:
-        all_items = deps.documents.list(page=1, size=10000, kb_id=kb_id)
-        items = [e for e in all_items if e.get("kb_id") in accessible]
-        return ok({"items": items[(page - 1) * size:(page - 1) * size + size],
-                   "total": len(items)})
-    return ok({"items": deps.documents.list(page, size, kb_id=kb_id),
-               "total": deps.documents.count(kb_id=kb_id)})
+        all_items = [e for e in all_items if e.get("kb_id") in accessible]
+    all_items = [{**e, "kind": _file_kind(e.get("filename"))} for e in all_items]
+
+    stats = {
+        "chunks": sum(int(e.get("chunk_count") or 0) for e in all_items),
+        "latest": max((int(e.get("created_at") or 0) for e in all_items), default=0),
+    }
+
+    keyword = str(q or "").strip().lower()
+    if keyword:
+        all_items = [e for e in all_items
+                     if keyword in str(e.get("filename") or "").lower()
+                     or keyword in str(e.get("title") or "").lower()]
+    if kind and kind != "all":
+        all_items = [e for e in all_items if e.get("kind") == kind]
+
+    if sort == "name":
+        all_items.sort(key=lambda e: str(e.get("filename") or "").lower())
+    elif sort == "chunks":
+        all_items.sort(key=lambda e: int(e.get("chunk_count") or 0), reverse=True)
+    else:  # recent（默认）
+        all_items.sort(key=lambda e: int(e.get("created_at") or 0), reverse=True)
+
+    start = max(0, (page - 1) * size)
+    return ok({"items": all_items[start:start + size], "total": len(all_items), "stats": stats})
 
 
 @router.get("/{document_id}")
