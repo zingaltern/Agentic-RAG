@@ -142,3 +142,42 @@ def test_pptx_page_spans_and_chunk_page():
     # 页码不触发断块（规格：仅 section 变更断块）——缩小 parent 目标逐行验证映射
     pages = [p.metadata.get("page") for p in _parents(split_chunks(parsed, parent_target_tokens=5, child_target_tokens=3))]
     assert pages == [1, 2]
+
+
+# -- Markdown 管道表格（无 [TABLE] 标记，如 .md 文件） ---------------------------------
+
+def test_md_pipe_table_is_atomic_with_header():
+    """md 表格没有解析器元数据：开启 table_aware 后也必须整体成块且保留表头。"""
+    text = ("## 四、常见 OOM 类型\n\n"
+            "| 类型 | 报错信息 | 根因 |\n|---|---|---|\n"
+            "| 堆 OOM | Java heap space | 对象过多 |\n"
+            "| 栈 OOM | StackOverflowError | 递归过深 |\n")
+    doc = _doc(text)
+    chunks = split_chunks(doc, table_aware={"enabled": True, "max_rows_per_chunk": 30,
+                                            "json_max_bytes": 4096})
+    table = next(c for c in chunks if c.metadata.get("chunk_type") == "table")
+    assert "| 类型 | 报错信息 | 根因 |" in table.text, "表头必须在同一块内"
+    assert "堆 OOM" in table.text and "栈 OOM" in table.text
+    assert "|---|---|---|" in table.text
+
+
+def test_md_pipe_table_long_splits_with_header():
+    """超长 md 表按行组切分，每组都带完整表头（与 [TABLE] 行为一致）。"""
+    rows = "\n".join(f"| 行{i} | {'内容' * 30} |" for i in range(12))
+    text = "| 序号 | 说明 |\n|---|---|\n" + rows
+    doc = _doc(text)
+    chunks = split_chunks(doc, parent_target_tokens=80, table_aware={"enabled": True,
+                                                                     "max_rows_per_chunk": 4,
+                                                                     "json_max_bytes": 4096})
+    tables = [c for c in chunks if c.metadata.get("chunk_type") == "table"]
+    assert len(tables) >= 2, "超长表应拆成多块"
+    assert all("| 序号 | 说明 |" in c.text for c in tables), "每组必须携带表头"
+
+
+def test_md_pipe_table_inside_code_fence_not_split():
+    """代码围栏里的管道示例不能被当成表格原子块。"""
+    text = "```text\n| A | B |\n|---|---|\n| 1 | 2 |\n```\n"
+    doc = _doc(text)
+    chunks = split_chunks(doc, table_aware={"enabled": True, "max_rows_per_chunk": 30,
+                                            "json_max_bytes": 4096})
+    assert not any(c.metadata.get("chunk_type") == "table" for c in chunks)

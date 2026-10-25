@@ -121,6 +121,12 @@ def _build_line_sections(text: str, sections: list) -> list:
     return line_section
 
 
+def _is_md_table_separator(line: str) -> bool:
+    """Markdown 表格分隔行：|---|:---:|---:|（每格至少 3 个短横线，可带对齐冒号）。"""
+    cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+    return bool(cells) and all(re.fullmatch(r":?-{3,}:?", cell or "") for cell in cells)
+
+
 def _markdown_lines(block: str) -> tuple[str, str, list[str]]:
     """从 [TABLE] 块文本提取 (表头行, 分隔行, 数据行)——均为原始管道行文本。"""
     md_lines = [ln for ln in block.split("\n") if ln.strip().startswith("|")]
@@ -274,8 +280,16 @@ def split_chunks(
     items: list[tuple[int, str, bool]] = []      # (起始行号, 文本, 是否表格原子)
     if ta_enabled:
         i = 0
+        in_fence = False
         while i < len(raw_lines):
-            if raw_lines[i].strip() == "[TABLE]":
+            stripped = raw_lines[i].strip()
+            # 代码围栏内的管道文本不当作表格（避免误切代码示例）
+            if stripped.startswith("```"):
+                in_fence = not in_fence
+                items.append((i, stripped, False))
+                i += 1
+                continue
+            if stripped == "[TABLE]":
                 j = i
                 while j < len(raw_lines) and raw_lines[j].strip() != "[/TABLE]":
                     j += 1
@@ -284,8 +298,20 @@ def split_chunks(
                     items.append((i, block, True))
                 i = j + 1
                 continue
-            if raw_lines[i].strip():
-                items.append((i, raw_lines[i].strip(), False))
+            # Markdown 管道表格（表头 + 分隔行 + 数据行）：整体作为表格原子块，
+            # 与 [TABLE] 同等待遇——解析器未产出 tables 元数据时（如 .md）也能保住表头。
+            if (not in_fence and stripped.startswith("|")
+                    and i + 1 < len(raw_lines)
+                    and _is_md_table_separator(raw_lines[i + 1])):
+                j = i + 1
+                while j + 1 < len(raw_lines) and raw_lines[j + 1].strip().startswith("|"):
+                    j += 1
+                block = "\n".join(raw_lines[i:j + 1]).strip()
+                items.append((i, block, True))
+                i = j + 1
+                continue
+            if stripped:
+                items.append((i, stripped, False))
             i += 1
     else:
         items = [(i, line.strip(), False) for i, line in enumerate(raw_lines) if line.strip()]
