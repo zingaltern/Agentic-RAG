@@ -1,225 +1,251 @@
-# Agentic RAG 智能知识库系统
+<p align="center">
+  <img src="./frontend/resources/icon-1024.png" width="240" alt="Agentic RAG application icon">
+</p>
 
-基于 FastAPI + BGE(中文嵌入) + Chroma + BM25/RRF 混合检索 + DeepSeek(LLM) 的企业知识库问答系统，带可切换的反思/Agentic 双模式与幻觉检测。
+<h1 align="center">Agentic RAG</h1>
 
-> **面向第一次使用的用户**：请先阅读 [产品说明书（PRODUCT_MANUAL.md）](PRODUCT_MANUAL.md)——从怎么启动、怎么上传文档到"认证与连接"该不该填，都有图文讲解。
+<p align="center">Self-hosted knowledge-base Q&amp;A that plans, retrieves, and cites evidence instead of guessing.</p>
 
-## 快速开始
+<p align="center">
+  <a href="./README.md">English</a> | <a href="./README.zh-CN.md">简体中文</a>
+</p>
 
-```bash
-make bootstrap      # 创建 .venv 并安装依赖（首次，含 torch/嵌入模型依赖，较慢）
-make run            # 启动服务 → http://127.0.0.1:8000（SPA 与 /ui 均由本服务托管）
-make test           # 跑全部单测（含覆盖率门禁 ≥80%）
-make eval           # 评测（进程内模式，输出 reports/eval-*.md）
-make demo-ingest    # 入库 demo 文档并检索验证
-```
+<p align="center">
+  <a href="https://github.com/zingaltern/Agentic-RAG/actions/workflows/ci.yml"><img src="https://github.com/zingaltern/Agentic-RAG/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
+  <img src="https://img.shields.io/badge/Python-3.10--3.12-3776AB?style=flat-square" alt="Python 3.10 to 3.12">
+  <img src="https://img.shields.io/badge/FastAPI-0.110%2B-4B5563?style=flat-square" alt="FastAPI 0.110 or newer">
+  <img src="https://img.shields.io/badge/Chroma-0.5%2B-4B5563?style=flat-square" alt="Chroma 0.5 or newer">
+  <img src="https://img.shields.io/badge/DeepSeek-LLM-4B5563?style=flat-square" alt="DeepSeek LLM">
+  <img src="https://img.shields.io/badge/Vue-3.5-3776AB?style=flat-square" alt="Vue 3.5">
+  <img src="https://img.shields.io/badge/Electron-43-4B5563?style=flat-square" alt="Electron 43">
+  <img src="https://img.shields.io/badge/Docker-ready-0891B2?style=flat-square" alt="Docker support">
+</p>
 
-> **监听地址（S2）**：默认仅绑定 `127.0.0.1`（本机/桌面场景）；对外暴露需显式
-> `uvicorn app.main:app --host 0.0.0.0` 或改 `configs/settings.yaml` 的 `api.host`。
+Most RAG samples stop at "embed, retrieve, answer". This project keeps going: it re-queries when the first pass is weak, ships an optional agentic mode that plans before it retrieves, verifies the answer against the evidence it actually used, and scores itself against a frozen validation set. Documents, embeddings, and indexes stay on your machine; apart from the one-time model download, the answering path calls only the DeepSeek API.
 
-## 前端 SPA（W7，Vue3 + Vite + Element Plus）
+## Highlights
 
-前后端分离：`frontend/` 独立工程（Vue3 + Vue Router + Pinia + Element Plus），四区块
-（问答控制台 / 文档管理 / 知识库管理 / 设置总览）全部对接真实 API；
-`src/api/base.js` 是 `BASE_URL` 单一常量（13.11.2，Web 与桌面共享的后端地址策略唯一入口）。
-错误提示为中文人话文案（错误码/trace_id 仅入日志，不上界面）。
-
-```bash
-make frontend-install   # 首次安装前端依赖（cd frontend && npm install）
-make frontend-dev       # dev 模式 → http://localhost:5173（vite proxy /api → 127.0.0.1:8000）
-make frontend-build     # 构建产物 → frontend/dist
-make run                # 生产托管：SPA 由 FastAPI 同源托管在 http://127.0.0.1:8000/
-```
-
-- **dev 模式 CORS**：`configs/settings.yaml` 的 `api.cors_origins: ["http://localhost:5173"]`
-  已启用（后端 CORSMiddleware）；生产同源托管无 CORS 限制。
-- **托管**：`frontend/dist` 由 FastAPI 挂载（API 路由在前、静态在后），SPA history 路由
-  （如 `/documents`）自动回退 index.html；`/api/*` 不受影响。
-- **旧测试页降级入口**：`http://127.0.0.1:8000/ui`（`web/` 静态页，保留为冒烟/降级入口，
-  新 SPA 上线后逐步取代）。
-- 构建产物 `frontend/dist` 随仓库提交（AGENTS.md 约定）；`frontend/node_modules/` 不入库。
-
-## 准备 DeepSeek Key
-
-- 复制 `.env.example` 为 `.env`，填入真实 Key：`RAG_DEEPSEEK_API_KEY=sk-...`（只走环境变量，`.env` 已被 gitignore，绝不入库）。
-- LLM 装配失败（无 key）时服务照常启动，`/api/health` 的 `llm` 显示 `not_loaded`；问答时返回错误码 30001。
-
-## 首次启动会自动下载嵌入模型
-
-- 默认嵌入模型 `BAAI/bge-small-zh-v1.5`（约 100MB，下载到 HF 缓存）。
-- 国内网络需设镜像：`export HF_ENDPOINT=https://hf-mirror.com`（Makefile 已内置兜底，`make run` / `make demo-ingest` 无需手敲）。
-- 模型缓存位于 `~/.cache/huggingface`，只需联网一次。
-
-## 常用命令
-
-| 命令 | 说明 |
+| Highlight | Why it matters |
 |---|---|
-| `make bootstrap` | venv + 依赖（清华镜像，失败兜底官方 PyPI） |
-| `make run` | 启动 API（含 `/ui` 测试页）→ http://localhost:8000/ui |
-| `make test` | 单测 + 覆盖率（`fail_under=80`，默认过滤 integration） |
-| `make coverage` | 仅输出覆盖率报告（不设失败门禁） |
-| `make eval` | 评测：`reports/eval-{时间戳}.md`（197 条验证集；逐条 + Hit@5 等聚合指标） |
-| `make review` | 外部基准评测（CMRC 2018，独立 kb `cmrc`）→ `reports/review-*.md` |
-| `make perf` | 性能基准（规模点 50/150/300：入库吞吐 / 延迟分位 / Hit@5 曲线）→ `reports/perf-*.md` |
-| `make integration` | 集成测试（需要本机 BGE 模型缓存，不联网） |
-| `make demo-ingest` | 入库 demo 文档并检索验证 |
-| `make docker-up` | 构建并启动 api 容器（可选） |
+| Hybrid retrieval: BGE Chinese embeddings plus BM25, fused with RRF | Exact terms and paraphrases both surface; no single retriever decides the answer. |
+| Two answering modes: iterative reflect loop and agentic plan-and-tools | Start with the cheaper loop, escalate to planning when a question needs decomposition. |
+| Evidence-bound answers | Each response carries sources, citation markers, and a hallucination check; missing evidence returns a fallback code instead of a guess. |
+| One Chroma collection per knowledge base | Uploads, queries, and deletes are scoped server-side, so libraries cannot leak into each other. |
+| 46 accepted file extensions | PDF, Office, Markdown, HTML, email, CSV/TSV, JSON, plus code and config formats parsed with AST symbol extraction. |
+| Evaluation is part of the repository | A 197-pair validation set, a 160-pair external review set, and a throughput/latency benchmark all run from `make`. |
 
-## Docker（可选）
+## Architecture
+
+```text
+┌──────────────────────────────────────────────────────────────┐
+│ Clients   Vue 3 SPA (/)  ·  Electron shell  ·  HTTP API      │
+└──────────────────────────────────────────────────────────────┘
+                                │
+                                │  REST / JSON
+                                ▼
+┌──────────────────────────────────────────────────────────────┐
+│ FastAPI   auth · RBAC · rate limit · audit · trace_id        │
+└──────────────────────────────────────────────────────────────┘
+                                │
+                                │
+            ┌───────────────────┴──────────────────┐
+            │ upload                               │ query
+            ▼                                      ▼
+┌────────────────────────┐            ┌────────────────────────┐
+│ Ingestion              │            │ Query orchestration    │
+│ parse · clean · chunk  │            │ reflect / agentic      │
+│ embed with BGE         │            │ plan · tools · cite    │
+└────────────────────────┘            └────────────────────────┘
+            │                                      │
+            ▼                                      ▼
+┌────────────────────────┐            ┌────────────────────────┐
+│ Chroma + BM25 index    │◀───────────│ Retriever · RRF        │
+│ one collection per KB  │            │ vector + BM25 fusion   │
+└────────────────────────┘            └────────────────────────┘
+                                                   │
+                                                   ▼
+                                      ┌────────────────────────┐
+                                      │ DeepSeek LLM           │
+                                      │ answer + detector      │
+                                      └────────────────────────┘
+```
+
+Uploads run as background jobs: parse, clean, chunk into parent/child blocks, embed with `BAAI/bge-small-zh-v1.5`, and write into the knowledge base's Chroma collection. Queries fan out to the vector index and an in-memory BM25 index, fuse the two rankings with RRF, and hand the context to either the reflect loop or the agentic planner. Every answer passes through the hallucination detector before it is returned.
+
+## Usage Example
+
+Start the service and ask a question against the built-in `default` knowledge base:
 
 ```bash
-make docker-up      # docker compose up --build -d api
-curl http://localhost:8000/api/health    # 期望 checks 全 ok
+curl -s http://127.0.0.1:8000/api/query \
+  -H 'Content-Type: application/json' \
+  -d '{"query": "What chunking strategy does the ingestion pipeline use?", "kb_id": "default"}'
 ```
 
-- 镜像内已内置 `HF_ENDPOINT=https://hf-mirror.com` 兜底；DeepSeek key 通过 compose 的 `env_file: .env` 注入（不入镜像）。
-- MVP 用 embedded Chroma（进程内 SQLite），`./data` 挂载为持久卷。
+The call returns HTTP 200 with the common envelope `{code, message, data}`. On success `code` is `0`, and `data` carries the answer plus the evidence trail:
 
-## 桌面端（W8，Electron）
+| Field | Contents |
+|---|---|
+| `answer` | Generated answer text; citation markers such as `[1]` point into `sources`. |
+| `sources` | The retrieved chunks used as context, each with its document metadata. |
+| `citations` | Which citation markers appeared in the answer, and the share the detector confirmed. |
+| `hallucination_check` | `passed` or `suspected`. |
+| `iterations` / `elapsed_ms` | How many retrieval rounds ran, and the server-side duration. |
+| `mode` / `agent_steps` / `termination_reason` | Which answering path ran and why it stopped. |
 
-内置拉起后端三步走（启动/就绪/退出），`make desktop` 一条命令即起：
+Business errors also return HTTP 200 with the cause in `code`: `30001` means the LLM is unavailable, either because no key is configured or because the call failed; `21001` means no supporting evidence was found; `40101` means the knowledge base is not readable by the caller.
+
+## Quick Install
+
+Requires Python 3.10 to 3.12, `make`, and Git. The first install pulls PyTorch and the embedding stack, so expect a large download.
 
 ```bash
-make desktop   # 依赖：.venv（make bootstrap）、frontend 依赖（make frontend-install）、构建产物（make frontend-build）
+git clone https://github.com/zingaltern/Agentic-RAG.git
+cd Agentic-RAG
+make bootstrap
 ```
 
-- **启动**：探测端口（默认 8000，占用自动后移，最多试 5 个）→ 以项目 `.venv/bin/python` 拉起
-  `uvicorn app.main:app`（仅 `127.0.0.1` 监听）；子进程失败弹错误框而非白屏。
-- **就绪**：轮询 `/api/health`（≤30s，窗口就绪后才显示）→ 加载与 Web 端同一 SPA。
-- **异常自动恢复**：运行中后端进程意外退出（含被外部信号终止）→ 桌面壳自动重启并重新等待就绪（最多 2 次），恢复失败才弹错误框退出，不再卡死。
-- **退出**：关窗/退出 → 级联终止后端子进程（Windows taskkill /T，其他 SIGTERM→SIGKILL 兜底），
-  可用 `lsof -i :8000` 自验无残留。
-- **外部后端模式**：设置页「外部后端」填写 `127.0.0.1:port` → 保存后重启应用，不再自动拉起本地服务。
-- **打包**：`cd frontend && npx electron-builder --mac dmg`（配置在 frontend/package.json 的 build 段）。
-  Python 运行时捆绑为后续演进（本次仅打包前端壳；部署机需 Python 3.11 + `.venv` 与模型缓存）。
-  打包后的 `.app` 需要项目根定位后端子进程：双击前设置
-  `launchctl setenv RAG_PROJECT_DIR /path/to/Agentic-RAG`（或终端
-  `RAG_PROJECT_DIR=/path/to/Agentic-RAG open -a AgenticRAG`），未配置时应用会弹出引导提示。
-- **安全基线（S8）**：`contextIsolation: true`、`nodeIntegration: false`、`sandbox: true`、
-  仅加载 loopback/自托管地址；真实密钥只经环境变量运行时注入（RAG_DEEPSEEK_API_KEY 等）。
+`make bootstrap` creates `.venv` and installs the project with development dependencies. It uses the Tsinghua PyPI mirror by default and falls back to the official index if that fails; override with `make bootstrap PIP_INDEX_URL=<url>`.
 
-## 认证与权限（V5.1，S1/13.11.1）
+## Quick Start
 
-**① 个人模式（契约默认）**：`auth_enabled=false` 时无登录页、无鉴权，所有操作可用，行为与单用户版一致（当前部署已开启团队模式）。
-
-**② 团队模式三步**（小团队共享，管理员/普通用户两级）：
-1. `configs/settings.yaml` 设 `api.auth_enabled: true`；
-2. 配置环境变量 `RAG_ADMIN_USER` / `RAG_ADMIN_PASSWORD`（首管理员引导，禁止写盘/入库）后重启；
-   也可省略（日志提示后）由部署方经 CLI 创建首管理员；
-3. 管理员在 Web「设置总览 → 用户管理」建用户（用户名/初始密码/角色），登录即用。
-
-- 登录：`POST /api/auth/login` → `{token, user}`，前端本地持久化（`Authorization: Bearer <token>`）；
-  `GET /api/auth/me`、`POST /api/auth/change-password`；未带/错误凭证 → `40101`；
-  `/api/health`、`/api/plugins/status`、`/ui`、`/api/auth` 白名单放行；响应保持 `{code,message,data}` 契约。
-  密码 scrypt 哈希存储；登录失败返回通用文案「用户名或密码错误」（不泄露账号是否存在）；
-  **防爆破：连续失败 5 次锁定来源 IP 5 分钟**（进程内计数，成功登录重置）。
-- **权限（知识库级，V5.1）**：共享库（`scope=shared`，含 default）全员可读、仅管理员可写/删；
-  私有库（`scope=private`）仅 owner 与管理员可见可管理；普通用户建库服务端强制为私有。
-- **用户管理 API（仅 admin）**：`GET/POST /api/users`、`POST /api/users/import`（CSV 批量导入：表头
-  `用户名,姓名,初始密码,角色`，全量校验通过才写入，失败返回逐行明细）、`POST /api/users/{id}/reset-password|role`、`DELETE /api/users/{id}`（禁删自己）。
-- 审计（S6）：query/upload 事件含 `user_id`（认证态取真实用户，否则 anonymous）、kb_id 与回答摘要，
-  不含密码/Token/完整敏感文本；`trace_id` 全链路贯穿（记录于后端 JSON 日志，前端不展示）。
-  **注意（V5.1）**：审计日志含用户查询与回答摘要，属个人数据——日志文件权限已收紧（桌面 `backend.log` 0o600），
-  留存与访问控制由部署方制度化管理。
-- 密码策略（V5.1）：新密码/重置密码 ≥8 位且同时含字母与数字；已有用户不强求改密。
-- 敏感数据脱敏（S6，P2-6 两级化）：全局 `ingestion.pii = {enabled, mode: mask|replace|delete, types}`、库级 `KbInfo.pii` 覆盖（默认关闭）；
-  开启后身份证/手机号/银行卡按策略脱敏（开启后号码类检索会失效，改策略前跑 `make eval` 对比）；旧 `desensitize_enabled` 已弃用（同开时新逻辑优先）。
-- 并发与限速（V5.1）：并发查询上限 `orchestration.max_concurrent_queries`（默认 4，超限 43001）；
-  `/api/query` 20 次/分/IP、上传 10 次/分/IP（超限 43002）；入库队列上限 64（超限 43003）。
-- CLI 评测（认证启用时）：`python -m app.cli.rageval --base-url http://127.0.0.1:8000 --login <user> <pass>` 或 `--token <token>`。
-
-## API 速览
-
-统一响应包 `{code, message, data}`；错误码见 DEVELOPMENT.md 2.2 表。
-
-| 方法 | 路径 | 说明 |
-|---|---|---|
-| GET | `/api/health` | 组件健康（embedding/vector_store/llm） |
-| POST | `/api/documents/upload` | 上传入库（可选表单字段 `kb_id`；V5.2：`mode=upsert` 同文件名增量替换、`force=true` 强制重入库） |
-| GET/DELETE | `/api/documents/{id}` | 文档元数据 / 删除（级联清向量块） |
-| GET | `/api/jobs/{job_id}` | 上传任务状态轮询 |
-| POST | `/api/query` | 问答（可选 `kb_id`，与 `collection` 二选一；可选 `mode=auto\|reflect\|agentic`，缺省走配置） |
-| GET/POST/DELETE | `/api/kbs` | 知识库 CRUD（13.5：内置 default 不可删） |
-| GET/POST | `/api/plugins/status` `/api/plugins/switch` | 插件 provider 状态 / 热切换（switch 需登录且仅管理员） |
-
-**多知识库（13.5）**：`kb_id → Chroma collection` 物理隔离；上传/问答按 `kb_id` 作用域，
-A/B 库内容互不可见；`/api/kbs` 建库（name 自动 slug 化生成 kb_id）、删库级联清空向量集合。
-默认库 `default` 沿用存量 collection `kb`，不可删除。
-
-**Agentic 模式（P-D，默认关）**：`orchestration.agent.enabled=true` 后，`/api/query` 可传
-`mode=agentic`（强制 Agent）或 `mode=auto`（规则路由：简单→reflect，复杂→Agent，不确定→reflect
-失败后升级）。Agent 走“Plan → 工具调用 → 证据入账 → 反思 → 合成”，工具只读且作用域由服务端注入；
-`reflect` 永久保留兜底。开关、预算、工具清单见 `configs/settings.yaml` `orchestration.agent` 与
-`DEVELOPMENT.md` 第 17 章；默认关闭时行为与旧版一致。前端问答控制台提供“反思/自动/Agent”切换，默认“反思”；“自动”为显式 opt-in。
-
-## 评测报告与已知限制
-
-- `make eval` 报告输出到 `reports/eval-*.md`（`reports/` 已 gitignore，产物不入库）。
-- 全库评测（default+docs+complex，197 条）：`make eval`（进程内模式）；HTTP 真链路：`python -m app.cli.rageval --all-kbs --base-url http://localhost:8000 --baseline <报告>`。
-- **无外网环境**（模型已在本地缓存）：加 `HF_HUB_OFFLINE=1` 前缀，如 `HF_HUB_OFFLINE=1 make eval`——否则加载缓存模型时仍会联网查 PEFT adapter 配置而卡住。
-- 指标：Hit@1 / Hit@5 / ContextPrecision / ContextRecall / AnswerRelevancy / Faithfulness（分类型）/ 兜底率；按库汇总 + 基线 diff 列。
-- no_answer 判据（13.6 修订）：`code=0 且回答含"未找到相关依据"类文案 ∨ code=21001`。
-- **已知限制**（如实列出，供检索/改写调优）：
-  - 口语化问法（如"咋整"）可能因改写未覆盖而评估分不足 → 触发 21001 兜底；同义词表见 `configs/synonyms.csv`（缺失时用内置小表）。
-  - 进程内评测（Stub LLM）的 Faithfulness 恒 0%（Stub 答案与上下文不匹配属预期），真 DeepSeek 模式约 69%。
-  - LLM 生成的规范化总结句对幻觉检测阈值达标率有限，阈值可在 `configs/settings.yaml` 调整。
-  - **定位边界**：默认仍是检索侧自我修正循环（Iterative/Self-Correcting RAG）；P-D 真 Agentic 的 P1/P2/P3 基础版已落地（`mode=agentic`/`auto`，默认关闭），P4（Agentic 专用评测/灰度）待续，见 `DEVELOPMENT.md` 第 17 章。
-  - **格式边界**：支持 PDF / Word(.doc/.docx) / Excel(.xls/.xlsx) / PPT(.ppt/.pptx) / Markdown / 文本 / HTML / 邮件(.eml) / CSV 与 TSV / 代码与配置类（29 种扩展名，tree-sitter AST 符号提取） / JSON 与 JSONL（第 16 章）；其中 `.doc/.ppt` 需服务端安装 LibreOffice（未装时明确报错并给安装指引）；`.msg`（Outlook 二进制格式）暂不支持解析，会返回明确提示"请导出为 .eml"；图片 OCR 仅预留接口未接引擎（15.2）。
-  - **安全现状**：解析安全✅（魔数校验+zip 炸弹防御）；提示注入✅（入库侧扫描，默认 audit 打标、可配 reject 40002；生成阶段另有 SYSTEM_PROMPT 约束）；内容审核✅（`adapters/content_moderation/`，词表可编辑，默认关，可 reject 40003）；PII 脱敏两级可配（`ingestion.pii` 全局 + `KbInfo.pii` 库级覆盖，默认关）（15.3）。
-  - **数据清洗层**：`cleaner.enabled` 默认关；开启后入库前执行归一/去噪/段落去重/质量过滤（15.4 P-A）。
-
-## 第二阶段（Phase 2）规划速览
-
-开发完成，规格见 `DEVELOPMENT.md` 第 13 章：
-
-| 周 | 内容 | 状态 |
-|---|---|---|
-| W5 | 真重排（bge-reranker）+ 语义评估/LLM 改写/真闭环 + 幻觉检测 v2 | 已落地 |
-| W6 | 多知识库（一库一 collection，`/api/kbs`）+ 评测集 | 已落地 |
-| W7 | Web 前端：前后端分离，`frontend/` Vue3+Vite SPA | 已落地 |
-| W8 | Electron 桌面壳（内置拉起后端）+ 收尾 | 已落地 |
-
-当前阶段面向收尾与加固：桌面打包（Python 运行时捆绑待决策）、认证/权限（`api.auth_enabled` + `RAG_ADMIN_USER/RAG_ADMIN_PASSWORD`，当前部署已开启团队模式）；P-D 真 Agentic（单 Agent/规划器/工具调用/证据账本）P1/P2/P3 基础版已落地、默认关闭；P4 评测与灰度待续（`DEVELOPMENT.md` 第 17 章）。
-
-Web 前端开发期用 `cd frontend && npm run dev`（proxy 到 :8000）；桌面端 W8 落地后 `make desktop`。
-
-## 目录速览
-
+```bash
+cp .env.example .env                 # then set RAG_DEEPSEEK_API_KEY in .env
+make run                             # serves the API and SPA on http://127.0.0.1:8000
 ```
+
+Open `http://127.0.0.1:8000` for the web console; the SPA is served from the committed `frontend/dist`. Then confirm the components are alive:
+
+```bash
+curl -s http://127.0.0.1:8000/api/health
+```
+
+The response reports `status` plus a `checks` map for `embedding`, `vector_store`, and `llm`. The embedding model (`BAAI/bge-small-zh-v1.5`, downloaded to the Hugging Face cache on first use) may briefly read `not_loaded` while it warms up in the background. Without `RAG_DEEPSEEK_API_KEY` the service still starts, `llm` stays `not_loaded`, and questions return code `30001`.
+
+Upload a document and wait for the ingestion job:
+
+```bash
+curl -s -F "file=@./README.md" -F "kb_id=default" http://127.0.0.1:8000/api/documents/upload
+curl -s http://127.0.0.1:8000/api/jobs/<job_id>
+```
+
+The upload responds with a `job_id`; poll it until `status` is no longer `pending` or `running`. Once it settles, the Usage Example above returns an answer over that document.
+
+If the machine has no outbound network and the embedding model is already cached, prefix commands with `HF_HUB_OFFLINE=1`; otherwise the loader may stall while checking for adapter configuration.
+
+## Common commands
+
+| Command | What it does |
+|---|---|
+| `make bootstrap` | Create `.venv` and install runtime plus development dependencies. |
+| `make run` | Start the API and mount the built SPA on `http://127.0.0.1:8000`. |
+| `make test` | Run the unit suite with the 80 percent coverage gate. |
+| `make eval` | Run the 197-pair validation set and write `reports/eval-*.md`. |
+| `make review` | Run the 160-pair CMRC 2018 external set against an isolated `cmrc` knowledge base. |
+| `make perf` | Benchmark ingestion throughput, query latency percentiles, and Hit@5 at 50, 150, and 300 documents. |
+| `make integration` | Run the end-to-end tests against the local model cache. |
+| `make demo-ingest` | Ingest the demo documents and verify retrieval. |
+| `make rebuild KB=<id>` | Rebuild one knowledge base from archived originals. |
+| `make frontend-install` / `make frontend-dev` | Install frontend dependencies and serve the SPA on `http://localhost:5173`. |
+| `make frontend-build` | Build the SPA into `frontend/dist`. |
+| `make desktop` | Launch the Electron shell, which starts and supervises the backend. |
+| `make docker-up` / `make docker-down` | Run the API container via Docker Compose. |
+
+## API
+
+All responses use `{code, message, data}`. The SPA is mounted at `/` when `frontend/dist` exists; `/ui` remains as a legacy smoke-test page.
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/health` | Component health for embedding, vector store, and LLM. |
+| POST | `/api/query` | Ask a question; accepts `query`, `kb_id`, `mode`, `top_k`, `filters`, and `web_search`. |
+| POST | `/api/documents/upload` | Upload and ingest; accepts `file`, `kb_id`, `mode` (`add` or `upsert`), and `force`. |
+| GET | `/api/documents` | List documents in a knowledge base. |
+| GET / DELETE | `/api/documents/{document_id}` | Read metadata or delete a document and its vectors. |
+| POST | `/api/documents/batch-delete` | Delete up to 200 documents in one call. |
+| GET | `/api/jobs/{job_id}` | Poll an ingestion job. |
+| GET / POST | `/api/kbs` | List knowledge bases or create one. |
+| DELETE | `/api/kbs/{kb_id}` | Delete a knowledge base and its vectors. |
+| GET / POST | `/api/plugins/status`, `/api/plugins/switch` | Inspect or hot-switch providers. |
+| POST | `/api/auth/login` | Sign in and receive a bearer token. |
+| GET | `/api/auth/me`, POST `/api/auth/change-password` | Read the current user or change a password. |
+| GET / POST | `/api/users` | List or create users; admin only. |
+| POST | `/api/users/import` | Bulk-create users from CSV. |
+| POST | `/api/users/{user_id}/reset-password`, `/role` | Reset a password or change a role. |
+| DELETE | `/api/users/{user_id}` | Delete a user. |
+| GET | `/api/metrics` | Expose in-process counters. |
+
+`mode` accepts `reflect`, `agentic`, or `auto`. `auto` routes simple questions to the reflect loop and escalates complex ones to the agent, and it only runs when `orchestration.agent.enabled` is on.
+
+## Configuration
+
+Configuration resolves in order: built-in defaults, then `configs/settings.yaml`, then `RAG_`-prefixed environment variables. Business code reads settings through `app/core/config.py`; keep secrets in the environment.
+
+| Variable | Purpose |
+|---|---|
+| `RAG_DEEPSEEK_API_KEY` | DeepSeek API key. Required for generated answers. |
+| `RAG_ADMIN_USER` / `RAG_ADMIN_PASSWORD` | Bootstrap the first admin when team mode is enabled. |
+| `HF_ENDPOINT` | Hugging Face mirror for model downloads; defaults to `https://hf-mirror.com` in the Makefile. |
+| `HF_HUB_OFFLINE` | Set to `1` to keep model loading fully offline. |
+
+The API listens on `127.0.0.1:8000` by default. To expose it, run `uvicorn app.main:app --host 0.0.0.0` or change `api.host` in the settings file.
+
+## Security and access control
+
+- Personal mode is the default: `api.auth_enabled` is `false`, there is no login, and every operation is available.
+- Team mode adds password login, scrypt-hashed credentials, and knowledge-base-scoped permissions. Shared libraries are readable by everyone and writable by admins; private libraries are visible to their owner and to admins. The built-in `default` library cannot be deleted.
+- Repeated login failures lock the source IP for five minutes. Query and upload endpoints are rate-limited per IP, and concurrent queries are capped by a semaphore.
+- `trace_id` runs through JSON logs from request to answer. Audit records hold the user, knowledge base, and answer summary, never passwords or tokens.
+- Parsing validates magic numbers and guards against archive bombs. Prompt-injection scanning, content moderation, and PII masking are all implemented but off by default; when injection scanning is enabled, its default mode audits and flags rather than blocks.
+
+## Evaluation and benchmarks
+
+Reports are written to `reports/`, which is excluded from version control.
+
+- `make eval` runs 197 question-answer pairs across the `default`, `docs`, and `complex` sets and reports Hit@1, Hit@5, context precision and recall, answer relevancy, faithfulness by category, and fallback rate.
+- `make review` runs the CMRC 2018 sample as an external set against its own `cmrc` library, which keeps it physically separate from the validation set.
+- `make perf` measures ingestion throughput, query latency percentiles, and the Hit@5 curve at 50, 150, and 300 documents.
+- `make eval-quality` runs a retrieval smoke test over a scripted fixture set.
+
+## Known limitations
+
+- The default answering path is a retrieval-side self-correction loop. The agentic mode has planner, tool-call, and evidence-ledger basics in place but is off by default, and its dedicated evaluation is not finished.
+- Faithfulness is `0` in in-process runs because the stub LLM does not match the retrieved context; real DeepSeek runs score far higher. Treat in-process numbers as retrieval signals, not answer quality.
+- Colloquial phrasings can still fall back with `21001` when query rewriting does not cover them. The synonym table lives in `configs/synonyms.csv`.
+- `.doc` and `.ppt` require LibreOffice on the host; without it the upload fails with an explicit installation hint. `.msg` is not parsed and the API asks for `.eml` instead. Image OCR is an interface without an engine.
+- The cleaner layer (`cleaner.enabled`) is off by default. Turning it on changes ingestion output and requires a rebuild of affected libraries.
+
+## Project layout
+
+```text
 app/
-├── main.py            # FastAPI 入口（装配 DI → 启动，托管 /ui）
-├── application.py     # 装配层：中间件（CORS/安全头/限速/审计）+ 依赖注入
-├── api/               # health / documents / query / plugins / jobs / kbs / users / auth 路由
-├── core/              # domain 数据模型 / interfaces 接口契约 / config / errors / logging / registry / rate_limit
-├── adapters/          # embedding / vector_store / retriever / reranker / evaluator / rewriter / detector / llm / parser / chunker / tools / agent
-├── services/          # orchestration（reflect/agentic 分发）/ agent（runtime）/ ingestion / jobs_store / documents_store / kb_store / user_store / rbac / desensitize
-└── cli/               # demo_ingest / rageval / build_review_set / build_eval_stress / perfbench / rebuild
-web/                   # /ui 内置测试页（无前端工程，冒烟/降级入口）
-frontend/              # Vue3 SPA + Electron 桌面壳（electron/main.cjs、bootstrap.cjs）
-configs/settings.yaml  # 系统配置
-docs/                  # 文档体系（索引 docs/README.md；specs/ 方案蓝图，dev-tasks/ 批次指令）
-tests/unit/            # 单测；tests/integration/ 集成测试（-m integration）
-tests/{eval,review,eval_suite}/  # 验证集 / 外部测试集 / 冻结基准集（规范见各自 README）
-reports/               # eval / review / perf 报告存档（gitignore，不入库）
+├── main.py            # FastAPI entry point
+├── application.py     # Middleware, dependency injection, SPA mounting
+├── api/               # HTTP routes: auth, users, kbs, documents, jobs, query, health, metrics, plugins
+├── core/              # Domain models, interface contracts, config, errors, logging, rate limiting
+├── adapters/          # Embedding, vector store, retriever, reranker, parser, chunker, cleaner, LLM, agent
+├── services/          # Orchestration, agent runtime, ingestion, job and document stores, RBAC
+└── cli/               # Demo ingestion, evaluation, review set builder, perf benchmark
+web/                   # Legacy /ui smoke-test page
+frontend/              # Vue 3 SPA and Electron shell
+configs/settings.yaml  # System configuration
+docs/                  # Documentation index, specs, and task briefs
+tests/                 # unit, integration, evaluation, review, and frozen benchmark sets
 ```
 
-## 里程碑（DEVELOPMENT.md 第 9 章）
+## Documentation
 
-| 周 | 交付 |
-|---|---|
-| W1 | 工程骨架、接口契约、Config、Parser + Chunker、UI 骨架 |
-| W2 | VectorEngine + VectorStore + Retriever(RRF) + 上传 Job 流水线 |
-| W3 | Orchestration 反思循环 + Detector + `/api/query` + DeepSeek |
-| W4 | 测试全覆盖≥80% + 集成 + 评测 + 可选 Docker |
-| W5 | 精排 bge_reranker + 语义评估/LLM 改写/语义检测（Phase2） |
-| W6 | 多知识库隔离 + 评测体系 v2 |
-| W7 | Vue3 SPA 五区块 + CORS/静态托管（Phase2） |
-| W8 | Electron 桌面壳 + 认证/权限（V5.1：密码登录 + 库级 RBAC） |
+| Topic | What it covers | Link |
+|---|---|---|
+| Using the product | Screens, upload flow, and what each setting does | [PRODUCT_MANUAL.md](./PRODUCT_MANUAL.md) |
+| Specification | Interface contracts, data models, algorithms, and acceptance criteria | [DEVELOPMENT.md](./DEVELOPMENT.md) |
+| Documentation index | How `docs/` is organized and where new documents go | [docs/README.md](./docs/README.md) |
+| Agentic design | Planner, tool calls, evidence ledger, and the roadmap | [docs/specs/真Agentic_RAG设计.md](./docs/specs/真Agentic_RAG设计.md) |
+| Validation set | How `make eval` scores answers | [tests/eval/README.md](./tests/eval/README.md) |
+| External set | How the CMRC review set is built and run | [tests/review/README.md](./tests/review/README.md) |
+| Frozen benchmark | The 120-question frozen set and its rules | [tests/eval_suite/README.md](./tests/eval_suite/README.md) |
+| Contributor rules | Engineering conventions for development agents | [AGENTS.md](./AGENTS.md) |
 
-## 测试
+## Status
 
-```bash
-make test                        # 单测 + 覆盖率门禁
-.venv/bin/python -m pytest -m integration   # 集成全链路（需本机 BGE 缓存）
-make eval                        # 评测报告
-```
+Phases 1 and 2 are delivered: the retrieval loop, multi-knowledge-base isolation, the Vue 3 SPA, the Electron shell, and team-mode authentication. Current work is hardening — desktop packaging decisions and the agentic evaluation track.
