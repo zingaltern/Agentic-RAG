@@ -43,7 +43,8 @@ class JobStore:
                         job_id=item["job_id"], filename=item.get("filename", ""),
                         status=item.get("status", "pending"), document_id=item.get("document_id"),
                         chunk_count=item.get("chunk_count", 0),
-                        error_code=item.get("error_code"), kb_id=item.get("kb_id"),
+                        error_code=item.get("error_code"),
+                        error_message=item.get("error_message"), kb_id=item.get("kb_id"),
                         created_at=item.get("created_at", 0.0), updated_at=item.get("updated_at", 0.0), stage_timings=item.get("stage_timings") or {},
                     )
                     self._jobs[job.job_id] = job
@@ -51,6 +52,7 @@ class JobStore:
                         # 重启残留：明确标记中断，避免前端 404/超时误报
                         job.status = "failed"
                         job.error_code = INTERRUPTED_CODE
+                        job.error_message = "服务重启，任务中断"
                         job.updated_at = time.time()
                         logger.warning("重启恢复：Job %s 标记为中断（%s）", job.job_id, INTERRUPTED_CODE)
             except Exception as exc:  # noqa: BLE001
@@ -68,7 +70,8 @@ class JobStore:
     def _to_dict(job: Job) -> dict:
         return {"job_id": job.job_id, "filename": job.filename, "status": job.status,
                 "document_id": job.document_id, "chunk_count": job.chunk_count,
-                "error_code": job.error_code, "kb_id": job.kb_id,
+                "error_code": job.error_code, "error_message": job.error_message,
+                "kb_id": job.kb_id,
                 "created_at": job.created_at, "updated_at": job.updated_at,
                 "stage_timings": job.stage_timings}
 

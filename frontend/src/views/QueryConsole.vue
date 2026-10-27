@@ -12,13 +12,15 @@
  */
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import {
-  Bottom, ChatDotRound, ChatLineRound, CircleCheck, CircleClose, Delete, Download,
-  MagicStick, MoreFilled, Promotion, Search, UploadFilled, VideoPause,
+  Bottom, ChatDotRound, ChatLineRound, CircleClose, Delete, Download, InfoFilled,
+  FolderOpened, MagicStick, MoreFilled, Promotion, Search, UploadFilled, VideoPause,
 } from '@element-plus/icons-vue'
 import PageHeader from '../components/PageHeader.vue'
 import EmptyState from '../components/EmptyState.vue'
 import SegmentedControl from '../components/SegmentedControl.vue'
 import InlineText from '../components/InlineText.vue'
+import AnswerMeta from '../components/AnswerMeta.vue'
+import TraceDetails from '../components/TraceDetails.vue'
 import { api, CANCELLED_CODE, friendlyError } from '../api'
 import { useAppStore } from '../stores/app'
 import { useKbs } from '../composables/useKbs'
@@ -27,7 +29,9 @@ import { beginQuery, abortQuery, finishQuery, isCurrent } from '../composables/u
 import { buildHistory, findLastUserIndex } from '../utils/chat'
 import { hostOf, safeHttpUrl } from '../utils/url'
 import { parseMarkdown } from '../utils/markdown'
-import { formatClock, formatDuration, formatPercent, toNumber } from '../utils/format'
+import { formatClock, toNumber } from '../utils/format'
+import { hasEvidence, shouldShowAnswerMeta } from '../utils/answerView'
+import { agentFallbackNotice } from '../utils/agentMode'
 
 const store = useAppStore()
 const { kbs, load: loadKbs } = useKbs()
@@ -35,9 +39,24 @@ const { kbs, load: loadKbs } = useKbs()
 const chat = computed(() => store.chat)
 const debug = ref(false)
 const mode = ref('reflect')   // P-D：reflect | auto | agentic（服务端默认 reflect）
+// 服务端实际是否装配 AgentRuntime：null=未知（旧服务/探测失败，不误报），false=未开启。
+const agentEnabled = ref(null)
+// 服务端 web.enabled（默认是否联网）；null=旧服务未知。仅用于把 tooltip 说准：
+// 默认关闭时开启仍需服务端配置 Tavily Key 才会外发，不能直接宣称“会发送”。
+const webEnabled = ref(null)
 const webSearch = computed({
   get: () => store.webSearch,
   set: (v) => { store.webSearch = v },
+})
+const webTip = computed(() => {
+  if (webEnabled.value === false) {
+    return webSearch.value
+      ? '联网已开启：服务端默认关闭，配置 Tavily Key 后才会外发'
+      : '仅检索本地知识库（服务端默认关闭联网）'
+  }
+  return webSearch.value
+    ? '联网搜索已开启（问题文本会发送至 Tavily）'
+    : '仅检索本地知识库'
 })
 
 const bodyRef = ref(null)
@@ -49,6 +68,8 @@ const expandedSources = ref({})
 const feedback = ref({})
 let composing = false
 let pendingInsertAt = null   // 停止时把占位插回原位置（重生成场景）
+// 在途请求发起时快照的知识库：切库后提示“这条仍按旧库回答”，并给消息打归属。
+let inflightKb = null        // { id, name } | null
 
 const currentKb = computed(() => kbs.value.find((k) => k.kb_id === store.kbId) || null)
 const emptyKb = computed(() => kbDocs.value === 0)
@@ -57,27 +78,57 @@ const lastUserIndex = computed(() => findLastUserIndex(messages.value))
 const lastUserMessage = computed(() => messages.value[lastUserIndex.value] || null)
 
 /* ---------------- 数据加载 ---------------- */
+/** 读取服务端实际装配态；失败/旧服务无 features 时保持未知，不误报“Agent 未开启”。 */
+async function loadServerFeatures() {
+  const res = await api('/api/health', { silent: true, timeout: 8000 })
+  if (res.code === 0 && res.data && res.data.features) {
+    const features = res.data.features
+    agentEnabled.value = features.agent_enabled !== false
+    if (Object.prototype.hasOwnProperty.call(features, 'web_enabled')) {
+      webEnabled.value = features.web_enabled !== false
+    }
+  }
+}
+
 onMounted(async () => {
   await loadKbs()
-  ensureKbAccessible()
+  // 库列表就绪后再判定持久化的 kbId：无权/已删除时先回退，避免先发一次注定 40401 的请求
+  const moved = ensureKbAccessible()
+  if (!moved) loadKbDocs()
   loadFeedback()
+  loadServerFeatures()
   // 切页/刷新回来时恢复到底部：否则长对话停在顶部，且“回到底部”按钮因 atBottom=true 而隐藏
   if (messages.value.length) nextTick(() => scrollToBottom())
 })
 
 onUnmounted(() => {
-  // 离开页面即放弃在途请求：否则回答会落到"已看不见"的会话里，且 loading 常驻
+  // 离开页面即放弃在途请求：与“停止”一致留下可重试占位，否则用户回来只看到
+  // 自己的问题、没有任何“已中断”的解释（S3）。
+  const wasLoading = chat.value.loading
+  const at = pendingInsertAt
   abortQuery()
   chat.value.loading = false
   pendingInsertAt = null
+  if (wasLoading) {
+    insertMessage({
+      id: newId(), role: 'assistant', text: '', result: null,
+      interrupted: true, time: new Date(),
+      kbId: inflightKb && inflightKb.id,
+      kbName: inflightKb && inflightKb.name,
+    }, at)
+  }
+  inflightKb = null
 })
 
-/** 上次选中的库可能已被删除或无权访问 → 回落到 default，避免空白列表与无效请求。 */
+/** 上次选中的库可能已被删除或无权访问 → 回落到 default，避免空白列表与无效请求。
+ *  @returns {boolean} 是否发生了回退（调用方据此决定是否立即加载，避免重复请求） */
 function ensureKbAccessible() {
   if (kbs.value.length && !kbs.value.some((k) => k.kb_id === store.kbId)) {
     store.setKbId('default')
     store.pushInfo('上次使用的知识库不可用，已切回默认库')
+    return true
   }
+  return false
 }
 
 /** 侧栏/命令面板/本页下拉任一入口切库都会触发：文档数、建议问题、空态同步刷新。 */
@@ -89,6 +140,8 @@ watch(
 
 async function loadKbDocs() {
   const kbId = store.kbId
+  // 列表尚未就绪或该库不可访问：等 onMounted 回退/切库后再加载，避免越权请求
+  if (!kbs.value.some((k) => k.kb_id === kbId)) return
   const res = await api(`/api/documents?page=1&size=20&kb_id=${encodeURIComponent(kbId)}`, { silent: true })
   if (kbId !== store.kbId) return   // 快速切库：丢弃过期响应
   if (res.code === 0) {
@@ -106,6 +159,10 @@ function onKbChange() {
   store.setKbId(store.kbId)
   const name = currentKb.value ? currentKb.value.name : store.kbId
   store.pushInfo(`已切换到「${name}」`)
+  if (chat.value.loading && inflightKb && inflightKb.id !== store.kbId) {
+    // 请求已按旧库发出：必须让用户知道这条回答不属于当前库（S3）。
+    store.pushInfo(`在途问题仍按「${inflightKb.name || inflightKb.id}」回答`)
+  }
   nextTick(() => inputRef.value && inputRef.value.focus())
 }
 
@@ -137,7 +194,8 @@ function insertMessage(message, at) {
 
 /**
  * @param {string} q
- * @param {{appendUser?: boolean, insertAt?: number|null, historyOverride?: Array|null}} options
+ * @param {{appendUser?: boolean, insertAt?: number|null, historyOverride?: Array|null,
+ *          kbId?: string, kbName?: string}} options
  */
 async function runQuery(q, options = {}) {
   const { appendUser = true, insertAt = null, historyOverride = null } = options
@@ -148,9 +206,18 @@ async function runQuery(q, options = {}) {
   const question = String(q || '').trim()
   if (!question) { store.pushError('请输入问题'); return }
 
+  // 发起时快照知识库：在途切库/重试都不能把回答错记到当前库（S3）。
+  const requestKbId = options.kbId || store.kbId
+  const requestKbName = options.kbName
+    || (requestKbId === store.kbId && currentKb.value
+      ? currentKb.value.name
+      : ((kbs.value.find((k) => k.kb_id === requestKbId) || {}).name || requestKbId))
   const history = historyOverride || buildHistory(messages.value)
   if (appendUser) {
-    messages.value.push({ id: newId(), role: 'user', text: question, time: new Date() })
+    messages.value.push({
+      id: newId(), role: 'user', text: question, time: new Date(),
+      kbId: requestKbId, kbName: requestKbName,
+    })
   }
   chat.value.query = ''
   atBottom.value = true
@@ -159,16 +226,19 @@ async function runQuery(q, options = {}) {
   const token = beginQuery()
   pendingInsertAt = insertAt
   chat.value.loading = true
+  inflightKb = { id: requestKbId, name: requestKbName }
+  // 用“发起时”的模式生成提示：用户回答后切到别的模式，不应改写这条消息的语义。
+  const requestedMode = mode.value
   try {
     const res = await api('/api/query', {
       method: 'POST',
       signal: token.signal,
       body: JSON.stringify({
         query: question,
-        kb_id: store.kbId,
+        kb_id: requestKbId,
         debug: debug.value,
         web_search: webSearch.value,
-        mode: mode.value,
+        mode: requestedMode,
         history,
         session_id: store.ensureSessionId(),
       }),
@@ -178,11 +248,20 @@ async function runQuery(q, options = {}) {
     if (res.code === CANCELLED_CODE) return   // 停止占位由 stop() 统一插入
 
     const okAnswer = res.code === 0
+    const result = { ...(res.data || {}), code: res.code }
+    // 21003 的具体澄清问句在 data.answer；message 只是通用标题，不能丢具体问句。
+    const errorText = !okAnswer && res.code === 21003 && res.data && res.data.answer
+      ? String(res.data.answer)
+      : friendlyError(res.code, res.message)
     insertMessage({
       id: newId(),
       role: 'assistant',
-      text: okAnswer ? ((res.data && res.data.answer) || '') : friendlyError(res.code, res.message),
-      result: { ...(res.data || {}), code: res.code },
+      text: okAnswer ? ((res.data && res.data.answer) || '') : errorText,
+      result,
+      // D01：Agent 选中但服务端未开启/回退时，消息旁必须可见提示，不能只靠本地分段态。
+      agentNotice: agentFallbackNotice(result, requestedMode),
+      kbId: requestKbId,
+      kbName: requestKbName,
       time: new Date(),
       error: !okAnswer,
     }, insertAt)
@@ -193,6 +272,8 @@ async function runQuery(q, options = {}) {
       role: 'assistant',
       text: friendlyError(-1, String((e && e.message) || e)),
       result: { code: -1, message: String((e && e.message) || e) },
+      kbId: requestKbId,
+      kbName: requestKbName,
       time: new Date(),
       error: true,
     }, insertAt)
@@ -201,6 +282,7 @@ async function runQuery(q, options = {}) {
     if (isCurrent(token.generation)) {
       chat.value.loading = false
       pendingInsertAt = null
+      inflightKb = null
       if (atBottom.value) scrollToBottom()
     }
   }
@@ -219,7 +301,9 @@ function stop() {
   pendingInsertAt = null
   insertMessage({
     id: newId(), role: 'assistant', text: '', result: null, interrupted: true, time: new Date(),
+    kbId: inflightKb && inflightKb.id, kbName: inflightKb && inflightKb.name,
   }, at)
+  inflightKb = null
   store.pushInfo('已停止生成')
   if (atBottom.value) scrollToBottom()
 }
@@ -240,8 +324,12 @@ function regenerate(index) {
   const question = findQuestionBefore(index)
   if (!question) return
   const historyOverride = buildHistory(messages.value, { beforeIndex: index, excludeTrailingUser: true })
+  // 重新生成必须回到原回答所属的库；否则切库后重试会悄悄查错库（S3）。
+  const kbId = target.kbId || store.kbId
+  const kbName = target.kbName
+    || ((kbs.value.find((k) => k.kb_id === kbId) || {}).name || kbId)
   messages.value.splice(index, 1)
-  runQuery(question, { appendUser: false, insertAt: index, historyOverride })
+  runQuery(question, { appendUser: false, insertAt: index, historyOverride, kbId, kbName })
 }
 
 function findQuestionBefore(index) {
@@ -283,6 +371,7 @@ function clearChat() {
   abortQuery()
   chat.value.loading = false
   pendingInsertAt = null
+  inflightKb = null
   chat.value.messages = []
   chat.value.query = ''
   store.resetSession()
@@ -340,30 +429,9 @@ function blocks(text) {
   return parsed
 }
 
-function citedText(result) {
-  const used = (result && result.citations && result.citations.used) || []
-  return Array.isArray(used) ? used.join(' ') : String(used || '')
-}
-
-function verifiedRate(result) {
-  return Math.min(Math.max(toNumber(result && result.citations && result.citations.confirmed, 0), 0), 1)
-}
-
-/** 后端给了 hallucination_check 就严格照办；只有字段缺失时才用已证率兜底。 */
-function passedCheck(result) {
-  if (!result) return false
-  if (result.hallucination_check === 'passed') return true
-  if (result.hallucination_check === 'suspected') return false
-  return verifiedRate(result) >= 0.6
-}
-
-function badgeType(result) {
-  return passedCheck(result) ? 'success' : 'warning'
-}
-
-function badgeText(result) {
-  const rate = formatPercent(verifiedRate(result))
-  return passedCheck(result) ? `已证 ${rate} · 通过` : `已证 ${rate} · 待核实`
+function sourceCount(message) {
+  const sources = message && message.result && message.result.sources
+  return Array.isArray(sources) ? sources.length : 0
 }
 
 function sourceScore(source) {
@@ -496,8 +564,16 @@ const canSend = computed(() => Boolean(chat.value.query.trim()) && !chat.value.l
             ]"
             size="sm"
           />
+          <span
+            v-if="agentEnabled === false"
+            class="mode-off"
+            title="服务端未启用 Agent（orchestration.agent.enabled=false）"
+          >Agent 未开启</span>
 
-          <el-tooltip :content="webSearch ? '联网搜索已开启' : '仅检索本地知识库'" placement="bottom">
+          <el-tooltip
+            :content="webTip"
+            placement="bottom"
+          >
             <button
               type="button"
               class="web-toggle"
@@ -578,6 +654,22 @@ const canSend = computed(() => Boolean(chat.value.query.trim()) && !chat.value.l
           <div v-else class="msg msg--ai">
             <span class="ai-avatar" aria-hidden="true"><el-icon><ChatDotRound /></el-icon></span>
             <div class="msg-body">
+              <!-- 回答所属库与当前库不一致：切库/重试后必须显式标注，避免张冠李戴（S3） -->
+              <div v-if="m.kbId && m.kbId !== store.kbId" class="msg-kb-note" role="note">
+                <el-icon><FolderOpened /></el-icon>
+                <span>本回答来自「{{ m.kbName || m.kbId }}」，当前已切换到「{{ currentKb ? currentKb.name : store.kbId }}」</span>
+              </div>
+              <!-- Agent 关闭/回退的可见提示（D01）：不依赖 debug，错误分支同样显示 -->
+              <div
+                v-if="m.agentNotice"
+                class="agent-notice"
+                :class="`agent-notice--${m.agentNotice.kind}`"
+                role="status"
+              >
+                <el-icon><InfoFilled /></el-icon>
+                <span>{{ m.agentNotice.text }}</span>
+              </div>
+
               <!-- 中断 -->
               <div v-if="m.interrupted" class="interrupted">
                 <el-icon><VideoPause /></el-icon>
@@ -593,6 +685,8 @@ const canSend = computed(() => Boolean(chat.value.query.trim()) && !chat.value.l
                 </p>
                 <p class="error-text">{{ m.text }}</p>
                 <button type="button" class="tool tool--strong" @click="retry(index)">重试</button>
+                <AnswerMeta v-if="m.result" :result="m.result" :show-verification="false" />
+                <TraceDetails v-if="m.result" :result="m.result" :debug="debug" />
               </div>
 
               <!-- 正常回答 -->
@@ -600,16 +694,16 @@ const canSend = computed(() => Boolean(chat.value.query.trim()) && !chat.value.l
                 <div v-if="!blocks(m.text).length" class="answer-empty muted">（空回答）</div>
                 <template v-for="(b, bi) in blocks(m.text)" :key="bi">
                   <h3 v-if="b.type === 'h1' || b.type === 'h2' || b.type === 'h3' || b.type === 'h4'" class="md-h">
-                    <InlineText :text="b.text" @cite="jumpToSources(m.id)" />
+                    <InlineText :text="b.text" :cite-count="sourceCount(m)" @cite="jumpToSources(m.id)" />
                   </h3>
                   <ul v-else-if="b.type === 'ul'" class="md-list">
-                    <li v-for="(it, ii) in b.items" :key="ii"><InlineText :text="it" @cite="jumpToSources(m.id)" /></li>
+                    <li v-for="(it, ii) in b.items" :key="ii"><InlineText :text="it" :cite-count="sourceCount(m)" @cite="jumpToSources(m.id)" /></li>
                   </ul>
                   <ol v-else-if="b.type === 'ol'" class="md-list">
-                    <li v-for="(it, ii) in b.items" :key="ii"><InlineText :text="it" @cite="jumpToSources(m.id)" /></li>
+                    <li v-for="(it, ii) in b.items" :key="ii"><InlineText :text="it" :cite-count="sourceCount(m)" @cite="jumpToSources(m.id)" /></li>
                   </ol>
                   <blockquote v-else-if="b.type === 'quote'" class="md-quote">
-                    <InlineText :text="b.text" @cite="jumpToSources(m.id)" />
+                    <InlineText :text="b.text" :cite-count="sourceCount(m)" @cite="jumpToSources(m.id)" />
                   </blockquote>
                   <pre v-else-if="b.type === 'code'" class="md-code"><code>{{ b.text }}</code></pre>
                   <div v-else-if="b.type === 'table'" class="md-table-wrap">
@@ -617,33 +711,28 @@ const canSend = computed(() => Boolean(chat.value.query.trim()) && !chat.value.l
                       <thead v-if="b.headers && b.headers.length">
                         <tr>
                           <th v-for="(h, hi) in b.headers" :key="hi">
-                            <InlineText :text="h" @cite="jumpToSources(m.id)" />
+                            <InlineText :text="h" :cite-count="sourceCount(m)" @cite="jumpToSources(m.id)" />
                           </th>
                         </tr>
                       </thead>
                       <tbody>
                         <tr v-for="(row, ri) in b.rows" :key="ri">
                           <td v-for="(cell, ci) in row" :key="ci">
-                            <InlineText :text="cell" @cite="jumpToSources(m.id)" />
+                            <InlineText :text="cell" :cite-count="sourceCount(m)" @cite="jumpToSources(m.id)" />
                           </td>
                         </tr>
                       </tbody>
                     </table>
                   </div>
                   <hr v-else-if="b.type === 'hr'" class="md-hr" />
-                  <p v-else class="md-p"><InlineText :text="b.text" @cite="jumpToSources(m.id)" /></p>
+                  <p v-else class="md-p"><InlineText :text="b.text" :cite-count="sourceCount(m)" @cite="jumpToSources(m.id)" /></p>
                 </template>
 
-                <div v-if="m.result" class="answer-meta">
-                  <el-tag :type="badgeType(m.result)" size="small" effect="light">
-                    <el-icon class="meta-icon"><CircleCheck v-if="passedCheck(m.result)" /><CircleClose v-else /></el-icon>
-                    {{ badgeText(m.result) }}
-                  </el-tag>
-                  <span v-if="citedText(m.result)" class="meta-chip mono">引用 {{ citedText(m.result) }}</span>
-                  <span class="meta-chip">{{ formatDuration(m.result.elapsed_ms) }}</span>
-                  <span v-if="m.result.iterations" class="meta-chip">反思 {{ m.result.iterations }} 轮</span>
-                  <span v-if="m.result.index_dna_mismatch" class="meta-chip meta-chip--warn">索引配置不一致</span>
-                </div>
+                <AnswerMeta
+                  v-if="shouldShowAnswerMeta(m.result)"
+                  :result="m.result"
+                  :show-verification="hasEvidence(m.result)"
+                />
 
                 <!-- 来源卡片 -->
                 <div v-if="m.result && m.result.sources && m.result.sources.length" :id="`sources-${m.id}`" class="sources">
@@ -685,32 +774,8 @@ const canSend = computed(() => Boolean(chat.value.query.trim()) && !chat.value.l
                   </article>
                 </div>
 
-                <!-- 反思过程 -->
-                <details v-if="debug && m.result && m.result.debug_trace && m.result.debug_trace.length" class="trace">
-                  <summary>反思过程（{{ m.result.debug_trace.length }} 步）</summary>
-                  <div v-for="(step, k) in m.result.debug_trace" :key="k" class="trace-step">
-                    <p class="trace-title">
-                      第 {{ step.iter ?? k + 1 }} 轮<span v-if="step.reason"> · {{ step.reason }}</span><span v-if="step.evaluator_score !== undefined"> · 评分 {{ step.evaluator_score }}</span>
-                    </p>
-                    <p v-if="step.query" class="trace-query mono">query: {{ step.query }}</p>
-                    <p v-if="step.rewritten && step.rewritten.length" class="trace-query mono">rewrite: {{ step.rewritten.join(' / ') }}</p>
-                    <pre class="trace-json">{{ JSON.stringify(step, null, 2) }}</pre>
-                  </div>
-                </details>
-
-                <!-- Agent 计划/步骤（P-D，debug 时显示） -->
-                <details v-if="debug && m.result && m.result.plan" class="trace">
-                  <summary>Agent 计划（{{ (m.result.plan.subgoals || []).length }} 个子目标）</summary>
-                  <div v-for="g in (m.result.plan.subgoals || [])" :key="g.goal_id" class="trace-step">
-                    <p class="trace-title">{{ g.goal_id }} · {{ g.question }}<span v-if="g.status"> · {{ g.status }}</span></p>
-                    <p v-if="g.success_criteria" class="trace-query">判据：{{ g.success_criteria }}</p>
-                  </div>
-                  <div v-for="(st, k) in (m.result.steps || [])" :key="`st-${k}`" class="trace-step">
-                    <p class="trace-title">第 {{ st.step ?? k + 1 }} 步 · {{ st.action }}</p>
-                    <p v-if="st.summary" class="trace-query">{{ st.summary }}</p>
-                    <p v-if="st.evidence_ids && st.evidence_ids.length" class="trace-query mono">证据：{{ st.evidence_ids.join(' / ') }}</p>
-                  </div>
-                </details>
+                <!-- 反思过程 / Agent 计划（正常回答与错误分支共用） -->
+                <TraceDetails v-if="m.result" :result="m.result" :debug="debug" />
               </div>
 
               <div v-if="!m.interrupted" class="msg-tools msg-tools--ai">
@@ -755,6 +820,15 @@ const canSend = computed(() => Boolean(chat.value.query.trim()) && !chat.value.l
       </button>
     </transition>
 
+    <p
+      v-if="agentEnabled === false && mode === 'agentic'"
+      class="agent-inline-hint"
+      role="status"
+    >
+      <el-icon><InfoFilled /></el-icon>
+      服务端未启用 Agent，本次将按反思模式回答。
+    </p>
+
     <footer class="chat-composer">
       <div class="composer" :class="{ 'is-busy': chat.loading }">
         <el-input
@@ -787,7 +861,7 @@ const canSend = computed(() => Boolean(chat.value.query.trim()) && !chat.value.l
         </div>
       </div>
       <p class="composer-note muted">
-        回答由检索结果与模型生成，请以引用原文为准；联网搜索需服务端配置搜索服务。
+        回答由检索结果与模型生成，请以引用原文为准；开启联网会将问题发送至 Tavily，需服务端配置搜索服务。
       </p>
     </footer>
   </div>
@@ -826,6 +900,30 @@ html[data-theme="dark"] .chat-page { background: var(--bg); }
 }
 .web-toggle:hover { border-color: var(--accent); color: var(--accent); }
 .web-toggle.is-on { background: var(--accent-soft); border-color: var(--accent-soft-2); color: var(--accent); }
+.mode-off {
+  display: inline-flex;
+  align-items: center;
+  height: 24px;
+  padding: 0 9px;
+  border-radius: var(--radius-pill);
+  background: var(--fill-1);
+  color: var(--text-tertiary);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.agent-inline-hint {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  margin: 0 28px;
+  padding: 7px 12px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-sm, 8px);
+  background: var(--surface);
+  color: var(--text-secondary);
+  font-size: 12px;
+}
 
 /* ---------- 消息区 ---------- */
 .chat-scroll { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow-y: auto; padding: 6px 28px 4px; }
@@ -843,6 +941,38 @@ html[data-theme="dark"] .chat-page { background: var(--bg); }
 .msg--user { justify-content: flex-end; }
 .msg-body { display: flex; flex-direction: column; max-width: min(76%, 680px); min-width: 0; }
 .msg--user .msg-body { align-items: flex-end; }
+
+
+.msg-kb-note {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  align-self: flex-start;
+  margin-bottom: 7px;
+  padding: 5px 9px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-sm, 8px);
+  background: var(--fill-1);
+  color: var(--text-tertiary);
+  font-size: 11.5px;
+}
+.msg-kb-note .el-icon { font-size: 12px; }
+.agent-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin-bottom: 7px;
+  padding: 7px 10px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-sm, 8px);
+  background: var(--surface);
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.agent-notice .el-icon { margin-top: 2px; flex: none; }
+.agent-notice--disabled { border-color: var(--hairline); }
+.agent-notice--fallback { border-color: var(--warning); color: var(--warning); }
 
 .ai-avatar {
   display: inline-flex;
@@ -957,25 +1087,6 @@ html[data-theme="dark"] .chat-page { background: var(--bg); }
 /* 报错类长标识（StackOverflowError 等）不要被从中间掰断，宁可让外层横向滚动 */
 .md-table .inline-code { white-space: nowrap; }
 
-.answer-meta {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-  margin-top: 12px;
-  padding-top: 10px;
-  border-top: 1px solid var(--hairline);
-}
-.meta-icon { margin-right: 4px; vertical-align: -2px; }
-.meta-chip {
-  font-size: 11.5px;
-  color: var(--text-tertiary);
-  padding: 2px 7px;
-  border-radius: var(--radius-pill);
-  background: var(--fill-1);
-}
-.meta-chip--warn { color: var(--warning); background: var(--warning-soft); }
-
 /* 来源 */
 .sources { margin-top: 12px; }
 .sources-title {
@@ -1029,34 +1140,6 @@ html[data-theme="dark"] .chat-page { background: var(--bg); }
 }
 .source-chunk.is-expanded { display: block; -webkit-line-clamp: unset; }
 .source-foot { display: flex; gap: 4px; flex-wrap: wrap; }
-
-/* 反思过程 */
-.trace { margin-top: 10px; }
-.trace summary {
-  cursor: pointer;
-  font-size: 12px;
-  color: var(--text-secondary);
-  padding: 6px 0;
-  list-style: none;
-}
-.trace summary::-webkit-details-marker { display: none; }
-.trace summary::before { content: '▸ '; color: var(--text-tertiary); }
-.trace[open] summary::before { content: '▾ '; }
-.trace-step { padding: 8px 0; border-top: 1px solid var(--hairline); }
-.trace-title { margin: 0 0 4px; font-size: 12px; font-weight: 600; color: var(--text-secondary); }
-.trace-query { margin: 0; font-size: 11.5px; color: var(--text-tertiary); word-break: break-all; }
-.trace-json {
-  margin: 6px 0 0;
-  padding: 8px 10px;
-  max-height: 200px;
-  overflow: auto;
-  border-radius: var(--radius-xs);
-  background: var(--bg-deep);
-  border: 1px solid var(--hairline);
-  font-size: 11px;
-  line-height: 1.55;
-  color: var(--text-secondary);
-}
 
 /* 工具条 */
 .msg-tools {

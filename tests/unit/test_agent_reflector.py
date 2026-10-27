@@ -70,6 +70,35 @@ def test_repeated_failure_replans():
     assert result.decision == "replan"
 
 
+def test_repeated_failure_with_no_new_evidence_replans_before_abstain():
+    """S2：连续无新证据与 attempts>=2 同时出现时，应先重规划而不是直接弃答。"""
+    state = _state()
+    for goal in state.plan.subgoals:
+        goal.attempts = 2
+    state.no_new_evidence_steps = 2
+    reflector = RuleReflector(load_config().orchestration.agent)
+    result = reflector.reflect(state)
+    assert result.decision == "replan"
+
+
+def test_synthesis_goal_satisfied_by_dependencies():
+    """对比目标不抢证据；依赖的叶子目标都满足时，g3 也视为满足。"""
+    plan = Plan("p1", "对比", complexity="comparison", subgoals=[
+        SubGoal("g1", "员工手册年假", "找到年假条款"),
+        SubGoal("g2", "差旅政策住宿", "找到住宿条款"),
+        SubGoal("g3", "对比两者是否一致", "基于 g1/g2 判断", depends_on=["g1", "g2"]),
+    ])
+    state = AgentState("r", "t", "q", "q", "agentic", plan=plan)
+    state.subgoal_status = {g.goal_id: "pending" for g in plan.subgoals}
+    _add(state, "c1", "doc1", "入职满 2 年年假 10 天", "g1")
+    _add(state, "c2", "doc2", "一线城市住宿 500 元/晚", "g2")
+    reflector = RuleReflector(load_config().orchestration.agent)
+    status, reasons = reflector._status(state, "g3")
+    assert status == "satisfied", reasons
+    assert reflector.sufficient(state) is True
+    assert reflector.reflect(state).decision == "answer"
+
+
 def test_fourth_rank_high_normalized_score_is_satisfied():
     state = _state(complexity="simple")
     item = _add(state, "c1", "doc1", "年假 5 天", "g1", score=0.01)

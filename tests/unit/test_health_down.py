@@ -53,3 +53,73 @@ def test_health_not_loaded_when_embedding_unready(tmp_path, isolated_stores):
         body = client.get("/api/health").json()
     assert body["data"]["checks"]["embedding"] == "not_loaded"
     assert body["data"]["status"] == "degraded"
+
+
+class _ReadyEmbedding:
+    is_loaded = True
+
+
+class _OkStore:
+    def count(self):
+        return 0
+
+
+class _ProbeLLM:
+    def __init__(self, ok: bool):
+        self.ok = ok
+        self.calls = 0
+
+    def probe(self):
+        self.calls += 1
+        return self.ok, "" if self.ok else "401 Authentication Fails"
+
+    def chat(self, *_a, **_k):
+        return "ok"
+
+
+def _probe_app(tmp_path, isolated_stores, llm):
+    from app.api.health import _reset_probe_cache
+
+    _reset_probe_cache()
+    config = load_config()
+    config.vector_store.persist_dir = str(tmp_path / "chroma")
+    config.documents.persist_file = str(tmp_path / "documents.json")
+    config.kbs.persist_file = str(tmp_path / "kb.json")
+    return create_app(config=config, components=True, prewarm=False,
+                      embedding=_ReadyEmbedding(), vector_store=_OkStore(),
+                      llm=llm, kbs=isolated_stores["kbs"],
+                      users=isolated_stores["users"],
+                      documents=isolated_stores["documents"],
+                      jobs=isolated_stores["jobs"])
+
+
+def test_health_probe_marks_invalid_llm_key_down(tmp_path, isolated_stores):
+    """6.7：设置页 probe=1 必须反映鉴权失败，不能只凭“已装配”亮绿灯。"""
+    llm = _ProbeLLM(ok=False)
+    app = _probe_app(tmp_path, isolated_stores, llm)
+    with TestClient(app) as client:
+        body = client.get("/api/health?probe=1").json()
+    checks = body["data"]["checks"]
+    assert checks["llm"] == "down"
+    assert body["data"]["status"] == "down"
+    assert body["data"]["features"]["llm_probe"] is True
+    assert body["data"]["features"]["web_enabled"] is False
+
+
+def test_health_default_mode_does_not_call_llm(tmp_path, isolated_stores):
+    llm = _ProbeLLM(ok=False)
+    app = _probe_app(tmp_path, isolated_stores, llm)
+    with TestClient(app) as client:
+        body = client.get("/api/health").json()
+    assert body["data"]["checks"]["llm"] == "ok"
+    assert body["data"]["features"]["llm_probe"] is False
+    assert llm.calls == 0
+
+
+def test_health_probe_result_is_cached(tmp_path, isolated_stores):
+    llm = _ProbeLLM(ok=True)
+    app = _probe_app(tmp_path, isolated_stores, llm)
+    with TestClient(app) as client:
+        client.get("/api/health?probe=1")
+        client.get("/api/health?probe=1")
+    assert llm.calls == 1

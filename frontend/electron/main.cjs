@@ -2,10 +2,11 @@
  * Electron 桌面壳（DEVELOPMENT.md 13.7 桌面段）——三步走：
  * ① 启动：探测端口（默认 8000，占用自动后移）→ 以项目 .venv 拉起 uvicorn（仅 127.0.0.1）；
  *    外部后端模式（userData 已配置 external_base）→ 不拉起，直接连接。
- * ② 就绪：轮询 /api/health（≤30s，带 splash）后才 loadURL；失败弹错误而非白屏。
+ * ② 就绪：轮询 /api/health（≤60s，带 splash）后才 loadURL；失败弹恢复选择而非白屏。
  * ③ 退出：窗口关闭 → 级联终止后端子进程（killBackend），无残留。
  * 运行中后端进程意外退出（含被外部信号优雅终止）→ 自动重启并再次等待就绪（带 splash）；
  *    恢复失败才弹错误框，并以 app.exit() 强制退出（避免模态弹窗下 macOS 无法退出/无响应）。
+ *    外部后端不可达：三选一“使用本机服务 / 重试 / 退出”，不清空配置直接退出会把用户锁死。
  * S8 安全基线：contextIsolation=true、nodeIntegration=false、sandbox=true、
  *    仅加载 loopback/自托管地址（不加载远程内容）；真实密钥只经环境变量运行时注入。
  */
@@ -15,6 +16,7 @@ const { app, BrowserWindow, dialog, ipcMain } = require('electron')
 const path = require('path')
 const fs = require('fs')
 const bootstrap = require('./bootstrap.cjs')
+const recovery = require('./recovery.cjs')
 
 const MAX_RESTART_TRIES = 2   // 运行中后端意外退出后的自动重启上限
 
@@ -165,13 +167,15 @@ async function restartBackend(detail) {
   const splash = createSplash()
   try {
     const port = await launchBackend()
-    if (!splash.isDestroyed()) splash.close()
     if (port === null) {
+      if (!splash.isDestroyed()) splash.close()
       exited = true
       showBackendFailure('后端服务中断', `${detail}\n\n服务器无可用端口，请稍后重新打开应用。`)
       app.exit(1)
       return
     }
+    // 注意：splash 必须保留到 waitBackendReady() 完成（它会在就绪/超时后关闭）。
+    // 这里提前 close 会让“恢复中”窗口只存在几毫秒，冷启动时用户无任何反馈。
     const ready = await waitBackendReady(port, splash, { failTitle: '' })
     if (!splash.isDestroyed()) splash.close()
     if (!ready) {
@@ -189,22 +193,54 @@ async function restartBackend(detail) {
   }
 }
 
+/**
+ * 外部后端不可达时的恢复选择。必须先让用户有“改回本机服务”的路径：
+ * 单选错误框后直接退出会把用户锁死在错误配置里（external_base 在 userData 中，
+ * 无窗口时无法进入设置页）。showMessageBox 失败才退回 showErrorBox + 退出。
+ */
+async function promptExternalRecovery(external) {
+  const spec = recovery.buildExternalUnavailableDialog(external, bootstrap.READY_TIMEOUT_MS)
+  try {
+    // 外部模式此时没有 BrowserWindow；主动聚焦，避免原生对话框落在其他应用后面
+    try { app.focus({ steal: true }) } catch { /* 平台不支持时忽略 */ }
+    const result = await dialog.showMessageBox(spec)
+    return recovery.resolveRecoveryAction(result && result.response)
+  } catch (e) {
+    // 极端情况下（无可用 GUI/对话框创建失败）仍要给出可读错误，避免静默退出
+    dialog.showErrorBox('外部后端不可达', `${external}\n\n${String(e && e.message ? e.message : e)}`)
+    return recovery.ACTIONS.QUIT
+  }
+}
+
 async function start() {
   const userDataDir = app.getPath('userData')
 
-  // 外部后端模式：不本机拉起，但同样等待就绪（splash + /api/health 轮询），
-  // 目标不可达时弹错误框而非打开白屏窗口。
-  const external = bootstrap.readExternalBase(userDataDir)
-  if (external) {
+  // 外部后端模式：不本机拉起，但同样等待就绪（splash + /api/health 轮询）。
+  // 不可达时进入恢复选择：使用本机服务（清空配置后继续本机启动）/ 重试 / 退出。
+  // 不允许“提示去设置页”后直接 app.quit()——外部模式下应用没有窗口可进设置页。
+  while (true) {
+    const external = bootstrap.readExternalBase(userDataDir)
+    if (!external) break
     const splash = createSplash()
     const ready = await bootstrap.waitReadyUrl(external)
     if (!splash.isDestroyed()) splash.close()
-    if (!ready) {
-      dialog.showErrorBox('外部后端不可达', `${bootstrap.READY_TIMEOUT_MS / 1000}s 内 /api/health 未返回 ok（${external}）\n\n请检查目标后端是否已启动，或在设置页修改「外部后端」地址。`)
-      app.quit()
+    if (ready) {
+      await openWindow(external, userDataDir)
       return
     }
-    await openWindow(external, userDataDir)
+    const action = await promptExternalRecovery(external)
+    if (action === recovery.ACTIONS.RETRY) continue
+    if (action === recovery.ACTIONS.USE_LOCAL) {
+      try {
+        bootstrap.writeExternalBase(userDataDir, '')
+      } catch (e) {
+        dialog.showErrorBox('无法清除外部后端配置', `${String(e && e.message ? e.message : e)}\n\n请手动删除 userData 下的 external_base.json 后重试。`)
+        app.quit()
+        return
+      }
+      break
+    }
+    app.quit()
     return
   }
 

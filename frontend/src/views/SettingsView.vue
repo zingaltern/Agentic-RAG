@@ -126,7 +126,9 @@ function onVisible() {
 async function loadHealth({ silent = false } = {}) {
   if (!silent) healthLoading.value = true
   try {
-    const res = await api('/api/health', { silent: true })
+    // probe=1：设置页要真实可用性（含 LLM 鉴权），不能只凭“已装配”亮绿灯（6.7）。
+    // 服务端对探活结果缓存 60s，10s 轮询不会反复打 provider。
+    const res = await api('/api/health?probe=1', { silent: true })
     if (res.code === 0) {
       health.value = res.data
       healthUpdatedAt.value = new Date()
@@ -177,7 +179,11 @@ async function switchProvider(module) {
 function loadExternal() {
   if (window.desktop && window.desktop.getExternalBase) {
     window.desktop.getExternalBase()
-      .then((url) => { externalUrl.value = url || '' })
+      .then((url) => {
+        externalUrl.value = url || ''
+        // 桌面端以 userData 为唯一事实来源；清掉历史版本遗留的 localStorage 覆盖值
+        try { localStorage.removeItem('external_base') } catch { /* ignore */ }
+      })
       .catch(() => {})
   } else {
     try { externalUrl.value = localStorage.getItem('external_base') || '' } catch { externalUrl.value = '' }
@@ -188,11 +194,13 @@ function saveExternal() {
   // 先取用户输入：旧实现的 loadExternal() 会把刚输入的内容覆盖回存储里的旧值
   const url = externalUrl.value.trim()
   externalUrl.value = url
-  try { localStorage.setItem('external_base', url) } catch { /* ignore */ }
   if (window.desktop && window.desktop.setExternalBase) {
     window.desktop.setExternalBase(url)
+    // 桌面端权威值在 userData（经 IPC）；localStorage 只属于 Web 模式，避免旧 origin 残留覆盖
+    try { localStorage.removeItem('external_base') } catch { /* ignore */ }
     store.pushInfo('外部后端已保存：重启桌面应用后生效（届时不再自动拉起本地服务）')
   } else {
+    try { localStorage.setItem('external_base', url) } catch { /* ignore */ }
     store.pushInfo('外部后端已保存：Web 模式需目标后端同源或开启 CORS')
   }
 }

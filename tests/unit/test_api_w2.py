@@ -145,3 +145,16 @@ def test_upload_parse_error_marks_job_failed(w2_client):
     job = _wait_job(w2_client, resp.json()["data"]["job_id"])
     assert job["data"]["status"] == "failed"
     assert job["data"]["error_code"] == "30003"
+    assert "格式与扩展名不符" in job["data"]["error_message"]
+
+
+def test_upload_msg_returns_eml_guidance(w2_client):
+    """D01：.msg 失败时 Job API 必须返回“改用 .eml”的可行动原因。"""
+    ole2 = bytes.fromhex("d0cf11e0a1b11ae1") + b"\x00" * 64
+    resp = w2_client.post("/api/documents/upload",
+                          files={"file": ("邮件.msg", ole2, "application/octet-stream")})
+    job = _wait_job(w2_client, resp.json()["data"]["job_id"])
+    assert job["data"]["status"] == "failed"
+    assert job["data"]["error_code"] == "30003"
+    assert "另存为" in job["data"]["error_message"]
+    assert ".eml" in job["data"]["error_message"]

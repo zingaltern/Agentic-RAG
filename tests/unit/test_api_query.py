@@ -141,3 +141,27 @@ def test_query_agentic_mode_and_debug_fields(q_client):
     assert data["steps"][0]["action"] == "kb_search"
     assert data["agent_trace"][0]["type"] == "plan"
     assert data["usage"]["llm_calls"] == 2
+
+
+def test_detection_payload_ignores_out_of_range_citation():
+    """6.4：越界 [999] 不得计入 citations.used（前端不再生成可点击角标）。"""
+    from app.api.query import _detection_payload
+
+    answer = type("_A", (), {
+        "text": "年假 5 天[1]，另见[2][999]。",
+        "hallucination": DetectionResult(True, [], 0.5),
+    })()
+    payload = _detection_payload(answer, 2)
+    assert payload["citations"]["used"] == ["[1]", "[2]"]
+    assert payload["citations"]["confirmed"] == 0.5
+
+
+def test_detection_payload_sorts_citations_numerically():
+    from app.api.query import _detection_payload
+
+    answer = type("_A", (), {
+        "text": "见[10]与[2]与[1]。",
+        "hallucination": DetectionResult(True, [], 1.0),
+    })()
+    payload = _detection_payload(answer, 10)
+    assert payload["citations"]["used"] == ["[1]", "[2]", "[10]"]

@@ -293,6 +293,7 @@ def test_c5_queue_full_rejects_with_43003(tmp_path):
     ok = pipeline.submit(b"y", "pending.md", pending)
     assert ok is False, "队列满时 submit 必须拒绝"
     assert pending.status == "failed" and pending.error_code == "43003"
+    assert pending.error_message == "入库队列已满，请稍后重试"
     # 队列空出后恢复
     pipeline._queue.get_nowait()
     pipeline._queue.task_done()
@@ -315,4 +316,5 @@ def test_c6_restart_marks_pending_jobs_interrupted(tmp_path):
     assert interrupted is not None
     assert interrupted.status == "failed"
     assert interrupted.error_code == "50003"
+    assert interrupted.error_message == "服务重启，任务中断"
     assert restarted.get(done.job_id) is None, "终态任务不入盘，重启后不存在"

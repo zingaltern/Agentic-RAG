@@ -10,6 +10,7 @@ test('parseInline：粗体/行内代码/引用标号', () => {
   assert.equal(parts[1].text, '重点')
   assert.equal(parts[3].text, 'code')
   assert.equal(parts[5].text, '[1]')
+  assert.equal(parts[5].index, 1)
 })
 
 test('parseInline：空文本返回空数组，不产生空 token', () => {

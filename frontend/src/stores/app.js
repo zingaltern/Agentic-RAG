@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
-import { clearToken } from '../api/base'
-import { abortQuery } from '../composables/useChatQuery'
+import { clearToken } from '../api/base.js'
+import { abortQuery } from '../composables/useChatQuery.js'
 
 /** localStorage 安全读写（Safari 隐私模式 / 单测环境下降级为空）。 */
 function readStored(key, fallback = '') {

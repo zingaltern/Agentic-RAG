@@ -14,18 +14,12 @@ from typing import Any
 from app.core.domain import EvaluationResult, ScoredChunk
 from app.core.errors import EmbeddingError
 from app.core.interfaces import Evaluator, VectorEngine
+from app.core.similarity import cosine
 
 # 相关性护栏：候选集内最大余弦低于该值 → 主信号按 0 计（防 z-score 放大低相关查询）。
 # 实测校准（真实 BGE）：相关题 Q03 hi≈0.38，无关查询 hi≈0.44 → 绝对护栏无法两全；
 # 按 13.3.1"相对分为主"原则取低护栏，无关查询由"评估通过→LLM 拒答"兜底（13.6 判据方向）
 _MIN_SIM_GUARD = 0.35
-
-
-def _cosine(a: list[float], b: list[float]) -> float:
-    dot = sum(x * y for x, y in zip(a, b))
-    na = math.sqrt(sum(x * x for x in a)) or 1e-9
-    nb = math.sqrt(sum(x * x for x in b)) or 1e-9
-    return dot / (na * nb)
 
 
 def _relative_score(sims: list[float]) -> float:
@@ -71,7 +65,7 @@ class SemanticV2Evaluator(Evaluator):
         except Exception as exc:
             raise EmbeddingError(f"语义评估向量化失败: {exc}") from exc
 
-        sims = [_cosine(query_vec, v) for v in doc_vecs]
+        sims = [cosine(query_vec, v) for v in doc_vecs]
         relative = _relative_score(sims)
         coverage = _literal_coverage(query, top)
         score = round(0.7 * relative + 0.3 * coverage, 4)

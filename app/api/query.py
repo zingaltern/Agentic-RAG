@@ -44,14 +44,19 @@ class QueryRequest(BaseModel):
     mode: str | None = None      # P-D：auto | reflect | agentic；缺省走 orchestration.mode
 
 
-def _detection_payload(answer) -> dict:
-    """6.4：citations.used 由回答文本中的 [N] 引用标号提取；confirmed = 已证率。"""
+def _detection_payload(answer, source_count: int = 0) -> dict:
+    """6.4：citations.used 由回答文本中的 [N] 引用标号提取；confirmed = 已证率。
+
+    只统计落在 `1..len(sources)` 的编号：越界 `[999]` 不得冒充有效引用（前端
+    还会把越界角标降级为纯文本）。
+    """
     import re as _re
 
     if answer.hallucination is None:
         return {"citations": {"used": [], "confirmed": 0.0},
                 "hallucination_check": "suspected"}
-    used = sorted({f"[{n}]" for n in _re.findall(r"\[(\d+)\]", answer.text)})
+    numbers = {int(n) for n in _re.findall(r"\[(\d+)\]", answer.text)}
+    used = [f"[{n}]" for n in sorted(n for n in numbers if 1 <= n <= max(0, source_count))]
     return {
         "citations": {"used": used, "confirmed": answer.hallucination.verified_rate},
         "hallucination_check": "passed" if answer.hallucination.verified else "suspected",
@@ -160,7 +165,7 @@ def _query_impl(payload: QueryRequest, request: Request,
             "trace_id": get_trace_id(),
         }},
     )
-    det = _detection_payload(result)
+    det = _detection_payload(result, len(result.sources))
     data = {
         "answer": result.text,
         "sources": result.sources,

@@ -157,7 +157,10 @@ def test_auth_disabled_personal_mode(tmp_path, isolated_stores):
     """个人模式：无登录页/无鉴权，行为与改动前一致。"""
     with TestClient(_app(tmp_path, auth_enabled=False, isolated_stores=isolated_stores)) as client:
         assert client.get("/api/kbs").json()["code"] == 0
-        assert client.post("/api/query", json={"query": "年假"}).json()["code"] in (0, 21001, 30001, 50001)
+        # 30002=嵌入不可用（离线/模型未缓存）；本用例只验证“个人模式不被鉴权拦截”，
+        # 不能把组件不可用误判为 40101。
+        assert client.post("/api/query", json={"query": "年假"}).json()["code"] in (
+            0, 21001, 30001, 30002, 50001)
         assert client.get("/api/auth/me").json()["code"] == 40001
         # 个人模式视为管理员：用户管理可用（回归：40101 曾误报"请先登录"）
         assert client.get("/api/users").json()["code"] == 0
@@ -293,6 +296,10 @@ def test_user_private_kb_isolation(tmp_path, isolated_stores):
         assert not any(k["kb_id"] == priv_id for k in kbs2["data"]["kbs"])
         assert client.post("/api/query", json={"query": "年假", "kb_id": priv_id},
                            headers=_auth_headers(user2)).json()["code"] == 40101
+        # 回归：向他人私有库上传曾被误报为“共享库仅管理员可写”，文案需准确说明私有库归属
+        denied = _upload(client, user2, priv_id)
+        assert denied["code"] == 40101
+        assert "私有库" in denied["message"]
         # admin 可见可管理（管理视角）
         kbs_admin = client.get("/api/kbs", headers=_auth_headers(admin)).json()
         assert any(k["kb_id"] == priv_id for k in kbs_admin["data"]["kbs"])

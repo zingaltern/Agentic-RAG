@@ -1,6 +1,7 @@
 /**
  * 统一请求包装（§6.4 响应语义 {code, message, data}）。
- * V5.1：Authorization: Bearer <token>；40101 清除 token 并触发登录视图（不重复弹错）。
+ * V5.1：Authorization: Bearer <token>；40101 可能是“凭证失效”也可能是“越权访问知识库”，
+ * 先探活 /api/auth/me 区分：仅凭证确实失效才清除 token 并回登录页。
  * 网络/超时失败一律返回 {code:50001} 契约包不 throw（与后端失败语义一致），调用方无需 catch。
  * 文档原文一律不在此层拼 HTML（S3，由组件模板插值渲染）。
  *
@@ -8,8 +9,8 @@
  *   api(path, { signal }) —— 调用方传入 AbortSignal（如「停止生成」按钮），
  *   用户主动取消返回 {code:49901}，不弹全局错误；超时仍返回 50001。
  */
-import { getBaseUrl, getToken } from './base'
-import { useAppStore } from '../stores/app'
+import { getBaseUrl, getToken } from './base.js'
+import { useAppStore } from '../stores/app.js'
 
 export const REQUEST_TIMEOUT_MS = 90000
 export const CANCELLED_CODE = 49901
@@ -18,6 +19,7 @@ const USER_FACING = {
   40101: '请先登录',
   50001: '无法连接服务，请确认应用已启动、网络正常',
   21002: '本次处理超时，请换个问法或稍后再试',
+  30001: '模型服务调用失败：请检查服务端 RAG_DEEPSEEK_API_KEY、余额与网络后重试',
   49901: '已取消本次请求',
 }
 
@@ -33,6 +35,37 @@ export function friendlyError(code, message) {
   }
   if (USER_FACING[code]) return USER_FACING[code]
   return '操作失败，请稍后重试'
+}
+
+/**
+ * 40101 同时表示“未登录/凭证失效”和“越权访问知识库”（DEVELOPMENT 2.2）。
+ * 仅凭错误码无法区分，故用 /api/auth/me 探活一次：
+ * - true  → 会话仍有效，属于越权，不能登出；
+ * - false → 凭证确实失效，登出；
+ * - null  → 探活网络异常，保守返回 null，避免把用户误踢下线。
+ * 并发请求共享同一个探活 Promise，避免 401 风暴放大成多次 /me。
+ */
+let sessionProbe = null
+function probeSession(token) {
+  if (sessionProbe) return sessionProbe
+  sessionProbe = (async () => {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort('timeout'), 5000)
+    try {
+      const resp = await fetch(getBaseUrl() + '/api/auth/me', {
+        headers: { Authorization: `Bearer ${token}` },
+        signal: controller.signal,
+      })
+      const body = await resp.json()
+      return Boolean(body && body.code === 0)
+    } catch {
+      return null
+    } finally {
+      clearTimeout(timer)
+      sessionProbe = null
+    }
+  })()
+  return sessionProbe
 }
 
 export async function api(path, options = {}) {
@@ -92,13 +125,21 @@ export async function api(path, options = {}) {
   // 401 的「清理」不受 silent 影响：探测/后台轮询拿到的失效 Token 也必须清掉，
   // 否则界面会停在“看似已登录、实际所有请求都 401”的状态；silent 只抑制提示条。
   if (json && json.code === 40101) {
-    if (getToken()) {
-      store.logout()
-      if (!silent) store.pushError('登录已失效，请重新登录')
-    } else if (!silent) {
-      store.pushError(USER_FACING[40101])
+    const currentToken = getToken()
+    if (!currentToken) {
+      if (!silent) store.pushError(USER_FACING[40101])
+    } else {
+      // /api/auth/me 的 40101 即“会话已失效”；其他接口先探活，区分“越权”与“登录失效”，
+      // 否则普通用户访问无权知识库会被误登出。
+      const sessionValid = path === '/api/auth/me' ? false : await probeSession(currentToken)
+      if (sessionValid === false) {
+        store.logout()
+        if (!silent) store.pushError('登录已失效，请重新登录')
+      } else if (!silent) {
+        store.pushError(friendlyError(json.code, json.message))
+      }
     }
-    if (!silent) console.error(`[rag-api] unauthorized trace=${traceId}`)
+    if (!silent) console.error(`[rag-api] 40101 trace=${traceId}`, json)
   } else if (!silent && json && json.code !== 0) {
     store.pushError(friendlyError(json.code, json.message))
     console.error(`[rag-api] error code=${json.code} trace=${traceId}`, json)

@@ -52,7 +52,7 @@ async def upload(file: UploadFile = File(...),
 
         kb_info = deps.kbs.get(kb_id)
         if not get_authorizer(request).can_write_kb(getattr(request.state, "user", None), kb_info):
-            raise AuthError("无权向该知识库上传文档（共享库仅管理员可写）")
+            raise AuthError("无权向该知识库上传文档（共享库仅管理员可写，私有库仅创建者与管理员可写）")
     cfg = deps.config.ingestion
     filename = file.filename or "unnamed"
     ext = Path(filename).suffix.lower().lstrip(".")

@@ -168,7 +168,8 @@ class RewriterConfig(BaseModel):
 class DetectorConfig(BaseModel):
     provider: str = "semantic"                   # citation(回退) | semantic(W5, 13.4)
     similarity_threshold: float = 0.8            # citation：字符 2-gram Jaccard 阈值
-    semantic_similarity_threshold: float = 0.6   # semantic：句⊕块嵌入余弦阈值（13.4）
+    semantic_similarity_threshold: float = 0.6   # semantic：句⊕引用块内句级片段余弦阈值（13.4）
+    lexical_overlap_min: float = 0.3             # semantic：同片段字符 2-gram Jaccard 下限（防泛化假阳性）
 
 
 class LlmConfig(BaseModel):
@@ -737,6 +738,8 @@ class SystemConfig(BaseSettings):
             raise SystemConfigError("detector.similarity_threshold 必须在 [0,1]")
         if not 0 <= self.detector.semantic_similarity_threshold <= 1:
             raise SystemConfigError("detector.semantic_similarity_threshold 必须在 [0,1]")
+        if not 0 <= self.detector.lexical_overlap_min <= 1:
+            raise SystemConfigError("detector.lexical_overlap_min 必须在 [0,1]")
         # C6（V5.1）：并发/限速/队列数值护栏 —— 0 会被 queue.Queue(0) 视为无界、限速永久拒绝
         if self.api.query_rate_per_min < 1 or self.api.upload_rate_per_min < 1:
             raise SystemConfigError("api.query_rate_per_min / upload_rate_per_min 必须 >= 1")

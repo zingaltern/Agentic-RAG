@@ -40,7 +40,9 @@ export function parseInline(text) {
     const token = m[0]
     if (token.startsWith('`')) out.push({ type: 'code', text: token.slice(1, -1) })
     else if (token.startsWith('**')) out.push({ type: 'strong', text: token.slice(2, -2) })
-    else if (CITATION.test(token)) out.push({ type: 'cite', text: token })
+    else if (CITATION.test(token)) {
+      out.push({ type: 'cite', text: token, index: Number(token.slice(1, -1)) })
+    }
     else out.push({ type: 'text', text: token })
     last = m.index + token.length
   }

@@ -9,10 +9,26 @@ import { parseInline } from '../utils/markdown'
 const props = defineProps({
   text: { type: String, default: '' },
   clickableCite: { type: Boolean, default: true },
+  // 本次回答的来源条数；提供时越界编号（如 [999]）降级为纯文本，不可点击。
+  citeCount: { type: Number, default: null },
 })
 const emit = defineEmits(['cite'])
 
 const parts = computed(() => parseInline(props.text))
+
+function citeClickable(part) {
+  if (!props.clickableCite) return false
+  if (props.citeCount == null) return true
+  return Number.isFinite(part.index) && part.index >= 1 && part.index <= props.citeCount
+}
+
+function citeTitle(part) {
+  if (props.citeCount != null
+      && (!Number.isFinite(part.index) || part.index < 1 || part.index > props.citeCount)) {
+    return '引用编号超出本次来源范围'
+  }
+  return `查看引用来源 ${part.text}`
+}
 </script>
 
 <template>
@@ -20,13 +36,13 @@ const parts = computed(() => parseInline(props.text))
     <code v-if="part.type === 'code'" class="inline-code">{{ part.text }}</code>
     <strong v-else-if="part.type === 'strong'" class="inline-strong">{{ part.text }}</strong>
     <button
-      v-else-if="part.type === 'cite' && clickableCite"
+      v-else-if="part.type === 'cite' && citeClickable(part)"
       type="button"
       class="inline-cite"
-      :title="`查看引用来源 ${part.text}`"
+      :title="citeTitle(part)"
       @click="emit('cite', part.text)"
     >{{ part.text }}</button>
-    <span v-else-if="part.type === 'cite'" class="inline-cite inline-cite--static">{{ part.text }}</span>
+    <span v-else-if="part.type === 'cite'" class="inline-cite inline-cite--static" :title="citeTitle(part)">{{ part.text }}</span>
     <template v-else>{{ part.text }}</template>
   </template>
 </template>

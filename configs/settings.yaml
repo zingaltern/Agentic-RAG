@@ -5,7 +5,7 @@ env: dev
 api:
   host: 127.0.0.1                 # S2（13.11.1）：默认仅本机；0.0.0.0 需显式配置暴露
   port: 8000
-  auth_enabled: true
+  auth_enabled: false
   query_rate_per_min: 20              # C4（V5.1）：/api/query 每 IP 每分钟上限
   upload_rate_per_min: 10           # C4：/api/documents/upload 每 IP 每分钟上限
   cors_origins: ["http://localhost:5173"]   # 13.8：dev 模式 vite proxy 之外的跨域白名单
@@ -74,6 +74,7 @@ detector:
   provider: semantic               # citation(回退) | semantic(W5)
   similarity_threshold: 0.8
   semantic_similarity_threshold: 0.6
+  lexical_overlap_min: 0.3         # 同片段字符 2-gram 下限（防泛化回答假阳性）
 
 llm:
   provider: deepseek

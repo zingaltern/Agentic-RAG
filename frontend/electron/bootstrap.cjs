@@ -49,15 +49,20 @@ function resolveHealth(res, resolve) {
   })
 }
 
-/** 单次 /api/health 探活：ok / degraded（模型预热中）即视为已就绪，加快窗口出现。 */
-function probeHealth(port, host = '127.0.0.1', timeoutMs = PROBE_TIMEOUT_MS) {
+/** 单次 /api/health 探活（http/https 共用）：ok / degraded 即视为就绪。 */
+function probeOnce(mod, options, timeoutMs) {
   return new Promise((resolve) => {
-    const req = http.get({ host, port, path: '/api/health', timeout: timeoutMs }, (res) => {
+    const req = mod.get({ ...options, path: '/api/health', timeout: timeoutMs }, (res) => {
       resolveHealth(res, resolve)
     })
     req.on('error', () => resolve(false))
     req.on('timeout', () => { req.destroy(); resolve(false) })
   })
+}
+
+/** 单次本机 /api/health 探活：ok / degraded（模型预热中）即视为已就绪，加快窗口出现。 */
+function probeHealth(port, host = '127.0.0.1', timeoutMs = PROBE_TIMEOUT_MS) {
+  return probeOnce(http, { host, port }, timeoutMs)
 }
 
 /** 解析外部后端地址为 {protocol, host, port}；非法地址返回 null。 */
@@ -78,16 +83,10 @@ function parseExternalUrl(url) {
 
 /** 按完整 URL 探活（http/https 均支持），供外部后端模式在加载页面前预检。 */
 function probeHealthUrl(url, timeoutMs = PROBE_TIMEOUT_MS) {
-  return new Promise((resolve) => {
-    const parts = parseExternalUrl(url)
-    if (!parts) { resolve(false); return }
-    const mod = parts.protocol === 'https:' ? https : http
-    const req = mod.get({ host: parts.host, port: parts.port, path: '/api/health', timeout: timeoutMs }, (res) => {
-      resolveHealth(res, resolve)
-    })
-    req.on('error', () => resolve(false))
-    req.on('timeout', () => { req.destroy(); resolve(false) })
-  })
+  const parts = parseExternalUrl(url)
+  if (!parts) return Promise.resolve(false)
+  const mod = parts.protocol === 'https:' ? https : http
+  return probeOnce(mod, { host: parts.host, port: parts.port }, timeoutMs)
 }
 
 /** 就绪轮询：≤timeoutMs 内 health=ok 返回 true。 */

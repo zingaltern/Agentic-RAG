@@ -70,6 +70,25 @@ class DeepSeekLLM(ToolCallingLLM):
             raise LLMUnavailableError(f"DeepSeek 返回空内容（{self.model}）")
         return content
 
+    def probe(self, timeout_seconds: float = 3.0) -> tuple[bool, str]:
+        """最小叫通（6.7 `?probe=1`）：1 token + 短超时，不抛异常、不带密钥。
+
+        返回 (ok, 错误摘要)；设置页据此刻画真实可用性，避免“配置了 key 就绿灯”。
+        """
+        if not self.api_key:
+            return False, "未配置 LLM API Key"
+        try:
+            self._ensure_client().chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": "ping"}],
+                temperature=0.0,
+                max_tokens=1,
+                timeout=max(0.5, float(timeout_seconds)),
+            )
+        except Exception as exc:  # noqa: BLE001
+            return False, f"{type(exc).__name__}: {str(exc)[:200]}"
+        return True, ""
+
     # -- P-D：原生工具调用（17.3/9.3） ---------------------------------------
 
     def chat_with_tools(self, messages: list[dict[str, Any]],

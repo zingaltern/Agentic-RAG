@@ -11,28 +11,15 @@
 """
 from __future__ import annotations
 
-import math
 from typing import Any
 
 import jieba
 
 from app.core.interfaces import BoundaryDetector
 from app.core.logging import get_logger
+from app.core.similarity import cosine, jaccard
 
 logger = get_logger("dialogue")
-
-
-def _cosine(a: list[float], b: list[float]) -> float:
-    dot = sum(x * y for x, y in zip(a, b))
-    na = math.sqrt(sum(x * x for x in a)) or 1e-9
-    nb = math.sqrt(sum(x * x for x in b)) or 1e-9
-    return dot / (na * nb)
-
-
-def _jaccard(a: set[str], b: set[str]) -> float:
-    if not a and not b:
-        return 1.0
-    return len(a & b) / len(a | b)
 
 
 class RuleBoundaryDetector(BoundaryDetector):
@@ -50,7 +37,7 @@ class RuleBoundaryDetector(BoundaryDetector):
         try:
             a = self.embedding.embed_query(current)
             b = self.embedding.embed_query(previous)
-            return _cosine(a, b)
+            return cosine(a, b)
         except Exception as exc:  # noqa: BLE001
             logger.warning("边界判定嵌入计算失败（降级仅实体维度）：%s", exc)
             return None
@@ -61,7 +48,7 @@ class RuleBoundaryDetector(BoundaryDetector):
         sim = self._semantic_sim(current, previous)
         cur_terms = {t for t in jieba.cut(current) if t.strip()}
         prev_terms = {t for t in jieba.cut(previous) if t.strip()}
-        jac = _jaccard(cur_terms, prev_terms)
+        jac = jaccard(cur_terms, prev_terms, empty=1.0)
         if sim is not None:
             return sim < self.semantic_threshold and jac < self.entity_jaccard_threshold
         return jac < self.entity_jaccard_threshold

@@ -29,6 +29,7 @@ PLAN_PROMPT = """请为下面的问题制定检索计划。只输出 JSON 对象
 可用工具：{tool_names}
 
 要求：
+- 本次最多 {max_steps} 步；子目标数不要超过步数（当前最多 {max_subgoals} 个）；
 - 1~{max_subgoals} 个子目标；每个子目标有成功判据；
 - 子目标可并行或依赖，但不要超过 3 层；
 - 不要给出答案，不要编造证据；
@@ -55,6 +56,7 @@ ACTION_PROMPT = """当前问题：{query}
 - 如果证据已足够，直接给出带 [N] 引用的答案；
 - 如果还不够，调用最必要的工具；
 - 如果问题不清，调用 ask_user；
+- kb_fetch 的 chunk_id 必须用 evidence 标签的 chunk_id 属性，不要用 id（E1/E2）；
 - 不要重复已执行且无新结果的调用。"""
 
 JSON_ACTION_PROMPT = """请决定下一步动作，只输出 JSON 对象：
@@ -66,7 +68,8 @@ JSON_ACTION_PROMPT = """请决定下一步动作，只输出 JSON 对象：
 已入账证据：
 {evidence}
 
-规则：证据足够时 action=answer 并给出带 [N] 的答案；否则 action 必须是可用工具之一。"""
+规则：证据足够时 action=answer 并给出带 [N] 的答案；否则 action 必须是可用工具之一。
+kb_fetch 的 chunk_id 用 evidence 标签的 chunk_id 属性，不要用 id（E1/E2）。"""
 
 REFLECT_PROMPT = """请判断当前证据是否足以回答各子目标。只输出 JSON。
 
@@ -123,7 +126,10 @@ def format_evidence_block(evidence: list[Evidence], text_limit: int = 200) -> st
         text = escape_evidence_tags(item.text[:text_limit])
         source = str(item.source).replace('"', "'")
         marker = ' injection_suspected="true"' if item.metadata.get("injection_suspected") else ""
+        chunk_id = str(item.chunk_id).replace('"', "'")
+        document_id = str(item.document_id).replace('"', "'")
         lines.append(
-            f'<evidence id="{item.evidence_id}" source="{source}"{marker}>\n'
+            f'<evidence id="{item.evidence_id}" chunk_id="{chunk_id}" '
+            f'document_id="{document_id}" source="{source}"{marker}>\n'
             f'{text}\n</evidence>')
     return "\n\n".join(lines) or "（暂无）"

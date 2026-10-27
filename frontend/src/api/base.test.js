@@ -45,3 +45,30 @@ test('storage errors degrade safely', () => {
   setToken('x')
   clearToken()
 })
+
+test('desktop shell ignores localStorage external_base and stays same-origin', () => {
+  globalThis.localStorage = fakeStorage()
+  globalThis.localStorage.setItem('external_base', 'http://127.0.0.1:9')
+  globalThis.window = { desktop: { getExternalBase: async () => 'http://127.0.0.1:8001' } }
+  try {
+    assert.equal(getBaseUrl(), '', '桌面窗口由主进程加载目标地址，API 必须同源')
+  } finally {
+    delete globalThis.window
+  }
+})
+
+test('desktop shell does not read localStorage at all', () => {
+  let reads = 0
+  globalThis.localStorage = {
+    getItem: () => { reads += 1; throw new Error('denied') },
+    setItem: () => {},
+    removeItem: () => {},
+  }
+  globalThis.window = { desktop: { getExternalBase: () => Promise.resolve('') } }
+  try {
+    assert.equal(getBaseUrl(), '')
+    assert.equal(reads, 0, '桌面端不应再访问 localStorage.external_base')
+  } finally {
+    delete globalThis.window
+  }
+})

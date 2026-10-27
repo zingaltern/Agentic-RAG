@@ -229,7 +229,14 @@ def eval_pair(pair: dict, response: dict) -> CaseResult:
         r.hit = bool(expected) and bool(expected & set(r.sources[:5]))
         r.context_recall = (len(expected & set(r.sources)) / len(expected)) if expected else 0.0
         if expected:
-            precisions = [1.0 / (i + 1) for i, s in enumerate(r.sources) if s in expected]
+            # ContextPrecision 按“期望来源首次出现的位置”计，同一来源重复出现不得重复加分；
+            # 否则单来源用例会得到 1 + 1/2 + ... > 1（历史报告出现 128.60% 的根因）。
+            seen: set[str] = set()
+            precisions = []
+            for i, s in enumerate(r.sources):
+                if s in expected and s not in seen:
+                    seen.add(s)
+                    precisions.append(1.0 / (i + 1))
             r.context_precision = round(sum(precisions) / len(expected), 4) if precisions else 0.0
         r.answer_relevancy = bool(r.answer.strip()) and "抱歉，暂未找到" not in r.answer
         r.ok = r.hit

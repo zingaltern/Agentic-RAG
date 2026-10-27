@@ -1,6 +1,9 @@
 """嵌入适配器单测（DEVELOPMENT.md 5.3、8.1 矩阵）。"""
 from __future__ import annotations
 
+import threading
+import time
+
 import pytest
 
 from app.adapters.embedding.local_bge_v15 import LocalBGEV15Embedding
@@ -85,3 +88,132 @@ def test_encode_failure_raises_embedding_error():
         emb.embed_documents(["文本"])
     with pytest.raises(EmbeddingError, match="查询向量化失败"):
         emb.embed_query("查询")
+
+
+# -- 并发安全（P13 NEW-01）：共享 SentenceTransformer 的 tokenizer 不是线程安全的 ----------
+
+class _RacyModel(StubSentenceModel):
+    """模拟 HF fast tokenizer：并发进入 encode/tokenizer 时抛 Already borrowed。
+
+    encode 与 tokenizer 共享 busy 标记，因此只有适配器把两者纳入同一把锁才能 0 冲突。
+    """
+
+    def __init__(self):
+        super().__init__(512)
+        self._busy = False
+        self._guard = threading.Lock()
+        self.overlaps = 0
+        self.tokenizer = self._tokenize
+
+    def _enter(self):
+        with self._guard:
+            if self._busy:
+                self.overlaps += 1
+                raise RuntimeError("Already borrowed")
+            self._busy = True
+
+    def _leave(self):
+        with self._guard:
+            self._busy = False
+
+    def encode(self, sentences, **kwargs):
+        self._enter()
+        try:
+            time.sleep(0.02)        # 放大竞态窗口：无锁实现必然命中
+            return super().encode(sentences, **kwargs)
+        finally:
+            self._leave()
+
+    def _tokenize(self, text, add_special_tokens=False):  # noqa: ARG002 — 桩签名
+        self._enter()
+        try:
+            time.sleep(0.02)
+            return {"input_ids": list(range(len(text)))}
+        finally:
+            self._leave()
+
+
+def _run_threads(targets):
+    barrier = threading.Barrier(len(targets))
+    errors: list[BaseException] = []
+
+    def wrap(fn):
+        try:
+            barrier.wait(timeout=5)
+            fn()
+        except BaseException as exc:  # noqa: BLE001 — 收集线程异常在主线程断言
+            errors.append(exc)
+
+    threads = [threading.Thread(target=wrap, args=(fn,)) for fn in targets]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=15)
+    return errors
+
+
+def test_concurrent_embed_calls_do_not_share_tokenizer():
+    """P13 NEW-01：两个（多个）并发 embed 不得互相踩 tokenizer（不得 Already borrowed）。"""
+    model = _RacyModel()
+    emb = LocalBGEV15Embedding(model_factory=lambda: model)
+
+    def call(i):
+        def _inner():
+            vectors = emb.embed_documents([f"文档{i}-{j}" for j in range(3)])
+            assert len(vectors) == 3 and len(vectors[0]) == 512
+        return _inner
+
+    errors = _run_threads([call(i) for i in range(4)])
+    assert not errors, errors
+    assert model.overlaps == 0, "并发调用发生 tokenizer 借用冲突（未串行化）"
+
+
+def test_count_tokens_and_encode_share_the_same_lock():
+    """分块计量的 tokenizer 与查询/入库 encode 必须共用一把锁。"""
+    model = _RacyModel()
+    emb = LocalBGEV15Embedding(model_factory=lambda: model)
+
+    def encode_loop():
+        for _ in range(5):
+            assert len(emb.embed_query("年假怎么申请")) == 512
+
+    def token_loop():
+        for _ in range(5):
+            assert emb.count_tokens("年假怎么申请") == 6
+
+    errors = _run_threads([encode_loop, token_loop])
+    assert not errors, errors
+    assert model.overlaps == 0
+
+
+def test_transient_borrow_error_is_retried():
+    """偶发 Already borrowed 允许有限重试（5.3：重试 2 次）。"""
+    class _Flaky(StubSentenceModel):
+        def __init__(self):
+            super().__init__(512)
+            self.calls = 0
+
+        def encode(self, sentences, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("Already borrowed")
+            return super().encode(sentences, **kwargs)
+
+    model = _Flaky()
+    emb = LocalBGEV15Embedding(model_factory=lambda: model)
+    assert len(emb.embed_documents(["文本"])) == 1
+    assert model.calls == 2
+
+
+def test_persistent_borrow_error_message_is_actionable():
+    """重试仍失败时不得只透传 Already borrowed：文案要说明并发冲突与重试建议。"""
+    class _AlwaysBorrowed(StubSentenceModel):
+        def encode(self, sentences, **kwargs):
+            raise RuntimeError("Already borrowed")
+
+    emb = LocalBGEV15Embedding(model_factory=lambda: _AlwaysBorrowed())
+    with pytest.raises(EmbeddingError) as excinfo:
+        emb.embed_documents(["文本"])
+    message = str(excinfo.value)
+    assert "并发" in message and "重试" in message
+    assert message.startswith("文档向量化失败")

@@ -26,8 +26,8 @@ from app.adapters.tools import (
 )
 from app.core.config import SystemConfig
 from app.core.domain import (
-    AgentMode, AgentState, Answer, Evidence, Plan, SubGoal, TerminationReason,
-    ToolContext, TraceSpan,
+    AgentMode, AgentState, Answer, Evidence, Plan, ReflectionResult, SubGoal,
+    TerminationReason, ToolContext, TraceSpan,
 )
 from app.core.errors import (
     AgentBudgetExceeded, AgentInternalError, AgentPlanError, AgentProtocolError,
@@ -37,6 +37,7 @@ from app.core.interfaces import (
     HallucinationDetector, LLM, Reranker, Retriever, VectorStore,
 )
 from app.core.logging import get_logger, get_trace_id
+from app.core.text import strip_citations
 from app.services.agent.budget import budget_from_config, check_budget
 from app.services.agent.llm_budget import BudgetedLLM
 
@@ -44,10 +45,6 @@ logger = get_logger("agent.runtime")
 
 FALLBACK_TEXT = "抱歉，暂未找到相关答案…"
 CITE_RE = re.compile(r"\[(\d+)\]")
-
-
-def _strip_cites(text: str) -> str:
-    return re.sub(r"\[\d+\]", "", text or "")
 
 
 def _call_key(name: str, args: dict[str, Any]) -> str:
@@ -61,6 +58,20 @@ def _overlap_score(question: str, text: str) -> int:
     if not q or not t:
         return 0
     return len(q & t)
+
+
+def _source_stem(source: str) -> str:
+    """证据来源文件名去掉扩展名；URL/空串原样返回。"""
+    text = (source or "").strip()
+    return re.sub(r"\.[A-Za-z0-9]{1,8}$", "", text).lower()
+
+
+def _goal_source_match(goal_text: str, source: str) -> bool:
+    """子目标文本里点名了来源文件（如《员工手册》 vs 员工手册.md）。"""
+    stem = _source_stem(source)
+    if len(stem) < 2:
+        return False
+    return stem in (goal_text or "").lower()
 
 
 class AgentRuntime:
@@ -169,7 +180,7 @@ class AgentRuntime:
         except AgentBudgetExceeded as exc:
             logger.warning("Agent 预算耗尽：%s", exc)
             if state is not None:
-                return self._budget_answer(state, exc)
+                return self._budget_answer(state, exc, debug=debug)
             raise AgentInternalError(str(exc), reason=getattr(exc, "reason", "budget_steps"))
         except LLMUnavailableError as exc:
             raise AgentInternalError(f"LLM 不可用：{exc}", reason="tool_error") from exc
@@ -309,6 +320,10 @@ class AgentRuntime:
                     filters=state.filters, deadline=state.deadline,
                     allowed_tools=state.allowed_tools, request_id=state.run_id,
                     web_search=state.web_search,
+                    # 工具参数不含账本细节；由服务端注入 E* -> chunk_id 反查表，
+                    # kb_fetch 可在模型误填 E1/E2 时安全解析（17.4）。
+                    evidence_index={eid: ev.chunk_id
+                                    for eid, ev in state.evidence.items()},
                 )
                 result = self.tools.invoke(call, ctx)
                 state.tool_calls += 1
@@ -371,7 +386,12 @@ class AgentRuntime:
                 if state.replans >= budget.max_replans:
                     return self._abstain(state, debug, reason="重规划次数达到上限")
                 check_budget(state, budget)
-                new_plan = self.planner.replan(state, reflection)
+                try:
+                    new_plan = self.planner.replan(state, reflection)
+                except (AgentPlanError, AgentProtocolError) as exc:
+                    # 重规划本身失败不应把请求打成 500/协议错误；有界自主下按弃答收尾。
+                    logger.warning("重规划失败，按证据不足收尾：%s", exc)
+                    return self._abstain(state, debug, reason="重规划失败")
                 if new_plan is None:
                     return self._abstain(state, debug, reason="重规划失败")
                 state.plan = new_plan
@@ -412,22 +432,69 @@ class AgentRuntime:
 
     @staticmethod
     def _assign_goal(state: AgentState, item: Evidence) -> None:
+        """把证据归到子目标；合成目标不抢叶子证据。
+
+        一条证据可以支持多个子目标（工作记忆共享）：若子目标点名了来源文件，
+        只在命中来源的子目标间共享；否则仅与正文有足够重合（>=4）的子目标共享。
+        """
         if not state.plan or not state.plan.subgoals:
             return
+        # 已归属的证据（重复命中/多次检索）保持原目标，避免在 g1/g2/g3 之间漂移。
+        for goal in state.plan.subgoals:
+            if item.evidence_id and item.evidence_id in goal.evidence_ids:
+                item.metadata["goal_id"] = goal.goal_id
+                if goal.status in ("pending", "failed"):
+                    goal.status = "running"
+                return
+        goals = state.plan.subgoals
+        # 对比/汇总类目标依赖前序子目标取证，不直接抢证据。
+        candidates = [g for g in goals if not g.is_synthesis()] or goals
         best = None
         best_score = 0
-        for goal in state.plan.subgoals:
-            score = _overlap_score(goal.question + goal.success_criteria, item.text[:1200])
-            if score > best_score:
-                best, best_score = goal, score
-        if best is None:
-            best = next((g for g in state.plan.subgoals if not g.evidence_ids),
-                        state.plan.subgoals[0])
+        source_hit = False
+        for goal in candidates:
+            text = f"{goal.question} {goal.success_criteria}"
+            overlap = _overlap_score(text, item.text[:1200])
+            hit = _goal_source_match(text, item.source)
+            # 文件名点名的权重远高于字符重合，避免“对比”目标因包含两边实体而通吃。
+            score = float(overlap) + (100.0 if hit else 0.0)
+            if goal.depends_on:
+                score -= 5.0       # 同等条件下优先叶子目标
+            if score > best_score or (score == best_score and best is not None
+                                      and len(goal.evidence_ids) < len(best.evidence_ids)):
+                best, best_score, source_hit = goal, score, hit
+        if best is None or (not source_hit and best_score < 8):
+            # 没有明确来源指向时，优先填补尚未取证的叶子目标（文档清单等泛目标）。
+            empty = [g for g in candidates if not g.evidence_ids]
+            if empty:
+                best = min(empty, key=lambda g: (g.goal_id, len(g.evidence_ids)))
+            elif best is None:
+                best = min(candidates, key=lambda g: (len(g.evidence_ids), g.goal_id))
         if item.evidence_id not in best.evidence_ids:
             best.evidence_ids.append(item.evidence_id)
         item.metadata["goal_id"] = best.goal_id
         if best.status in ("pending", "failed"):
             best.status = "running"
+        # 一条证据可支持多个子目标。优先按来源文件名共享，避免把《员工手册》
+        # 的证据同时塞给《差旅政策》子目标；没有来源指向时，只共享给与正文
+        # 有足够重合的子目标（阈值 4 挡掉只共享“知识库/文档”等泛词的
+        # Q3 火星型无关证据）。
+        goal_text = {g.goal_id: f"{g.question} {g.success_criteria}" for g in candidates}
+        source_hits = {g.goal_id for g in candidates
+                       if _goal_source_match(goal_text[g.goal_id], item.source)}
+        for goal in candidates:
+            if goal is best or goal.is_synthesis():
+                continue
+            if source_hits:
+                share = goal.goal_id in source_hits
+            else:
+                share = _overlap_score(goal_text[goal.goal_id], item.text[:1200]) >= 4
+            if not share:
+                continue
+            if item.evidence_id not in goal.evidence_ids:
+                goal.evidence_ids.append(item.evidence_id)
+            if goal.status in ("pending", "failed"):
+                goal.status = "running"
 
     @staticmethod
     def _mark_failed_attempt(state: AgentState) -> None:
@@ -457,13 +524,21 @@ class AgentRuntime:
                     termination: TerminationReason) -> Answer:
         if not state.evidence:
             return self._abstain(state, debug, reason="没有证据")
-        # 合成是收尾必需：允许在步数/LLM 上限上各 +1（时间预算仍硬检查）
+        # 合成是收尾必需：允许在步数/工具/LLM 上限上各 +1（时间预算仍硬检查）。
+        # 注意 BudgetedLLM 在 provider 层还硬计数，下面需临时放行 1 次，否则
+        # “决策=answer 后合成调用超预算”会把已合成答案整段丢弃（D01）。
         synth_budget = budget_from_config(self.agent_cfg, state.started_at)
         synth_budget.max_steps = state.step + 1
         synth_budget.max_tool_calls = state.tool_calls + 1
+        synth_budget.max_llm_calls = state.llm_calls + 1
         check_budget(state, synth_budget)
         synth_start = time.perf_counter()
-        answer_text, cited = self.synthesizer.synthesize(state)
+        if self._llm_budget is not None:
+            # 仅当前线程放行 1 次合成调用；引用修复仍受原预算约束。
+            with self._llm_budget.allow_extra(1):
+                answer_text, cited = self.synthesizer.synthesize(state)
+        else:
+            answer_text, cited = self.synthesizer.synthesize(state)
         self._span(state, "synthesize", name="synthesize", step=state.step,
                    output=answer_text[:120],
                    attrs={"evidence_ids": [e.evidence_id for e in cited]},
@@ -472,12 +547,28 @@ class AgentRuntime:
             return self._abstain(state, debug, reason="合成阶段无证据")
         verify_start = time.perf_counter()
         detection = self.verifier.verify(answer_text, cited)
+        # 合成明确以“知识库中未找到相关依据”开头且没有任何句子被校验支持：
+        # 这是“无可用证据”，按 21001 诚实弃答（D02），不能返回 code=0/answered。
+        if answer_text.strip().startswith(NO_EVIDENCE_TEXT) and not detection.verified_rate:
+            self._span(state, "verify", name="verify", step=state.step,
+                       output="verified=False no_evidence",
+                       attrs={"verified_rate": detection.verified_rate,
+                              "citation_repair": self.agent_cfg.synthesis.citation_repair},
+                       duration_ms=int((time.perf_counter() - verify_start) * 1000))
+            return self._abstain(state, debug, reason="没有可用证据")
         attempts = (max(0, int(self.agent_cfg.synthesis.max_repair_attempts))
                     if self.agent_cfg.synthesis.citation_repair else 0)
         for _ in range(attempts):
             if detection.verified:
                 break
-            repaired = self.verifier.repair(answer_text, state, detection.suspected, cited)
+            try:
+                repaired = self.verifier.repair(answer_text, state, detection.suspected, cited)
+            except AgentBudgetExceeded:
+                # 引用修复是可选的收尾增强：预算耗尽时保留已合成答案，
+                # 不能因修复失败让整次问答弃答（D01）。
+                logger.info("引用修复预算耗尽，保留已合成答案（trace_id=%s）",
+                            state.trace_id)
+                break
             if not repaired or repaired == answer_text:
                 break
             answer_text = repaired
@@ -499,7 +590,8 @@ class AgentRuntime:
         return self._answer(state, answer_text, cited, detection, termination,
                             debug, capture_contexts)
 
-    def _budget_answer(self, state: AgentState, exc: AgentBudgetExceeded) -> Answer:
+    def _budget_answer(self, state: AgentState, exc: AgentBudgetExceeded,
+                       debug: bool = False) -> Answer:
         # V1 不区分 budget_llm 与 budget_steps：两者都映射 budget_steps/21001；
         # 若未来新增独立错误码，先更新 DEVELOPMENT 17.5/13.4。
         reason = getattr(exc, "reason", "budget_steps")
@@ -507,16 +599,21 @@ class AgentRuntime:
                        else TerminationReason.BUDGET_STEPS)
         if state.evidence and state.llm_calls < max(1, self.agent_cfg.max_llm_calls):
             try:
-                return self._synthesize(state, debug=False, capture_contexts=False,
+                return self._synthesize(state, debug=debug, capture_contexts=False,
                                         termination=termination)
             except Exception:  # noqa: BLE001
                 pass
-        return self._abstain(state, debug=False, reason=str(exc),
+        return self._abstain(state, debug=debug, reason=str(exc),
                              termination=TerminationReason(reason)
                              if reason in TerminationReason._value2member_map_ else TerminationReason.BUDGET_STEPS)
 
     def _abstain(self, state: AgentState, debug: bool, reason: str = "",
                  termination: TerminationReason = TerminationReason.ABSTAIN_INSUFFICIENT) -> Answer:
+        # 弃答即“证据不足/预算耗尽”：plan、反思记录与 reflect span 必须与最终 code 同源
+        # （DEVELOPMENT 17.5，P13 AG-02R）；超时（21002）不宣称证据不足，保持原样。
+        if termination in (TerminationReason.ABSTAIN_INSUFFICIENT,
+                           TerminationReason.BUDGET_STEPS):
+            self._mark_insufficient(state, reason)
         trace = self._debug_trace(state) if debug else []
         is_timeout = termination == TerminationReason.BUDGET_TIME
         return Answer(
@@ -529,6 +626,49 @@ class AgentRuntime:
             steps=self._steps(state), termination_reason=termination.value,
             usage=self._usage(state), agent_trace=self._agent_trace(state) if debug else [],
         )
+
+    def _mark_insufficient(self, state: AgentState, reason: str) -> None:
+        """把子目标状态、反思记录与 reflect span 统一改写为“证据不足/弃答”。"""
+        text = (reason or "证据不足")[:200]
+        failed: dict[str, str] = {}
+        for goal in (state.plan.subgoals if state.plan else []):
+            goal.status = "failed"
+            failed[goal.goal_id] = "failed"
+        if state.plan is not None:
+            state.subgoal_status = dict(failed)
+        # debug_trace 的“反思第 N 轮”来自 state.reflections：改写最近一条 answer 记录。
+        last = state.reflections[-1] if state.reflections else None
+        if last is not None and last.decision == "answer":
+            last.decision = "abstain"
+            last.reason = text
+            if failed:
+                last.subgoal_status = dict(failed)
+        elif last is None or last.decision != "abstain":
+            state.reflections.append(ReflectionResult(
+                step=state.step, decision="abstain",
+                subgoal_status=dict(failed), confidence=0.2, reason=text))
+        # agent_trace 的 reflect span：改写 answer 记录；已有 abstain 记录则只同步状态
+        # （避免重复 span）；continue/replan 之后追加一条 abstain 记录表示最终收尾。
+        span = next((s for s in reversed(state.trace) if s.type == "reflect"), None)
+        if span is not None and span.name == "answer":
+            span.name = "abstain"
+            span.output_summary = text
+            span.attributes = {
+                **(span.attributes or {}),
+                "status": dict(failed),
+                "synthesis_override": True,
+                "reflect_decision_before_override": "answer",
+            }
+        elif span is not None and span.name == "abstain":
+            span.attributes = {
+                **(span.attributes or {}),
+                "status": dict(failed),
+                "synthesis_override": True,
+            }
+        else:
+            self._span(state, "reflect", name="abstain", step=state.step, output=text,
+                       attrs={"status": dict(failed), "missing": [],
+                              "synthesis_override": True})
 
     def _clarify(self, state: AgentState, question: str, debug: bool,
                  allow_clarify: bool) -> Answer:
@@ -582,7 +722,7 @@ class AgentRuntime:
         lines = []
         for turn in history[-6:]:
             role = "user" if turn.get("role") == "user" else "assistant"
-            content = _strip_cites(str(turn.get("content") or turn.get("text") or ""))[:200]
+            content = strip_citations(str(turn.get("content") or turn.get("text") or ""))[:200]
             if content:
                 lines.append(f"{role}: {content}")
         return "\n".join(lines) or None

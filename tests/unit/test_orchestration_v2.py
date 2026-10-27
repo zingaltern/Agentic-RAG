@@ -204,15 +204,15 @@ def test_hopeless_shortcut_skips_rewrites_on_round0():
 
 
 def test_hopeless_shortcut_disabled_keeps_reflection_loop():
-    """开关关闭 → 回退旧行为：跑满反思轮次后收尾（有候选 → 21003 澄清）。"""
+    """开关关闭 → 跑满反思轮次后收尾（意图不清 + 有候选 → 21003 澄清）。"""
     config = load_config()
     config.orchestration.hopeless_shortcut = False
     retriever = _Retriever([_scored("不相关内容")])
     evaluator = _Eval([EvaluationResult(False, 0.05, "below_threshold")] * 4)
     svc = _build(retriever, evaluator, _Rewrite(["x"] * 4), config=config)
-    answer = svc.run("公司有员工食堂吗")
+    answer = svc.run("这个具体怎么操作")
     assert answer.iterations == config.orchestration.max_reflection_iterations
-    assert answer.code == 21003, "关闭短路后恢复旧澄清语义"
+    assert answer.code == 21003, "意图不清 + 有候选时保留澄清语义"
 
 
 def test_hopeless_shortcut_not_triggered_above_threshold():

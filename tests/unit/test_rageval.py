@@ -95,6 +95,22 @@ def test_direct_hit_metrics_and_variant():
     assert r.faithful is True
 
 
+def test_direct_duplicate_sources_do_not_inflate_precision():
+    """同一期望来源在 sources 中重复出现时，ContextPrecision 不得 > 1（历史 128.60% 回归）。"""
+    pair = {"id": "D1dup", "type": "direct", "query": "住宿标准多少？",
+            "expected_sources": ["差旅政策.md"]}
+    r = eval_pair(pair, _body(sources=("差旅政策.md", "差旅政策.md", "差旅政策.md")))
+    assert r.context_precision == 1.0
+    assert r.context_recall == 1.0
+
+    # 多来源：重复项只按首次出现计分，结果仍以期望来源数为分母、且不超过 1。
+    pair2 = {"id": "D2dup", "type": "direct", "query": "q",
+             "expected_sources": ["a.md", "b.md"]}
+    r2 = eval_pair(pair2, _body(sources=("a.md", "a.md", "b.md")))
+    assert r2.context_precision == round((1.0 + 1.0 / 3.0) / 2.0, 4)
+    assert r2.context_precision <= 1.0
+
+
 def test_direct_miss_reports_error():
     pair = {"id": "D2", "type": "direct", "query": "q", "expected_sources": ["员工手册.md"]}
     r = eval_pair(pair, _body(sources=("IT支持手册.md",)))

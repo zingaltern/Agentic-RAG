@@ -51,6 +51,7 @@ def test_load_real_settings_defaults():
     assert cfg.rewriter.provider == "llm"
     assert cfg.detector.provider == "semantic"
     assert cfg.detector.semantic_similarity_threshold == 0.6
+    assert cfg.detector.lexical_overlap_min == 0.3
     assert cfg.llm.provider == "deepseek"
     assert cfg.llm.model == "deepseek-chat"
     assert cfg.orchestration.max_reflection_iterations == 3

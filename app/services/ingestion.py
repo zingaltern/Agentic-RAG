@@ -44,6 +44,16 @@ def compute_content_hash(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
+MAX_JOB_ERROR_MESSAGE = 500
+GENERIC_INGEST_ERROR = "入库处理失败，请稍后重试或查看服务端日志"
+
+
+def _job_error_message(exc: Exception, fallback: str = "入库处理失败") -> str:
+    """把业务异常文案收敛成 Job 可展示的失败原因（不含堆栈，限长防刷屏）。"""
+    text = str(exc or "").strip()
+    return (text or fallback)[:MAX_JOB_ERROR_MESSAGE]
+
+
 class IngestionPipeline:
     def __init__(self, config: SystemConfig, embedding: VectorEngine,
                  vector_store: VectorStore, jobs: JobStore,
@@ -83,7 +93,8 @@ class IngestionPipeline:
                 self._run(raw, filename, job, kb_id=kb_id, collection=collection,
                           replace_document_id=replace_document_id, force=force)
             except Exception:
-                self.jobs.update(job.job_id, status="failed", error_code="50001")
+                self.jobs.update(job.job_id, status="failed", error_code="50001",
+                                 error_message=GENERIC_INGEST_ERROR)
             finally:
                 self._queue.task_done()
 
@@ -100,7 +111,8 @@ class IngestionPipeline:
         while True:
             try:
                 raw, filename, job, kb_id, collection, _replace_id, _force = self._queue.get_nowait()
-                self.jobs.update(job.job_id, status="failed", error_code=INTERRUPTED_CODE)
+                self.jobs.update(job.job_id, status="failed", error_code=INTERRUPTED_CODE,
+                                 error_message="服务重启，任务中断")
                 self._queue.task_done()
             except queue.Empty:
                 break
@@ -147,14 +159,16 @@ class IngestionPipeline:
         if self._closing:
             from app.services.jobs_store import INTERRUPTED_CODE
 
-            self.jobs.update(job.job_id, status="failed", error_code=INTERRUPTED_CODE)
+            self.jobs.update(job.job_id, status="failed", error_code=INTERRUPTED_CODE,
+                             error_message="服务重启，任务中断")
             return False
         try:
             self._queue.put_nowait((raw, filename, job, kb_id, collection,
                                     replace_document_id, force))
             return True
         except queue.Full:
-            self.jobs.update(job.job_id, status="failed", error_code="43003")
+            self.jobs.update(job.job_id, status="failed", error_code="43003",
+                             error_message="入库队列已满，请稍后重试")
             return False
 
     def ingest(self, raw: bytes, filename: str, job: Job | None = None,
@@ -461,33 +475,56 @@ class IngestionPipeline:
                                             "collection": collection}},
                 )
         except ParseError as exc:
-            self.jobs.update(job.job_id, status="failed", error_code=str(exc.code))
-            logger.warning("入库失败：解析错误", extra={"extra_fields": {"job_id": job.job_id, "error_code": exc.code}})
+            message = _job_error_message(exc, "文档解析失败")
+            self.jobs.update(job.job_id, status="failed", error_code=str(exc.code),
+                             error_message=message)
+            logger.warning("入库失败：解析错误",
+                           extra={"extra_fields": {"job_id": job.job_id, "error_code": exc.code,
+                                                   "error_message": message}})
         except EmbeddingError as exc:
-            self.jobs.update(job.job_id, status="failed", error_code=str(exc.code))
-            logger.warning("入库失败：向量化错误", extra={"extra_fields": {"job_id": job.job_id, "error_code": exc.code}})
+            message = _job_error_message(exc, "向量化失败")
+            self.jobs.update(job.job_id, status="failed", error_code=str(exc.code),
+                             error_message=message)
+            logger.warning("入库失败：向量化错误",
+                           extra={"extra_fields": {"job_id": job.job_id, "error_code": exc.code,
+                                                   "error_message": message}})
         except InjectionError as exc:
             # P-C：提示注入 reject（40002）
-            self.jobs.update(job.job_id, status="failed", error_code=str(exc.code))
-            logger.warning("入库失败：提示注入命中", extra={"extra_fields": {"job_id": job.job_id, "error_code": exc.code}})
+            message = _job_error_message(exc, "文档内容疑似包含提示注入指令")
+            self.jobs.update(job.job_id, status="failed", error_code=str(exc.code),
+                             error_message=message)
+            logger.warning("入库失败：提示注入命中",
+                           extra={"extra_fields": {"job_id": job.job_id, "error_code": exc.code,
+                                                   "error_message": message}})
         except ContentModerationError as exc:
             # P-C：内容审核 reject（40003）
-            self.jobs.update(job.job_id, status="failed", error_code=str(exc.code))
-            logger.warning("入库失败：内容审核未通过", extra={"extra_fields": {"job_id": job.job_id, "error_code": exc.code}})
+            message = _job_error_message(exc, "文档内容未通过内容审核")
+            self.jobs.update(job.job_id, status="failed", error_code=str(exc.code),
+                             error_message=message)
+            logger.warning("入库失败：内容审核未通过",
+                           extra={"extra_fields": {"job_id": job.job_id, "error_code": exc.code,
+                                                   "error_message": message}})
         except QualityGateError as exc:
             # P0-1：解析质量门禁 reject（30005，疑似扫描件/损坏文件）
-            self.jobs.update(job.job_id, status="failed", error_code=str(exc.code))
+            message = _job_error_message(exc, "文档解析质量不达标")
+            self.jobs.update(job.job_id, status="failed", error_code=str(exc.code),
+                             error_message=message)
             logger.warning("入库失败：解析质量不达标（疑似扫描件/损坏文件）",
                            extra={"extra_fields": {"job_id": job.job_id, "error_code": exc.code,
+                                                   "error_message": message,
                                                    "quality_flags": (exc.data or {}).get("quality_flags")}})
         except EmptyDocumentError as exc:
             # V5.2：0 块拒收（30007；空文件/扫描件/清洗过滤殆尽）
-            self.jobs.update(job.job_id, status="failed", error_code=str(exc.code))
+            message = _job_error_message(exc, "未提取到有效文本")
+            self.jobs.update(job.job_id, status="failed", error_code=str(exc.code),
+                             error_message=message)
             logger.warning("入库失败：未提取到有效文本",
                            extra={"extra_fields": {"job_id": job.job_id, "error_code": exc.code,
+                                                   "error_message": message,
                                                    "detail": exc.data}})
-        except Exception as exc:
-            self.jobs.update(job.job_id, status="failed", error_code="50001")
+        except Exception:
+            self.jobs.update(job.job_id, status="failed", error_code="50001",
+                             error_message=GENERIC_INGEST_ERROR)
             logger.exception("入库失败：未知错误", extra={"extra_fields": {"job_id": job.job_id}})
         finally:
             final = self.jobs.get(job.job_id) or job

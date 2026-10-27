@@ -130,13 +130,13 @@ def test_fallback_21001_after_max_iterations():
 
 
 def test_clarify_21003_when_low_scores_with_candidates():
-    """A2：检索有候选但连续低分 → 21003 主动澄清（need_clarify=True）。"""
+    """A2：意图不清且有候选、连续低分 → 21003 主动澄清（need_clarify=True）。"""
     retriever = _Retriever([_scored("不相关内容")])
     config = load_config()
     n = config.orchestration.max_reflection_iterations
     evaluator = _Evaluator([EvaluationResult(False, 0.25, "below_threshold")] * (n + 1))
     svc = _build(retriever, evaluator, _Rewriter(["a"] * n), _Detector(), _LLM())
-    answer = svc.run("年假怎么申请")
+    answer = svc.run("这个具体怎么操作")
     assert answer.code == 21003
     assert answer.need_clarify is True
     assert answer.text, "澄清分支必须返回澄清问句（Stub LLM 返回固定文本）"

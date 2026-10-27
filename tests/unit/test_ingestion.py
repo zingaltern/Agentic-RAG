@@ -65,7 +65,18 @@ def test_ingest_parse_error_marks_job_failed(deps):
     job = deps.pipeline.ingest(b"this is not a real pdf", "broken.pdf")
     assert job.status == "failed"
     assert job.error_code == "30003"
+    assert "格式与扩展名不符" in job.error_message
     assert deps.jobs.get(job.job_id).error_code == "30003"
+    assert deps.jobs.get(job.job_id).error_message == job.error_message
+
+
+def test_ingest_msg_exposes_eml_guidance(deps):
+    """D01：.msg 的导出指引必须随 Job 返回给 UI，而不是只留在异常里。"""
+    ole2 = bytes.fromhex("d0cf11e0a1b11ae1") + b"\x00" * 64
+    job = deps.pipeline.ingest(ole2, "邮件.msg")
+    assert job.status == "failed"
+    assert job.error_code == "30003"
+    assert "另存为" in job.error_message and ".eml" in job.error_message
 
 
 def test_ingest_unsupported_extension(deps):

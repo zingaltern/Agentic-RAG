@@ -90,6 +90,39 @@ def test_kb_fetch_parent_and_document_mode():
     doc = tool.invoke(_ctx(allowed_tools={"kb_fetch"}),
                       tool.args_model(document_id="doc1"))
     assert doc.ok and doc.evidence[0].document_id == "doc1"
+    # 模型把文件名填进 document_id（P6 实测“未找到文档：差旅政策.md”）→ 按 source 兜底
+    by_name = tool.invoke(_ctx(allowed_tools={"kb_fetch"}),
+                          tool.args_model(document_id="员工手册.md"))
+    assert by_name.ok and by_name.evidence[0].document_id == "doc1"
+    assert by_name.data["document_id"] == "doc1"
+
+
+def test_kb_fetch_resolves_evidence_id_and_legacy_e_id():
+    """模型把 E1/E2 填进 chunk_id 时，服务端按账本反查实际 chunk。"""
+    child = _chunk("child", "年假 5 天", parent="parent")
+    parent = _chunk("parent", "年假条款全文：入职满一年 5 天……")
+    tool = KbFetchTool(_VectorStore([child, parent]), max_chars=1000)
+    ctx = _ctx(allowed_tools={"kb_fetch"}, evidence_index={"E1": "child"})
+    explicit = tool.invoke(ctx, tool.args_model(evidence_id="E1"))
+    assert explicit.ok and "年假条款全文" in explicit.evidence[0].text
+    legacy = tool.invoke(ctx, tool.args_model(chunk_id="E1"))
+    assert legacy.ok and legacy.evidence[0].chunk_id == "child"
+    missing = tool.invoke(ctx, tool.args_model(evidence_id="E9"))
+    assert not missing.ok and missing.error_code == "TOOL_NOT_FOUND"
+
+
+def test_evidence_ledger_backfills_duplicate_id():
+    """重复命中时 result.evidence 原对象也要拿到账本 ID，避免空串。"""
+    state = AgentState(run_id="r", trace_id="t", query="q", normalized_query="q",
+                       mode="agentic")
+    first, created = state.add_evidence(
+        Evidence(chunk_id="c1", document_id="d1", text="短", source="s"))
+    assert created and first.evidence_id == "E1"
+    duplicate = Evidence(chunk_id="c1", document_id="d1", text="更长的正文", source="s")
+    stored, created2 = state.add_evidence(duplicate)
+    assert created2 is False
+    assert stored.evidence_id == "E1"
+    assert duplicate.evidence_id == "E1"
 
 
 def test_kb_list_documents_filters_name():

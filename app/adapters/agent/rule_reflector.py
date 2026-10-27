@@ -30,11 +30,24 @@ class RuleReflector(Reflector):
         return set(goal.evidence_ids) if goal else set()
 
     def _status(self, state: AgentState, goal_id: str) -> tuple[str, list[str]]:
+        goal = next((g for g in (state.plan.subgoals if state.plan else [])
+                     if g.goal_id == goal_id), None)
         ev = self._goal_evidence(state, goal_id)
         strong = [e for e in ev
                   if e.tool_name != "kb_search" or self._relevance(e) >= self.min_score]
         if len(strong) >= self.min_per_goal:
             return "satisfied", []
+        # 合成/对比目标不直接检索：依赖子目标都满足 + 已有证据即视为满足，
+        # 否则 g3 永远需要一条“自己的”证据，会把叶子目标的证据抢走。
+        if goal is not None and goal.is_synthesis():
+            dep_status = [self._status(state, dep)[0] for dep in goal.depends_on]
+            if all(status == "satisfied" for status in dep_status):
+                if state.evidence:
+                    return "satisfied", []
+                return "partial", [f"{goal_id} 依赖已满足但账本为空"]
+            missing = [f"{goal_id} 依赖未满足: {dep}" for dep, status in
+                       zip(goal.depends_on, dep_status) if status != "satisfied"]
+            return "partial" if ev else "pending", missing
         if ev:
             return "partial", [f"{goal_id} 证据相关度不足"]
         return "pending", [f"{goal_id} 尚无证据"]
@@ -115,12 +128,15 @@ class RuleReflector(Reflector):
             return ReflectionResult(
                 step=state.step, decision="answer", subgoal_status=statuses,
                 confidence=0.85, reason="所有子目标均有证据")
-        if state.no_new_evidence_steps >= 2:
+        # 连续重复同一调用且账本仍为空：再重规划也不会带来新证据，直接诚实弃答。
+        # 若只是“缺证据”但没有重复调用，仍保留一次 replan（见下方 S2 测试）。
+        if not state.evidence and getattr(state, "duplicate_steps", 0) > 0:
             return ReflectionResult(
                 step=state.step, decision="abstain", subgoal_status=statuses,
                 missing=missing[:5], confidence=0.2,
-                reason="连续两步没有新增证据")
-        # 某子目标尝试两次仍无证据 → 允许一次重规划
+                reason="重复工具调用且没有检索到证据")
+        # 某子目标尝试两次仍无证据 → 允许重规划；这必须优先于“无新证据即弃答”，
+        # 否则一个始终没分到证据的子目标会直接把整个问题放弃（S2）。
         if state.replans < getattr(self.config, "max_replans", 2):
             attempts = {g.goal_id: g.attempts for g in state.plan.subgoals}
             if any(statuses.get(gid) != "satisfied" and n >= 2 for gid, n in attempts.items()):
@@ -128,6 +144,11 @@ class RuleReflector(Reflector):
                     step=state.step, decision="replan", subgoal_status=statuses,
                     missing=missing[:5], confidence=0.4,
                     reason="部分子目标多次未满足，尝试重规划")
+        if state.no_new_evidence_steps >= 2:
+            return ReflectionResult(
+                step=state.step, decision="abstain", subgoal_status=statuses,
+                missing=missing[:5], confidence=0.2,
+                reason="连续两步没有新增证据")
         return ReflectionResult(
             step=state.step, decision="continue", subgoal_status=statuses,
             missing=missing[:5], confidence=0.5, reason="继续检索")

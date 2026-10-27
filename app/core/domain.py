@@ -52,6 +52,7 @@ class Job:
     document_id: str | None = None
     chunk_count: int = 0
     error_code: str | None = None
+    error_message: str | None = None  # 用户可见失败原因（安装/导出指引；最长 500 字）
     kb_id: str | None = None      # 13.5：所属知识库（缺省 default）
     created_at: float = 0.0
     updated_at: float = 0.0
@@ -139,6 +140,9 @@ class ToolContext:
     allowed_tools: set[str] = field(default_factory=set)
     request_id: str = ""
     web_search: bool = False
+    # 账本 evidence_id -> chunk_id；由 AgentRuntime 在每次工具调用前注入，
+    # 供 kb_fetch 在模型误把 E1/E2 填进 chunk_id 时安全反查（17.4 工具契约）。
+    evidence_index: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -236,6 +240,16 @@ class SubGoal:
     status: str = "pending"        # pending/running/satisfied/failed/skipped
     evidence_ids: list[str] = field(default_factory=list)
     attempts: int = 0
+
+    def is_synthesis(self) -> bool:
+        """是否为“依赖前序取证、自身不再检索”的对比/汇总子目标。
+
+        这类目标由依赖子目标的证据满足，不应把证据从叶子目标手里抢走。
+        """
+        return bool(self.depends_on) and any(
+            marker in self.question
+            for marker in ("对比", "比较", "判断", "综合", "汇总", "总结",
+                           "是否一致", "异同", "差异"))
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -400,6 +414,9 @@ class AgentState:
             existing.metadata.update({k: v for k, v in item.metadata.items() if v is not None})
             if item.retrieval_query and item.retrieval_query not in existing.metadata.get("queries", []):
                 existing.metadata.setdefault("queries", []).append(item.retrieval_query)
+            # 重复命中仍要回填账本 ID：调用方（observations/agent_trace）读的是
+            # result.evidence 里的原对象，不回填会得到空串 evidence_ids。
+            item.evidence_id = existing.evidence_id
             return existing, False
         if item.retrieval_query:
             queries = item.metadata.setdefault("queries", [])

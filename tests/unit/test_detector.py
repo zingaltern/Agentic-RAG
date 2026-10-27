@@ -83,9 +83,47 @@ def test_out_of_range_citation():
 
 
 def test_threshold_sensitivity():
-    """阈值越高越严格：近全文一致（sim≈0.87）在 0.5 通过、0.9 不通过。"""
+    """阈值越高越严格：近全文一致（sim≈0.91）在 0.5 通过、0.99 不通过。"""
     ctx = _ctx([_SUPPORTED_CTX])
     loose = CitationTracingDetector(similarity_threshold=0.5)
-    strict = CitationTracingDetector(similarity_threshold=0.9)
+    strict = CitationTracingDetector(similarity_threshold=0.99)
     assert loose.detect(_SUPPORTED_SENTENCE, ctx).verified is True
     assert strict.detect(_SUPPORTED_SENTENCE, ctx).verified is False
+
+
+_LONG_CTX = """# 员工手册（Demo 知识库）
+## 年假
+- 入职满 1 年：年假 5 天。
+- 入职满 2 年及以上：年假 10 天；最高累计 20 天。
+- 申请年假需提前 3 个工作日，通过 OA 系统提交，经部门负责人审批后生效。
+## 请假
+- 事假需提前 2 天向直属主管申请。
+- 病假：返岗后 3 个工作日内补交医院诊断证明或医嘱；病假期间工资按公司薪酬制度发放。
+## 报销
+- 报销凭证：出差交通、住宿费用实报实销，需在出差结束后 3 个工作日内于 OA 系统提交发票。
+- 普通费用（办公用品等）报销：财务审核通过后，5 个工作日内打款至员工工资卡。
+## 出差补贴
+- 出差至一线城市（北京、上海、广州、深圳、杭州）：伙食补贴 150 元/天。
+- 其他城市：补贴 100 元/天。
+- 住宿凭发票实报实销。
+## 加班与调休
+- 加班需提前登记，可选择申请调休；调休额度须在当季度内使用完毕。
+## 培训
+- 公司每年为每位员工提供不低于 20 小时内部培训课程，覆盖制度、技能与团队协作。"""
+
+
+def test_trailing_citation_after_period_is_verified():
+    """回答把 [1] 写在句号之后时，引用必须归入前句，不能切成独立 ``[1]`` 句。"""
+    answer = "入职满 2 年及以上：年假 10 天；最高累计 20 天。[1]"
+    detector = CitationTracingDetector(similarity_threshold=0.8)
+    result = detector.detect(answer, _ctx([_LONG_CTX]))
+    assert result.verified is True
+    assert result.suspected == []
+    assert result.verified_rate == 1.0
+
+
+def test_sentence_level_context_avoids_long_chunk_dilution():
+    """长父块不能让短句匹配失败：应命中块内对应句级片段。"""
+    answer = "入职满 2 年及以上：年假 10 天；最高累计 20 天。[1]"
+    result = CitationTracingDetector(similarity_threshold=0.8).detect(answer, _ctx([_LONG_CTX]))
+    assert result.verified is True

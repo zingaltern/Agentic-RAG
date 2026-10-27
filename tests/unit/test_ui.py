@@ -22,6 +22,9 @@ def test_health_envelope(client):
     assert set(body) == {"code", "message", "data"}
     assert body["code"] == 0
     assert set(body["data"]["checks"]) == {"embedding", "vector_store", "llm"}
+    assert body["data"]["features"] == {
+        "agent_enabled": False, "web_enabled": False, "llm_probe": False,
+    }
     assert body["data"]["status"] == "degraded"   # W1 组件未装配
     assert body["data"]["version"] == "1.0.0"
 

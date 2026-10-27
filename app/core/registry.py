@@ -198,9 +198,13 @@ def wire(config: "SystemConfig", components: bool = True, *,
     from app.services.orchestration import OrchestrationService
     from app.services.user_store import UserStore
 
+    # 4.2/13.5：documents/kbs 的持久化路径来自配置（测试/多环境可注入临时目录）；
+    # jobs/users 目前无对应配置段，沿用各自默认路径。
     deps.jobs = jobs if jobs is not None else JobStore()
-    deps.documents = documents if documents is not None else DocumentsStore()
-    deps.kbs = kbs if kbs is not None else KbStore()
+    deps.documents = (documents if documents is not None
+                      else DocumentsStore(persist_file=config.documents.persist_file))
+    deps.kbs = (kbs if kbs is not None
+                else KbStore(persist_file=config.kbs.persist_file))
     deps.users = users if users is not None else UserStore()
 
     # —— 13.12 输入侧治理装配（全部默认关：未启用时保持 None，零开销）——

@@ -127,6 +127,9 @@ def test_action_prompt_wraps_and_escapes_evidence():
                                 metadata={"injection_suspected": True}))
     prompt = planner._action_messages(state, Budget())[-1]["content"]
     assert "<evidence" in prompt and 'injection_suspected="true"' in prompt
+    assert 'chunk_id="c1"' in prompt, "证据标签必须暴露 chunk_id，避免模型把 E1 当 chunk_id"
+    assert 'document_id="d"' in prompt, "证据标签必须暴露 document_id，供 kb_list_documents 路径使用"
+    assert "chunk_id 必须用 evidence 标签的 chunk_id" in prompt
     assert prompt.count("</evidence>") == 1
     assert "[/evidence]" in prompt
 
@@ -191,3 +194,31 @@ def test_tools_unsupported_cached_and_unavailable_not_cached():
     with pytest.raises(LLMUnavailableError):
         planner2.next_action(state2, Budget())
     assert bad.native == 1 and bad.json == 0
+
+
+def test_plan_respects_step_budget_and_truncates_subgoals():
+    """R2 max_steps=2 时，计划不应再产出 4 个无法完成的子目标。"""
+    plan4 = dict(PLAN)
+    plan4["subgoals"] = [
+        {"goal_id": f"g{i}", "question": f"子目标{i}", "success_criteria": "找到证据",
+         "depends_on": []}
+        for i in range(1, 5)
+    ]
+
+    class _CaptureLLM(_LLM):
+        def __init__(self):
+            super().__init__(plan_text=json.dumps(plan4, ensure_ascii=False))
+            self.messages = []
+
+        def chat(self, messages, temperature=0.1, max_tokens=1024):
+            self.messages.append(messages)
+            return super().chat(messages, temperature, max_tokens)
+
+    llm = _CaptureLLM()
+    planner = _planner(llm)
+    plan = planner.plan(_state(), Budget(max_steps=2, max_llm_calls=3))
+    assert plan is not None
+    assert len(plan.subgoals) == 2
+    prompt = llm.messages[0][-1]["content"]
+    assert "最多 2 步" in prompt
+    assert "当前最多 2 个" in prompt

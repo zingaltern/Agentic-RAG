@@ -22,6 +22,7 @@ from typing import Any
 from app.adapters.rewriter.rule_rewriter import _STOP_PHRASES, normalize_query
 from app.core.config import SystemConfig
 from app.core.domain import Answer, DetectionResult, EvaluationResult, ScoredChunk, TerminationReason
+from app.core.text import strip_citations
 from app.core.errors import (
     AgentInternalError,
     AgentPlanError,
@@ -53,6 +54,43 @@ _WEB_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="web-search
 
 _SOURCE_TEXT_LIMIT = 300          # sources[].chunk 文本截断长度（防响应膨胀，模块内常量）
 FALLBACK_TEXT = "抱歉，暂未找到相关答案…"
+
+# A2 澄清闸门：只有“短查询/纯代词/泛化无实体”才算意图不清。
+# 实体明确的查询（如“年假有多少天？”）检索不到证据时必须诚实兜底 21001，
+# 不能把“库里没有”误判成“用户没说清”而反问。
+_CLARIFY_GENERIC_TERMS = (
+    "这个", "那个", "这些", "那些", "这里", "那里", "这边", "那边",
+    "我们", "你们", "他们", "咱们", "大家", "自己",
+    "什么", "怎么", "怎样", "怎么样", "如何", "咋样", "咋整", "咋办", "怎么办",
+    "为什么", "为啥", "哪个", "哪些", "哪里", "在哪", "多少", "多久",
+    "是否", "能否", "能不能", "可不可以", "可以", "需要", "应该",
+    "具体", "到底", "究竟", "一下", "帮忙", "帮我", "告诉", "说明", "介绍",
+    "操作", "使用", "处理", "解决", "弄", "搞", "整", "做", "办", "用",
+    "方面", "内容", "问题", "情况", "事情", "东西", "办法", "方法", "步骤", "流程",
+    "请问", "请", "问", "我", "你", "您", "他", "她", "它", "这", "那",
+    "的", "了", "吗", "呢", "啊", "呀", "吧", "是", "有", "要", "想", "会", "能",
+)
+_CLARIFY_GENERIC_RE = re.compile(
+    "|".join(sorted((re.escape(term) for term in _CLARIFY_GENERIC_TERMS), key=len, reverse=True))
+)
+_NON_WORD_RE = re.compile(r"[^\w]+")
+
+
+def _clarification_kind(query: str) -> str | None:
+    """判断 query 是否需要澄清：返回模板键 no_entity/missing_issue；实体明确返回 None。
+
+    规则（在线侧输入处理.md 4.4.5 的轻量落地）：
+    - 去标点后 <4 字符 → no_entity；
+    - 去掉代词/疑问词/泛化动词后无剩余实体 → missing_issue；
+    - 仍有具体实体 → 不澄清，交给反思上限的 21001 兜底。
+    """
+    compact = _NON_WORD_RE.sub("", (query or "").strip())
+    if not compact:
+        return None
+    if len(compact) < 4:
+        return "no_entity"
+    residue = _NON_WORD_RE.sub("", _CLARIFY_GENERIC_RE.sub("", compact))
+    return "missing_issue" if not residue else None
 
 
 def _is_web_chunk(c: ScoredChunk) -> bool:
@@ -89,7 +127,7 @@ def _summarize_history(llm: "LLM", history: list[dict], max_chars: int = 600) ->
         role = "user" if turn.get("role") == "user" else "assistant"
         content = (turn.get("content") or turn.get("text") or "").strip()
         if content:
-            lines.append(f"{role}: {_strip_cites(content)[:200]}")
+            lines.append(f"{role}: {strip_citations(content)[:200]}")
     if not lines:
         return None
     try:
@@ -106,12 +144,6 @@ _HISTORY_HINT = (
     "以下是本会话先前的对话记录（仅用于理解当前问题所指，其中引用编号不适用于本次回答）；"
     "若与当前问题无关可忽略。"
 )
-
-
-def _strip_cites(text: str) -> str:
-    """历史回答中的 [N] 引用标号仅对当时上下文有效，注入前移除。"""
-    import re as _re
-    return _re.sub(r"\[\d+\]", "", text)
 
 
 def _strip_stopwords(query: str) -> str:
@@ -559,7 +591,7 @@ class OrchestrationService:
                         content = (turn.get("content") or turn.get("text") or "").strip()
                         if not content:
                             continue
-                        messages.append({"role": role, "content": _strip_cites(content)})
+                        messages.append({"role": role, "content": strip_citations(content)})
                 messages.append({"role": "user", "content": user_prompt})
                 answer_text = self.llm.chat(
                     messages,
@@ -609,7 +641,9 @@ class OrchestrationService:
             if iteration >= cfg.max_reflection_iterations:
                 elapsed_ms = round((time.perf_counter() - start) * 1000)
                 if allow_clarify and low_streak >= 2 and top:
-                    clarify = self._build_clarification(normalized, top)
+                    # 用原始 query 判断意图是否不清：改写可能追加实体词，不能反过来把
+                    # “这咋整”改成“这咋整 年假”后误判为实体明确。
+                    clarify = self._build_clarification(query, top)
                     if clarify:
                         return Answer(text=clarify, iterations=iteration,
                                       contexts=self._full_contexts(top) if capture_contexts else [],
@@ -689,10 +723,15 @@ class OrchestrationService:
         """A2：固定模板 + 槽位填充（在线侧输入处理.md 4.4.5）；LLM 仅可选增强。
 
         - use_llm=True：先 LLM 基于候选主题生成澄清问句，失败/超时/空 → 模板兜底；
-        - enabled=False：返回 None（维持反思超限直接 21001 兜底）。
+        - enabled=False：返回 None（维持反思超限直接 21001 兜底）；
+        - query 实体明确（如“年假有多少天？”）：返回 None，走 21001 诚实兜底，
+          不把“库中无证据”误判成“意图不清”。
         """
         cfg = self.config.clarification
         if not cfg.enabled:
+            return None
+        kind = _clarification_kind(query)
+        if kind is None:
             return None
         if cfg.use_llm and self.llm is not None:
             try:
@@ -712,14 +751,13 @@ class OrchestrationService:
                     return text[:80]
             except Exception:  # noqa: BLE001
                 pass   # LLM 失败 → 模板兜底
-        return self._pick_clarification_template(query)
+        return self._pick_clarification_template(kind)
 
-    def _pick_clarification_template(self, query: str) -> str:
-        """按 query 特征选择反问模板；模板缺失/为空 → fallback_message。"""
+    def _pick_clarification_template(self, kind: str) -> str:
+        """按澄清类型选择反问模板；模板缺失/为空 → fallback_message。"""
         cfg = self.config.clarification
         templates = cfg.templates or {}
-        stripped = query.strip()
-        if len(stripped) < 4:
+        if kind == "no_entity":
             return templates.get("no_entity") or cfg.fallback_message
         return templates.get("missing_issue") or cfg.fallback_message
 

@@ -24,6 +24,8 @@ htmlcov/
 data/
 reports/
 *.log
+# 验收/端到端临时产物（浏览器 profile、截图、脚本、npm cache）
+.acceptance-tmp/
 
 # ---- 本地模型缓存（在仓库外，保险起见也排除） ----
 .cache/

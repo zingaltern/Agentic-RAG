@@ -14,7 +14,7 @@ from app.adapters.normalizer.rule_normalizer import RuleQueryNormalizer
 from app.adapters.query_guard import QueryGuard
 from app.core.config import GreetingRule, load_config
 from app.core.domain import Chunk, EvaluationResult, ScoredChunk
-from app.services.orchestration import OrchestrationService
+from app.services.orchestration import FALLBACK_TEXT, OrchestrationService
 from app.services.session_store import SessionStore
 
 
@@ -338,6 +338,23 @@ def test_clarification_longer_query_uses_missing_issue_template():
     answer = svc.run("这个具体怎么操作")
     assert answer.code == 21003
     assert answer.text == config.clarification.templates["missing_issue"]
+
+
+@pytest.mark.parametrize("query", ["年假有多少天？", "打印机怎么使用？"])
+def test_clarification_clear_query_without_evidence_returns_21001(query):
+    """实体明确的查询检索不到证据时，诚实兜底 21001，不误判为“意图不清”反问。
+
+    带 history 以绕过 13.13 T1 绝望短路，确保真正走到反思上限后的澄清/兜底分支。
+    """
+    config = load_config()
+    config.clarification.enabled = True
+    config.clarification.use_llm = False
+    svc = _clarify_svc(config, _StubLLM("LLM 不应被调用"), rewriter=_IdentityRewrite())
+    answer = svc.run(query, history=[{"role": "user", "content": "上文"},
+                                     {"role": "assistant", "content": "上文回答"}])
+    assert answer.code == 21001
+    assert answer.need_clarify is False
+    assert answer.text == FALLBACK_TEXT
 
 
 def test_clarification_use_llm_enhance():

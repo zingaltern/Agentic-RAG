@@ -53,7 +53,7 @@ class LLMPlanner(Planner):
     # -- Plan ---------------------------------------------------------------
 
     def plan(self, state: AgentState, budget: Budget) -> Plan | None:
-        return self._generate_plan(state, feedback="")
+        return self._generate_plan(state, budget=budget, feedback="")
 
     def replan(self, state: AgentState, reflection: ReflectionResult) -> Plan | None:
         feedback = "上一轮反思缺口：\n" + "\n".join(f"- {m}" for m in reflection.missing[:5])
@@ -63,15 +63,18 @@ class LLMPlanner(Planner):
             plan.created_by = "llm_replan"
         return plan
 
-    def _generate_plan(self, state: AgentState, feedback: str = "") -> Plan | None:
+    def _generate_plan(self, state: AgentState, budget: Budget | None = None,
+                       feedback: str = "") -> Plan | None:
         if self.llm is None:
             raise AgentPlanError("LLM 未装配")
         tool_names = ", ".join(sorted(state.allowed_tools)) or "（无）"
+        max_steps = max(1, int(getattr(budget, "max_steps", self.config.max_steps)))
+        max_subgoals = max(1, min(self.config.planning.max_subgoals, max_steps))
         schema = PLAN_SCHEMA
         prompt = PLAN_PROMPT.format(
             query=state.normalized_query, history_summary=state.history_summary or "无",
             kb_name=state.kb_id, tool_names=tool_names,
-            max_subgoals=self.config.planning.max_subgoals,
+            max_steps=max_steps, max_subgoals=max_subgoals,
             schema=schema,
         )
         if feedback:
@@ -88,7 +91,7 @@ class LLMPlanner(Planner):
                 state.prompt_tokens += sum(len(str(m.get("content", ""))) for m in messages)
                 state.completion_tokens += len(text)
                 payload = extract_json_object(text)
-                return self._validate_plan(payload, state)
+                return self._validate_plan(payload, state, max_subgoals=max_subgoals)
             except (AgentPlanError, AgentProtocolError) as exc:
                 last_error = str(exc)
                 self._parse_failures += 1
@@ -101,15 +104,17 @@ class LLMPlanner(Planner):
                 ]
         raise AgentPlanError(f"规划失败：{last_error or '多次输出不合法'}")
 
-    def _validate_plan(self, payload: dict[str, Any], state: AgentState) -> Plan:
+    def _validate_plan(self, payload: dict[str, Any], state: AgentState,
+                       max_subgoals: int | None = None) -> Plan:
         goal = str(payload.get("goal") or "").strip()
         if not goal:
             raise AgentPlanError("计划缺少 goal")
         raw_subgoals = payload.get("subgoals")
         if not isinstance(raw_subgoals, list) or not raw_subgoals:
             raise AgentPlanError("计划缺少 subgoals")
-        if len(raw_subgoals) > self.config.planning.max_subgoals:
-            raw_subgoals = raw_subgoals[: self.config.planning.max_subgoals]
+        limit = max(1, int(max_subgoals or self.config.planning.max_subgoals))
+        if len(raw_subgoals) > limit:
+            raw_subgoals = raw_subgoals[:limit]
         subgoals: list[SubGoal] = []
         seen_ids: set[str] = set()
         for idx, item in enumerate(raw_subgoals, 1):

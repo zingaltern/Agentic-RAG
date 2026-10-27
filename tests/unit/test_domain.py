@@ -38,6 +38,7 @@ def test_job_defaults():
     assert j.document_id is None
     assert j.chunk_count == 0
     assert j.error_code is None
+    assert j.error_message is None
     assert j.created_at == 0.0
 
 

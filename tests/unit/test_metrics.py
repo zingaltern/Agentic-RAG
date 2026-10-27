@@ -119,6 +119,8 @@ def test_jobs_old_record_without_stage_timings(tmp_path):
     store = JobStore(persist_file=str(persist))
     job = store.get("old1")
     assert job is not None and job.stage_timings == {}
+    assert job.status == "failed" and job.error_code == "50003"
+    assert job.error_message == "服务重启，任务中断"
 
 
 # -- /api/metrics 端点 ------------------------------------------------------------------

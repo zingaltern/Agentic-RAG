@@ -69,7 +69,11 @@ const readOnly = computed(() => Boolean(currentKb.value && currentKb.value.scope
 
 onMounted(async () => {
   await loadKbs()
-  if (kbs.value.length && !kbs.value.some((k) => k.kb_id === store.kbId)) store.setKbId('default')
+  if (kbs.value.length && !kbs.value.some((k) => k.kb_id === store.kbId)) {
+    // 与问答页一致：上次选的库已被删除/无权访问时明确告知，避免静默换库后误操作
+    store.setKbId('default')
+    store.pushInfo('上次使用的知识库不可用，已切回默认库')
+  }
   refreshDocs()
 })
 onUnmounted(() => {
@@ -237,9 +241,15 @@ async function uploadOne(item, mode = 'add', options = {}) {
     const res = await uploadWithProgress(form)
     if (!mounted) return
     if (res.code === 40101) {
-      // 手动 XHR 绕过了 api() 的统一 401 处理：登出并终止队列，不再逐个重试
+      // 手动 XHR 绕过了 api() 的统一 401 处理。40101 也可能是“越权访问该库”而非登录失效：
+      // 先探活 /api/auth/me，仅当会话确实失效时才登出与终止队列。
       queue.value = []
-      store.logout()
+      const me = await api('/api/auth/me', { silent: true })
+      if (me.code === 0) {
+        store.pushError(`上传失败「${file.name}」：${friendlyError(res.code, res.message)}`)
+      } else if (me.code === 50001) {
+        store.pushError(`上传失败「${file.name}」：无法确认登录状态，请稍后重试`)
+      }
       return
     }
     if (res.code !== 0) {
@@ -261,7 +271,10 @@ async function uploadOne(item, mode = 'add', options = {}) {
     if (job.status === 'success') {
       store.pushInfo(`「${file.name}」入库完成，共 ${job.chunk_count ?? 0} 个片段`)
     } else if (job.status === 'failed') {
-      store.pushError(`处理失败「${file.name}」：请确认格式受支持且内容可解析`)
+      // 后端 error_message 带可行动原因（安装 LibreOffice / 改用 .eml / 格式不符）；
+      // 旧任务或未知错误没有该字段时退回通用文案。
+      const reason = String(job.error_message || '').trim()
+      store.pushError(`处理失败「${file.name}」：${reason || '请确认格式受支持且内容可解析'}`)
     }
     // 目标库仍是当前库才刷新列表，避免把别的库的数据刷到当前视图
     if (kbId === store.kbId) await refreshDocs({ silent: true })
