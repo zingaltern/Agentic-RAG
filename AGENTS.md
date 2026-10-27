@@ -68,13 +68,14 @@ make desktop        # Electron 桌面（内置拉起后端）【W8 落地】
 - 上传走异步 Job；`/api/query` 全同步并设有全局超时；单点号注意 `max_reflection_iterations`。
 - 默认嵌入模型 `BAAI/bge-small-zh-v1.5`（512 维），更换只改配置不改代码。
 - 第二阶段（第 13 章）增量坑位：
-  - **多知识库**：`kb_id → collection（rag_<id>）` 一一映射，上传/查询缺省 `default`；删除 `default` 必须拒绝；BM25/向量双路都要按 kb 作用域过滤。
+  - **多知识库**：`kb_id → collection` 一一映射（default→`kb`，新建库→`kb_id`），上传/查询缺省 `default`；删除 `default` 必须拒绝；BM25/向量双路都要按 kb 作用域过滤。
   - **反思循环**：每轮 query 必须与上轮不同（13.3.3）；LLM 改写失败必须回退 `rule`，不得阻塞。
   - **前端**：不要手写 CORS 白名单之外的源；桌面端不得硬编码端口，探测/参数化；`frontend/dist` 之外的构建产物不提交。
 
 ## 测试要求
 
-- 完成任何功能后必须 `make test` 全绿（2026-10-20 收集口径 826 项；历史基线 599 项；含覆盖率门禁 ≥80%）；新模块补齐对应单测（对照 DEVELOPMENT 第 8.1 矩阵）。
+- 完成任何功能后必须 `make test` 全绿（2026-10-27 收集口径 873 项（≥850）；历史基线 599/826 项；含覆盖率门禁 ≥80%）；新模块补齐对应单测（对照 DEVELOPMENT 第 8.1 矩阵）。
+- 计数以对 `^tests/.*: [0-9]+$` 行求和为准；pytest 9 的 `-q` 输出 `tests/xxx.py: N` 是按文件聚合行，不能把 `grep -c "^tests/"` 当用例数（它统计的是文件数，当前 74，不是用例数）。
 - 评测回归（两层评测策略，DEVELOPMENT 8.4/8.5：验证集与测试集分离）：
   验证集 `tests/eval/qa_pairs/`（default/docs 自建 107 条 + complex 难度分层 90 条）经 `make eval` 出报告（13.1 度量协议，改检索/改写/检测等影响指标的功能必须前后对比；complex 按 variant 逐层看通过率，首轮基线存档后不回退）；
   外部测试集 `tests/review/`（首个 CMRC 2018，独立 kb `cmrc`，160 条）经 `make review` 出报告——量真实效果、看趋势 Δ，不设"全绿"门禁；

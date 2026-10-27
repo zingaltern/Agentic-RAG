@@ -163,6 +163,7 @@ class Job:
     document_id: str | None = None
     chunk_count: int = 0
     error_code: str | None = None
+    error_message: str | None = None  # 用户可见失败原因（安装/导出指引，最长 500 字）
     created_at: float = 0.0
     updated_at: float = 0.0
 
@@ -411,7 +412,7 @@ env: dev
 api:
   host: 127.0.0.1            # S2：默认仅本机；0.0.0.0 需显式配置暴露
   port: 8000
-  auth_enabled: true         # S1：契约默认 false（个人模式）；此处为 settings.yaml 现值（当前部署已开启团队模式）
+  auth_enabled: false        # S1：契约默认 false（个人模式）；团队模式需显式改为 true 并配置首管理员
   query_rate_per_min: 20     # V5.1：/api/query 每 IP 每分钟上限（超限 43002）
   upload_rate_per_min: 10    # V5.1：/api/documents/upload 每 IP 每分钟上限（超限 43002）
   cors_origins: ["http://localhost:5173"]   # dev 模式 vite proxy 之外的白名单
@@ -467,6 +468,7 @@ detector:
   provider: semantic         # semantic（默认，13.4）| citation（回退）
   similarity_threshold: 0.8
   semantic_similarity_threshold: 0.6
+  lexical_overlap_min: 0.3   # semantic：同片段字符 2-gram Jaccard 下限（防泛化假阳性）
 
 llm:
   provider: deepseek
@@ -587,6 +589,15 @@ logging:
 - 设备：`device=auto`（Mac/Air 默认 cpu；GPU 存在时自动选 cuda）；`mps` 仅当显式配置且验证通过。
 - 切换模型 = 改 `embedding.model_name`，不改代码（模型自动下载到 HF 缓存）。
   含可选：`BAAI/bge-base-zh-v1.5`（768 维，略优）、远程 API（`provider=remote_api`，`embedding.model_name="qwen3-embedding-0.6b"` 等）。
+- **并发安全（2026-10-27，P13 NEW-01）**：同一进程内共享的 `SentenceTransformer` 实例不是线程安全的——
+  HF fast tokenizer 的 Rust 侧在并发 `encode` 时会抛 `AlreadyBorrowed`（表现为 `Already borrowed`），
+  导致 2 个 ingestion worker 同时向量化时部分 Job 以 30002 失败。适配器必须把**所有**模型调用
+  （`embed_documents`/`embed_query`/`count_tokens`，含分块计量的 tokenizer 调用）纳入同一把进程内互斥锁串行化：
+  - 锁粒度：`embed_documents` 按子批（≤16 条）逐段加锁，查询侧最坏等待≈一次子批 `encode`，而不是整批 64 条；
+  - 有限重试：并发冲突类异常最多重试 2 次（退避 50/100ms），重试仍失败才抛 `EmbeddingError`；
+  - 错误可行动：并发冲突的 `EmbeddingError` 文案必须说明冲突原因与重试建议，不得只透传 `Already borrowed`（Job 30002 可直接展示）。
+  - 取舍：不复制模型/分词器句柄（内存不随 worker 数增长，避免每 worker 一份 ~100MB 模型）；吞吐上限=单模型串行
+    （CPU 上本就是瓶颈）；查询与入库争用同一把锁，最坏等待由锁粒度约束。
 
 ### 5.4 混合检索与 RRF（HybridRetriever）
 
@@ -647,10 +658,12 @@ USER_PROMPT = "上下文：\n{context}\n\n问题：{query}"
 ### 5.8 幻觉检测（CitationTracingDetector）—— 回退 provider（13.4 语义检测为默认）
 
 - 契约：
-  1. 以 `。！？` 切分 answer 为 `s1..sn`；
+  1. 先把句末（`。！？` 之后）的 `[N]` 归入前句，再按 `。！？` 切分 answer 为 `s1..sn`
+     （避免 `[1]` 被切成独立空句、前句又因无引用被判疑似）；
   2. 正则 `\[(\d+)\]` 提取每句引用集合；
   3. 无引用的整句记入 `suspected`；
-  4. 对每句引用，取其 N 对应的上下文块，计算 **字符 2-gram Jaccard**：
+  4. 对每句引用，取其 N 对应的上下文块，按 `。！？` 与换行切成**句级片段**，计算
+     **字符 2-gram Jaccard**，取最大值：
      `sim(s,cand) = |bigrams(s) ∩ bigrams(cand)| / |bigrams(s) ∪ bigrams(cand)|`
   5. 有任一 `<t candidate >= similarity_threshold(=0.8)` → 判该句"已证"，否则 `suspected`；
   6. `verified = len(suspected)==0`；`verified_rate = 已证/总句`。
@@ -697,18 +710,23 @@ POST /api/documents/upload (multipart file)
   ├─ 校验：大小/扩展名 → 计算 content_hash
   │   └─ 若该 hash 已存在 → 返回既有 document_id（code=0, duplicate=true），不重复入库
   ├─ 创建 Job（status=pending）写 JobStore（内存 dict + threading.Lock）
-  ├─ 提交到单线程后台 Worker（ThreadPoolExecutor, max_workers=2）
+  ├─ 提交到有界队列 → 固定 2 个后台 Worker（C5：queue.Queue + 2 线程，替代无界 ThreadPoolExecutor）
   │   └─ parse_file → split_chunks → (for parent chunks) embed_documents(batch) → vector_store.add_chunks
-  │   └─ 成功→ status=success，document_id；失败→ status=failed，error_code
+  │   └─ 成功→ status=success，document_id；失败→ status=failed，error_code + error_message
   └─ 立即返回 {job_id}
 ```
 
+- **并发嵌入（2026-10-27，P13 NEW-01）**：Worker 数仍为 2（解析/清洗/分块可并行），但所有嵌入模型调用经
+  5.3 的进程内互斥锁串行化。共享 `SentenceTransformer` 的 tokenizer 在并发 `encode` 下会抛
+  `AlreadyBorrowed`（`Already borrowed`），因此并发上传（5 个不同文件同时 POST）必须全部 success，
+  不得出现 30002 内部异常；单文件上传行为不变。
+
 - MVP JobStore：进程内字典 + 轻量持久化（`data/jobs.json`，仅落盘未终态任务）。
   **重启语义（V5.1 修订）**：启动时把残留的 `pending/running` Job 统一标记为
-  `failed`（error_code=`50003`「服务重启，任务中断」），前端轮询收到明确终止而非 404/超时误报；
+  `failed`（error_code=`50003`「服务重启，任务中断」+ error_message），前端轮询收到明确终止而非 404/超时误报；
   终态（success/failed）任务不入盘。生产可换 Redis/MQ（注释与接口不变）。
 - **并发背压（V5.1 修订）**：Worker 队列有界（`ingestion.max_queue_size`，默认 64）；
-  队列满时 `submit` 拒绝，Job 标记 `failed`（error_code=`43003`「入库队列已满，请稍后重试」），
+  队列满时 `submit` 拒绝，Job 标记 `failed`（error_code=`43003` + error_message「入库队列已满，请稍后重试」），
   路由层据此返回契约包（HTTP 200 + body code，不静默排队）。
 - 说明：**解析/向量化全程不占用 HTTP worker 阻塞线程**；/query 时才同步走各模块。
 - **S5 脱敏（V5.0，P2-6 两级化重构）**：PII 处理两级设计——检测打标 + 按策略脱敏。`app/services/desensitize.detect_pii(text) -> [{type: id_card|phone|bank_card, count, sample_hash}]`（**不含原文**，sample_hash 为首个命中 sha256 前 8 位）；`desensitize_text(text, mode="mask", types=None)`：mask=`***`（现行为）/ replace=`[身份证]` 等占位符 / delete=移除。配置两级：全局 `ingestion.pii = {enabled: false, mode: mask, types: [...]}`；库级覆盖 `KbInfo.pii`（kb.json 兼容，创建/更新 API 接受），**生效优先级 kb.pii > ingestion.pii > 不处理**（kb.pii {enabled:false} 显式关闭全局）。命中文档 `metadata["pii_types"]` 记录类型集合（仅打标）。执行点与顺序不变（parse 之后、清洗之前）。**兼容**：旧 `desensitize_enabled` 与新 `pii.enabled` 同开时新逻辑优先 + warning，旧开关标记 deprecated（两个周期后移除）。
@@ -774,8 +792,10 @@ class PluginRegistry:
 { "code": 0, "message": "ok", "data": {
    "job_id": "ab12cd34", "status": "success",
    "document_id": "doc_12ab34cd", "chunk_count": 120,
-   "error_code": null, "replaced_document_id": null } }
+   "error_code": null, "error_message": null,
+   "replaced_document_id": null } }
 ```
+- `error_message`（2026-10-27）：失败原因，供 UI 直接展示；解析失败时包含“格式与扩展名不符 / 安装 LibreOffice / 另存为 .eml”等可行动指引；成功或 pending 时为 null。最长 500 字。
 - `replaced_document_id`（V5.2）：增量更新替换掉的旧版本 id（无替换为 null）。
 
 ### 6.4 POST /api/query
@@ -790,9 +810,13 @@ class PluginRegistry:
   "filters": {"metadata": {"department": "HR"}},
   "kb_id": "default",              // 13.5：目标知识库（与 collection 二选一，kb_id 优先，缺省 default）
   "debug": true,
-  "mode": "auto"                   // P-D：auto | reflect | agentic；缺省走 orchestration.mode
+  "mode": "auto",                  // P-D：auto | reflect | agentic；缺省走 orchestration.mode
+  "web_search": false              // A5：逐请求联网开关；web.enabled 是服务端全局默认，不是硬开关
 }
 ```
+- `web_search=true` 时，只要服务端配置了 `web.api_key_env` 指向的 key，首轮检索会并行调用 Tavily；
+  `web.enabled=false` 表示“默认不联网”，不会阻止用户在 UI 显式开启。开启后问题文本会发往第三方，
+  UI 必须明确提示；未配置 key 时返回空并继续库内检索。
 - `filters`（可选）：检索过滤条件，`metadata` 内键值须与入库时 `Chunk.metadata` 一致（如 `department`/`kind`/`source`）。未提供时检索全部知识库。
 - `collection`（可选）：指定查询的知识库集合，默认 `vector_store.collection`（见 4.2；多知识库规划见 12 章）。
 响应：
@@ -818,6 +842,7 @@ class PluginRegistry:
 - `mode`（可选）：`auto`/`reflect`/`agentic`；优先级请求体 > `orchestration.mode` > 默认 `reflect`；`agent.enabled=false` 时 agentic 自动回退 reflect；
 - `top_k` 受 `retriever.top_k` 上限约束；
 - `sources[].filename` 为入库时的原始文件名（与 `Chunk.metadata.source` 一致），评测脚本据此匹配期望来源；
+- `citations.used` 只包含 `1 <= N <= len(sources)` 的编号；回答文本中的越界 `[N]` 不得计为有效引用，前端按纯文本渲染（不生成可点击角标）。
 - 反思超限返回 `code=21001`，`data.answer` 为兜底文案（`"抱歉，暂未找到相关答案…"`）；
 - 超时/LLM 失败返回 `code=21002/30001`。
 
@@ -839,21 +864,28 @@ class PluginRegistry:
 | POST | `/api/plugins/switch` | `{"module":"reranker","strategy":"bge","config":{}}` | 热切换；失败回滚 |
 
 ### 6.7 健康
-- `GET /api/health` → 一次探活各组件（embedding 模型已加载、向量库可达、LLM 最小叫通单位 1 步），返回：
+- `GET /api/health` → 一次探活各组件（embedding 模型已加载、向量库可达、LLM 已装配），返回：
+- `GET /api/health?probe=1` → 额外对 LLM 做一次**最小叫通**（1 个短请求，超时 ≤3s，结果进程内缓存 60s），
+  鉴权失败/超时等直接反映为 `llm=down`；设置总览使用该模式，桌面端启动探测仍用轻量模式（不带 probe），避免阻塞就绪。
 
 ```json
 { "code": 0, "message": "ok", "data": {
    "status": "ok"|"degraded"|"down",
    "checks": {"embedding":"ok","vector_store":"ok","llm":"ok"},
+   "features": {"agent_enabled": true|false, "web_enabled": true|false, "llm_probe": true|false},
    "version": "1.0.0" } }
 ```
+- `features.agent_enabled` 反映**当前进程实际装配**的 AgentRuntime（`orchestration.agent.enabled=true` 且 runtime 非空），
+  不是只看配置文件；前端用它提前提示“Agent 未开启”，不得仅凭本地分段选中态暗示 Agent 已生效。
+- `features.web_enabled` 反映服务端 `web.enabled`（默认是否联网）；为 false 时仍允许用户按 6.4 显式开启，但 tooltip
+  必须明示“服务端默认关闭，配置 Tavily Key 后才会外发”，不得断言问题已发送至第三方。
 
 ### 6.8 认证与用户管理（V5.1）
 
 - 登录：`POST /api/auth/login`（`{username, password}` → `{token, user}`）；Token 为 HMAC 签名、有效期 `auth.token_ttl_days`（默认 7 天）、payload 含 `token_version`（`ver`）；
   `GET /api/auth/me`；`POST /api/auth/change-password`。
 - **防爆破**：连续登录失败 5 次锁定来源 IP 5 分钟（进程内 `_LoginGuard`，成功登录重置；逻辑见 13.11.1 S1）。
-- **Token 吊销（S1）**：改密/删号/降权时 `token_version += 1`，旧 token 再访问一律 40101。
+- **Token 吊销（S1）**：改密/降权时 `token_version += 1`；删号直接移除用户，旧 token 因用户不存在而失效；两类旧 token 再访问一律 40101。
 - 用户管理（仅 admin）：`GET/POST /api/users`、`POST /api/users/import`（CSV 批量导入：表头 `用户名,姓名,初始密码,角色`，全量校验通过才写入，失败返回逐行明细 `data.errors`）、
   `POST /api/users/{id}/reset-password`、`POST /api/users/{id}/role`、`DELETE /api/users/{id}`（禁删自己）。
 - 认证豁免白名单：`/api/health`、`/api/plugins/status`、`/ui`+`/assets`、`/api/auth`（`AUTH_WHITELIST_PATHS/PREFIXES`）。
@@ -992,7 +1024,7 @@ class PluginRegistry:
 ## 第 9 章 开发计划与验收
 
 **MVP（W1~W4）与 Phase2（W5~W8）均已交付并验收通过**（详见第 13 章交付状态）。
-V1.0 发布标准已达成：pytest 全绿（`-m "not integration"`，2026-10-20 收集口径 826 项；历史基线 599 项）、`/ui` 与 SPA 闭环
+V1.0 发布标准已达成：pytest 全绿（`-m "not integration"`，2026-10-27 收集口径 873 项（≥850）；历史基线 599/826 项）、`/ui` 与 SPA 闭环
 （上传→问→看引用→删）、`rageval` 可运行且报告非空（`reports/` 存档 20+ 份）。
 
 ---
@@ -1122,9 +1154,14 @@ V1.0 发布标准已达成：pytest 全绿（`-m "not integration"`，2026-10-20
 ### 13.4 幻觉检测 v2（Detector）—— ✅ 已交付
 
 - 交付：`detector.provider: semantic`（`app/adapters/detector/semantic_verifier.py`，默认）；`citation` 保留回退。
-- 实现：① 规则不变：按 `。！？` 切句、正则 `[(\d+)]` 取引用、无引用整句 → suspected；
-  ② 判定升级：句⊕引用块的**嵌入余弦**（阈值 `semantic_similarity_threshold=0.6`）替代字符 2-gram；
+- 实现：① 规则不变：先把句末 `[N]` 归入前句，再按 `。！？` 切句、正则 `[(\d+)]` 取引用、
+  无引用整句 → suspected；
+  ② 判定升级：句⊕引用块内**句级片段**的嵌入余弦（取最大）替代字符 2-gram；句级匹配避免短回答
+  被长父块的无关内容稀释；同一片段还须满足字符 2-gram Jaccard ≥
+  `lexical_overlap_min=0.3`，压掉“根据知识库上下文，请参考编号 [1]”这类语义相近但词面不支撑的
+  泛化假阳性；
   ③ 输出 `verified/verified_rate/suspected` 契约不变。
+- 修订（2026-10-27，P4 D02）：句末引用归入前句 + 句级证据匹配；修复「正确引用仍 0% 待核实」的假阴性。
 - 实测：Faithfulness（direct）由 Stub 假 0% → 真实 DeepSeek 56%（13.1）。
 
 ### 13.5 多知识库（通用化，一库一 collection）—— ✅ 已交付
@@ -1166,10 +1203,11 @@ V1.0 发布标准已达成：pytest 全绿（`-m "not integration"`，2026-10-20
 - **桌面模式（Electron，已交付）**：
   - `frontend/electron/main.cjs`：① 探测端口（默认 8000，占用自动换）→ ② 以项目 `.venv` 拉起 uvicorn（仅 127.0.0.1）→ ③ 轮询 `/api/health` 就绪（带 splash 窗口）→ ④ 退出级联停止后端；
   - **运行中后端意外退出 → 自动重启**（带 splash 重新等待就绪，最多 2 次；恢复失败弹错误框并以 `app.exit()` 强退——避免 macOS 模态弹窗下退不掉）；关窗常驻期间后端退出则静默，Dock 激活时自动拉起；
-  - 外部后端模式（userData 持久化，不本机拉起）；设置页经 IPC 回显真实值；
+  - 外部后端模式（userData 持久化，不本机拉起）；设置页经 IPC 回显真实值；目标不可达时提供“使用本机服务 / 重试 / 退出”选择（使用本机服务会清空外部配置并继续本机启动），不得只提示“去设置页”后直接退出；
+  - 桌面端 API 基址以主进程实际加载的 URL 为准（同源），`localStorage.external_base` 仅在 Web 模式生效；
   - macOS 惯例：关窗保留 Dock 与后端，`activate` 重建窗口，Cmd+Q 才退出；
   - S8：`contextIsolation=true`、`nodeIntegration=false`、`sandbox=true`，仅 loopback/自托管地址；
-  - 测试：`npm run test:desktop`（`node --test electron/*.test.cjs`，11 用例）；`npm run desktop` 启动。
+  - 测试：`npm run test:desktop`（`node --test electron/*.test.cjs`，14 用例）；`npm run desktop` 启动。
 - 旧 `web/` 测试页保留为冒烟/降级入口（README 注明）。
 
 ### 13.8 配置与迁移（settings.yaml 已落地）
@@ -1210,7 +1248,7 @@ V1.0 发布标准已达成：pytest 全绿（`-m "not integration"`，2026-10-20
 
 | # | 项 | 状态（V5.0） | 落点 |
 |---|---|---|---|
-| S1 | **API 认证** | ✅ 密码登录 + HMAC Token（V5.1；契约默认 `auth_enabled=false`，当前部署已开启）；启用后 `RAG_ADMIN_USER/RAG_ADMIN_PASSWORD` 引导首管理员；**防爆破**：连续失败 5 次锁定来源 IP 5 分钟（`_LoginGuard`，成功重置）；改密/删号/降权吊销旧 token（`token_version`） | `app/api/auth.py` |
+| S1 | **API 认证** | ✅ 密码登录 + HMAC Token（V5.1；契约与仓库默认 `auth_enabled=false`，团队模式显式开启）；启用后 `RAG_ADMIN_USER/RAG_ADMIN_PASSWORD` 引导首管理员；**防爆破**：连续失败 5 次锁定来源 IP 5 分钟（`_LoginGuard`，成功重置）；改密/降权递增 `token_version`，删号移除用户；旧 token 均失效 | `app/api/auth.py` |
 | S1a | **密码策略（V5.1）** | 新密码/重置密码：≥8 位且同时含字母与数字（纯标准库校验，不引依赖）；已有用户不强求改密（产品策略），弱口令告警见 README「已知限制」 | `app/services/user_store.py`（validate_password_strength） |
 | S2 | **监听地址** | ✅ 默认 `127.0.0.1` | `api.host` |
 | S3 | **XSS 治理** | ✅ 前端统一模板插值，禁 innerHTML/v-html | SPA `api()` + 组件渲染 |
@@ -1292,11 +1330,11 @@ V1.0 发布标准已达成：pytest 全绿（`-m "not integration"`，2026-10-20
 
 #### 13.12.5 `clarification` —— A2 反问模板化（升级）
 
-- `use_llm=false`（默认）：`_build_clarification` 直接按 query 特征选模板（`templates.no_entity`：长度<4 / `templates.missing_issue`：其余），**LLM 仅可选增强**（`use_llm=true` 时先 LLM 生成，失败/超时回退模板）；
+- `use_llm=false`（默认）：`_build_clarification` 先做「意图是否不清」闸门，再选模板：`templates.no_entity`（去标点后 <4 字符）/ `templates.missing_issue`（去掉代词、疑问词、泛化动词后无剩余实体）；**实体明确的 query 返回 None，不反问**，交给 21001 诚实兜底。**LLM 仅可选增强**（`use_llm=true` 时先 LLM 生成，失败/超时回退模板）；
 - `enabled=false`：维持旧版「反思超限直接 21001 兜底」（不反问）；
 - `max_rounds`（默认 2）：每会话连续反问上限 —— `dialogue` 启用后由服务端会话计数（`session.clarify_count`），达到上限后不再反问、直接 21001 兜底；
 - `fallback_message`：模板兜底文案。
-- 触发条件不变：反思达 `max_reflection_iterations` 且 `low_streak>=2` 且存在候选（`top` 非空）。
+- 触发条件：反思达 `max_reflection_iterations` 且 `low_streak>=2` 且存在候选（`top` 非空），**且原始 query 被判定为意图不清**（短查询/纯代词/泛化无实体）。实体明确的查询（如“年假有多少天？”）即使检索不到证据也直接 21001，不能把“库中无证据”误判为“用户没说清”；判断使用原始 query，不受改写追加词影响。
 
 #### 13.12.6 `dialogue` —— L2 会话状态引擎（服务端会话）
 
@@ -1365,7 +1403,7 @@ V1.0 发布标准已达成：pytest 全绿（`-m "not integration"`，2026-10-20
 
 ### 14.1 当前运行形态
 
-- **后端**：`uvicorn app.main:app --host 127.0.0.1 --port 8000`（S2）；**当前部署 `auth_enabled=true`（团队模式，本机账号 admin/admin123、user1）**；契约默认 `false`（个人模式）；团队模式首管理员经 `RAG_ADMIN_USER/RAG_ADMIN_PASSWORD`（或 CLI 引导）创建。
+- **后端**：`uvicorn app.main:app --host 127.0.0.1 --port 8000`（S2）；**仓库默认 `auth_enabled=false`（个人模式）**；团队模式显式改为 `true` 后，首管理员经 `RAG_ADMIN_USER/RAG_ADMIN_PASSWORD`（或 CLI 引导）创建。
 - **模型**：embedding `bge-small-zh-v1.5`（本地）+ reranker `bge-reranker-base`（本地）+ LLM `deepseek-chat`（唯一外部调用，key 经 `RAG_DEEPSEEK_API_KEY`）。
 - **数据**：`data/chroma`（向量，`rag_<kb>` 集合）+ `data/kb.json`（知识库映射）+ `data/documents.json`（文档索引，重启自动从 Chroma 兜底重建）。
 - **前端**：`frontend/dist` 由后端托管（SPA，静态资源 no-store）；桌面端 `npm run desktop`（或打包 App，自动拉起后端）。
@@ -1378,13 +1416,13 @@ V1.0 发布标准已达成：pytest 全绿（`-m "not integration"`，2026-10-20
 |---|---|
 | `make bootstrap` | venv + 依赖 |
 | `make run` | 启动后端（8000） |
-| `make test` | 全量单测（`-m "not integration"`，2026-10-20 收集口径 826 项；历史基线 599 项） |
+| `make test` | 全量单测（`-m "not integration"`，2026-10-27 收集口径 873 项（≥850）；历史基线 599/826 项） |
 | `make eval` | 进程内评测（Stub LLM）并存档报告 |
 | `make review` | 外部基准测试集评测（CMRC 2018 → 独立 kb `cmrc`，`--fresh-kb` 全新入库；`BASELINE=reports/review-<基线>.md` 可对比）并存档报告 |
 | `make perf` | 性能基准（规模点 50/150/300 文档：入库吞吐 + 查询延迟分位 + Hit@5 规模曲线；`BASELINE=reports/perf-<基线>.md` 可对比） |
 | `make desktop` | 启动 Electron 桌面（前端需先 `npm run build`） |
 | `cd frontend && npm run build` | 重建 SPA（静态托管实时生效） |
-| `cd frontend && npm run test:desktop` | Electron 壳测试（11 用例） |
+| `cd frontend && npm run test:desktop` | Electron 壳测试（14 用例） |
 | `python -m app.cli.rageval --base-url http://127.0.0.1:8000 --all-kbs --baseline reports/<最新>` | 真实 DeepSeek 评测 + 基线对比 |
 | `python -m app.cli.doctor [--kb <id>] [--fix]` | V5.2：索引三方一致性巡检（幽灵文档/孤儿向量/幂等映射/归档缺失） |
 
@@ -1424,11 +1462,11 @@ V1.0 发布标准已达成：pytest 全绿（`-m "not integration"`，2026-10-20
 
 ### 15.1 当前定位（如实声明）
 
-本项目当前为 **Iterative / Self-Correcting RAG**（检索侧自我修正循环），而非完整 Agentic：
+本项目对外口径仍为 **Iterative / Self-Correcting RAG**（检索侧自我修正循环），不得宣称完整 Agentic：
 
-- 编排循环（`app/services/orchestration.py` `run()`）：多路检索 → 精排 → 评估 →（通过则生成 / 未通过则改写或换路再检索）。
-- **无**规划器、**无**工具调用注册表、**无**"自主决定何时检索/调外部 API"。
-- "Agentic"命名偏包装，对外口径须按本节省描述澄清。
+- 默认路径（`mode=reflect`，`app/services/orchestration.py` `run()`）：多路检索 → 精排 → 评估 →（通过则生成 / 未通过则改写或换路再检索）。
+- P-D 已落 P1/P2/P3 基础版：`Plan`/`SubGoal`、`Tool` 注册表、`Evidence` 账本、`AgentRuntime`、`mode=reflect|agentic|auto`；`agent.enabled=false` 默认关闭，详见第 17 章。
+- 但第 17.1 节的 A1~A8 未全部满足，尤其 A8（独立 Agentic 评测集上相对 `reflect` 有统计显著提升、旧集不回退）尚无评测资产；因此对外只称「Agentic 基础版」，不得宣称完整 Agentic。
 
 ### 15.2 输入格式边界
 
@@ -1448,7 +1486,7 @@ V1.0 发布标准已达成：pytest 全绿（`-m "not integration"`，2026-10-20
 | 层 | 现状 |
 |---|---|
 | 解析安全 | ✅ 魔数校验 + zip 炸弹防御（`parser/__init__.py`，S2） |
-| 提示注入 | ✅ 生成阶段 SYSTEM_PROMPT 约束（S4）+ **入库侧扫描 `adapters/injection_scanner.py`（P-C）**：默认 audit（命中记日志 + metadata 标记），可配 reject（40002 拒收）；误杀白名单可配 |
+| 提示注入 | ✅ 生成阶段 SYSTEM_PROMPT 约束（S4）+ **入库侧扫描 `adapters/injection_scanner.py`（P-C）**：**默认关闭**（`injection.enabled=false`）；开启后 `mode=audit`（命中记日志 + metadata 标记），可配 reject（40002 拒收）；误杀白名单可配 |
 | 内容审核 | ✅ `adapters/content_moderation/`（P-C）：内置可编辑词表 `configs/moderation_keywords.csv`（缺失/损坏兜底内置最小词表），`moderation.enabled=false` 默认关；reject（40003 拒收）/ flag（仅标记 metadata） |
 
 ### 15.4 演进路线（分期）
@@ -1603,6 +1641,11 @@ V1.0 发布标准已达成：pytest 全绿（`-m "not integration"`，2026-10-20
 
 - 优先级：请求体 `mode` > `orchestration.mode` > 内置默认 `reflect`。
 - `orchestration.agent.enabled=false` 时：`mode=agentic` 降级 reflect，`auto` 全部走 reflect。
+- 关闭态的回退是**直通 reflect**：`data.mode=reflect`、`agent_steps=0`、`termination_reason=answered`；
+  只有 Agent 已尝试后失败才是 `termination_reason=fallback_reflect`。
+- **可见性要求（2026-10-27，P6 D01）**：请求 `mode=agentic` 但实际返回 reflect 时，前端必须显示可见提示
+  （服务端未开启 / Agent 执行失败已回退）；问候快路（`debug_trace[].fast_path=greeting`）除外。
+  仅保留本地选中的“Agent”分段、页面无任何 mode/termination 文案，视为 UX 缺陷。
 - `reflect` 路径**永久保留**，不得删除或绕过；所有新增路径必须有回退。
 
 ### 17.3 新增接口与数据模型（`app/core/interfaces.py` + `app/core/domain.py`）
@@ -1651,9 +1694,27 @@ run_agentic:
 
 - 规划：1~4 个子目标，每个有成功判据；工具必须在 allowlist；JSON schema 校验失败重试 1 次，仍失败回退 reflect。
 - 执行：V1 每步以“计划 + 最近观察 + 证据摘要”重建 user prompt，只把 `tool_calls` 作为结构化动作；不累积 assistant/tool 长历史（控制上下文与注入面）。
+- 证据归属（2026-10-27，P6 D02）：取证证据只归**叶子目标**（不依赖其他子目标的子目标）；对比/汇总类合成目标不抢叶子证据，
+  当其 `depends_on` 全部满足且账本非空时视为 satisfied。子目标问题显式引用 `《文档名》` 时，证据 source 必须与该文档匹配
+  （防止差旅证据被归到员工手册子目标）；同一证据重复命中时保持原归属，避免在目标间漂移。
+- 证据摘要：`format_evidence_block` 必须同时输出账本 `id`、`chunk_id`、`document_id`、`source`；`kb_fetch` 的 `chunk_id` 取自证据块，
+  `document_id` 取自 `kb_list_documents`。运行时允许把账本 ID（如 `E1`）解析为对应 `chunk_id`；`kb_fetch` 的文档模式按 `source` 文件名兜底匹配。
+- 重复命中：同一 `chunk_id` 再次入库时，返回的 `Evidence.evidence_id` 必须回填为账本中已有 ID，步骤观察里的 `evidence_ids` 不得为空。
 - 反思：默认确定性信号（证据数量/分数/来源多样性/关键实体覆盖/矛盾）；LLM judge 默认关，需校准后启用。
 - 合成：证据账本装配上下文（预算 6000 tokens），要求 `[N]` 引用；`capture_contexts` 时输出完整证据供评测。
+  合成是收尾必需步骤：允许在 `max_llm_calls` 之外 +1 次调用；可选的引用修复若因预算耗尽失败，必须保留已合成答案并正常返回，
+  不得因此整段弃答（D01）。
 - 校验：复用 `HallucinationDetector`；引用编号必须能映射到账本；修复最多 1 次。
+  合成文本明确以“知识库中未找到相关依据”开头且校验支持率为 0 时，按 `21001` 诚实弃答，并把计划子目标置 `failed`，
+  不得返回 `code=0/answered` 让用户误以为已核实（D02）。
+- **同源要求（2026-10-27，P13 AG-02R）**：任何以 `21001` 收尾的弃答（`abstain_insufficient` 证据不足，或 `budget_steps` 预算耗尽）
+  都必须让 `plan.subgoals[*].status`、`agent_trace` 的 reflect span、`debug_trace` 的反思记录与最终 `code/termination_reason` 同源一致：
+  - reflect 决策产生于合成**之前**；若合成阶段才判定无证据 / 校验不通过，运行时必须回写：子目标与 `state.subgoal_status` 全部置 `failed`；
+  - 最近一条 `decision=answer` 的反思记录（`debug_trace` 的“反思第 N 轮”）改写为 `abstain`，并附弃答原因；
+  - 对应 reflect span 的 `name` 改为 `abstain`、`output_summary` 写弃答原因、`attributes.status` 置全 `failed`，同时保留
+    `attributes.synthesis_override=true` 与 `attributes.reflect_decision_before_override`（原始决策）供审计；
+  - 禁止出现“`code=21001` + reflect `decision=answer`/`status=satisfied`/‘所有子目标均有证据’”的同屏矛盾。
+  正例（有证据/多跳、低预算保留答案）行为不变：`code=0/answered`，reflect span 仍为 `answer`。
 - 终止：`answered/clarify/abstain_insufficient/budget_steps/budget_time/policy_blocked/plan_invalid/tool_error/protocol_error/error`；LLM 调用预算与步数预算统一映射 `budget_steps`（V1 不新增 `budget_llm`）。对外错误码沿用 0/21001/21002/21003/30001/40002/40003/40101/50001，**V1 不新增对外错误码**。
 
 ### 17.6 配置（默认关闭，保持零回归）
@@ -1728,7 +1789,7 @@ llm:
 - 单测/契约：`Tool`/`ToolCallingLLM`/`Planner`/`Reflector` 契约；工具参数校验、越权、超时、证据入账；Planner JSON 解析/重试；Runtime 循环/预算/循环检测/回退；引用映射。
 - 集成：Stub LLM 脚本化 tool_calls 跑多跳/超时/非法 JSON/工具错误；真实 Chroma/BGE；多库隔离。
 - 回归：`mode=reflect` 与改动前一致；`make test` 全绿（覆盖率 ≥80%）。
-- 测试隔离：单测/集成默认 `HF_HUB_OFFLINE=1`（Makefile/CI/`tests/conftest.py`）；应用夹具注入 `IdentityReranker`/桩 embedding，禁止下载真实模型。
+- 测试隔离：单测/集成使用桩件或本机缓存，不应依赖联网；需要完全离线时显式 `HF_HUB_OFFLINE=1`（Makefile 默认 0，CI 未设置，测试夹具不强制）。应用夹具注入 `IdentityReranker`/桩 embedding，避免加载真实模型。
 - 评测：`make eval` 旧集不回退；新增 Agentic 集（多跳/比较/聚合/无答案/权限/注入）与过程指标（Plan Validity/Tool F1/Evidence Recall/Step Efficiency/Fallback/Loop）。
 - 门禁：G0 单测；G1 零回归；G2 基础能力（Plan Validity ≥98%、Fallback ≤2%、安全 100%）；G3 质量增益（AnswerCorrectness 相对 +8 点、多跳 +15 点、Faithfulness 不降）；G4 性能（p95 ≤45s、≤2× reflect、成本 ≤2×）；G5 灰度；G6 文档。
 - 统计：Bootstrap 95% CI、配对比较；judge 人工校准 κ≥0.7 后才作为门禁。
@@ -1742,12 +1803,12 @@ llm:
 
 ### 17.11 交付状态（随实施更新）
 
-- P0 规格/基线：✅ 本章 + `docs/specs/真Agentic_RAG设计.md`；`make eval` 196/197（唯一失败 C036 为既有基线失败），Hit@1=96%、Hit@5=100%。
+- P0 规格/基线：✅（规格/基线完成；10 条骨架待补）本章 + `docs/specs/真Agentic_RAG设计.md`；`make eval` 196/197（唯一失败 C036 为既有基线失败），Hit@1=96%、Hit@5=100%。实施备注（2026-10-27）：设计 §15.2 的 `tests/eval/qa_pairs/agentic/` 10 条样例骨架未落，延后至 P4；当前 `--all-kbs` 不会纳入该目录，197 条门禁不变。
 - P1 契约/工具/LLM tool calling：🚧 基础版已落地，本轮评审整改 A1~A9 已完成。`Tool`/`ToolCallingLLM`/`Planner`/`Reflector`/`Synthesizer`/`Verifier` 契约；`DeepSeekLLM.chat_with_tools`；工具注册表与 `kb_search`/`kb_fetch`/`kb_list_documents`/`kb_outline`/`web_search`/`ask_user`；单测覆盖参数校验/越权/证据入账。
 - P2 规划/循环/回退：🚧 基础版（评审后回归）。`LLMPlanner`（JSON 计划/原生 tool_calls/JSON 动作兜底）、`AgentRuntime`（Plan→Act→Observe→Reflect→Synthesize、预算/循环/证据账本）、`mode=reflect|agentic|auto` 分发、失败回退 reflect（`termination_reason=fallback_reflect`）、`Answer`/API 新字段；P2 加固已落地：routing/planning/max_repair/tool_call_timeout/fallback 校验、LLM 硬预算（provider 层计数）、工具独立线程池、空 `allowed_tools` 语义、web URL 去重、planner/reflector 证据包裹、RuleReflector 归一化分与单源多子目标软信号。
-- P3 反思/合成/安全：🚧 基础版（评审后回归）。`RuleReflector` 确定性充分性/重规划 + 可选 `LLMReflector`（默认关、防自评放水、次数上限）；`LLMSynthesizer` `<evidence>` 分隔/注入标记/上下文预算；`LLMVerifier` 引用编号校验 + 句级引用 + detector 组合 + 可配修复次数（默认 1）；工具作用域注入、web 私网 URL 拦截、证据注入标记；前端 Agent 计划/步骤面板。P3 加固：测试默认离线、`initial_steps` 不采集、重复工具调用跳过、`result.data` 截断、证据闭合标签大小写/空白转义、LLM 预算统一 `budget_steps`。灰度安全演练留 P4。
+- P3 反思/合成/安全：🚧 基础版（评审后回归）。`RuleReflector` 确定性充分性/重规划 + 可选 `LLMReflector`（默认关、防自评放水、次数上限）；`LLMSynthesizer` `<evidence>` 分隔/注入标记/上下文预算；`LLMVerifier` 引用编号校验 + 句级引用 + detector 组合 + 可配修复次数（默认 1）；工具作用域注入、web 私网 URL 拦截、证据注入标记；前端 Agent 计划/步骤面板。P3 加固：测试使用桩件/本机缓存（完全离线时 `HF_HUB_OFFLINE=1`）、`initial_steps` 不采集、重复工具调用跳过、`result.data` 截断、证据闭合标签大小写/空白转义、LLM 预算统一 `budget_steps`。灰度安全演练留 P4。
 - P4 评测/灰度/前端：🚧 早期。P4 仍待：Agentic 专用质量集/过程指标、真实 DeepSeek smoke、Shadow/Canary、BGE/Chroma Agent 工具集成冒烟、P3-7 同工具慢调用熔断。前端已加“自动/反思/Agent”模式开关（`QueryConsole.vue` 请求体透传 `mode`）；Agentic 专用评测集、过程指标、Shadow/Canary、性能门禁待建设。
-- 已知边界：`mode=agentic` 默认关闭（`agent.enabled=false`），`reflect` 行为零回归；`make test` 当前 826 项全绿（覆盖率 ≥80%）。
+- 已知边界：`mode=agentic` 默认关闭（`agent.enabled=false`），`reflect` 行为零回归；`make test` 当前 873 项全绿（2026-10-27 收集口径，≥850；覆盖率 ≥80%；历史基线 599/826）。
 
 ---
 

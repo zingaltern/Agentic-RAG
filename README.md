@@ -4,7 +4,7 @@
 
 <h1 align="center">Agentic RAG</h1>
 
-<p align="center">Self-hosted knowledge-base Q&amp;A that plans, retrieves, and cites evidence instead of guessing.</p>
+<p align="center">Self-hosted knowledge-base Q&amp;A that retrieves, self-corrects, optionally plans, and cites evidence instead of guessing.</p>
 
 <p align="center">
   <a href="./README.md">English</a> | <a href="./README.zh-CN.md">简体中文</a>
@@ -21,18 +21,18 @@
   <img src="https://img.shields.io/badge/Docker-ready-0891B2?style=flat-square" alt="Docker support">
 </p>
 
-Most RAG samples stop at "embed, retrieve, answer". This project keeps going: it re-queries when the first pass is weak, ships an optional agentic mode that plans before it retrieves, verifies the answer against the evidence it actually used, and scores itself against a frozen validation set. Documents, embeddings, and indexes stay on your machine; apart from the one-time model download, the answering path calls only the DeepSeek API.
+Most RAG samples stop at "embed, retrieve, answer". This project keeps going: it re-queries when the first pass is weak, ships an optional agentic mode that plans before it retrieves, verifies the answer against the evidence it actually used, and scores itself against a 197-pair development validation set plus a separate 120-question frozen benchmark. Documents, embeddings, and indexes stay on your machine. With web search disabled — the server default (`web.enabled=false`) — the answering path calls only the DeepSeek API, apart from the one-time model download; if you turn on the per-request **web** toggle (requires a Tavily key), the question text is also sent to Tavily.
 
 ## Highlights
 
 | Highlight | Why it matters |
 |---|---|
 | Hybrid retrieval: BGE Chinese embeddings plus BM25, fused with RRF | Exact terms and paraphrases both surface; no single retriever decides the answer. |
-| Two answering modes: iterative reflect loop and agentic plan-and-tools | Start with the cheaper loop, escalate to planning when a question needs decomposition. |
-| Evidence-bound answers | Each response carries sources, citation markers, and a hallucination check; missing evidence returns a fallback code instead of a guess. |
+| Two answering modes: iterative reflect loop and optional agentic plan-and-tools (off by default) | Start with the cheaper loop, escalate to planning when a question needs decomposition. |
+| Evidence-bound answers | Each knowledge answer carries sources, citation markers, and a hallucination check; greeting and insufficient-evidence fallbacks bypass the detector and return a fallback code instead of a guess. |
 | One Chroma collection per knowledge base | Uploads, queries, and deletes are scoped server-side, so libraries cannot leak into each other. |
-| 46 accepted file extensions | PDF, Office, Markdown, HTML, email, CSV/TSV, JSON, plus code and config formats parsed with AST symbol extraction. |
-| Evaluation is part of the repository | A 197-pair validation set, a 160-pair external review set, and a throughput/latency benchmark all run from `make`. |
+| 46 recognized file extensions | PDF, Office, Markdown, HTML, email, CSV/TSV, JSON, plus code formats with AST symbol extraction where a tree-sitter grammar exists (config formats fall back to plain text). `.msg` is recognized only to return a clear `.eml` hint. |
+| Evaluation is part of the repository | A 197-pair development validation set, a 160-pair external review set, and a throughput/latency benchmark all run from `make`; a 120-question frozen benchmark runs through `tests/eval_suite/runner.py` against a running service. |
 
 ## Architecture
 
@@ -70,7 +70,7 @@ Most RAG samples stop at "embed, retrieve, answer". This project keeps going: it
                                       └────────────────────────┘
 ```
 
-Uploads run as background jobs: parse, clean, chunk into parent/child blocks, embed with `BAAI/bge-small-zh-v1.5`, and write into the knowledge base's Chroma collection. Queries fan out to the vector index and an in-memory BM25 index, fuse the two rankings with RRF, and hand the context to either the reflect loop or the agentic planner. Every answer passes through the hallucination detector before it is returned.
+Uploads run as background jobs: parse, optionally clean, chunk into parent/child blocks, embed with `BAAI/bge-small-zh-v1.5`, and write into the knowledge base's Chroma collection. Queries fan out to the vector index and an in-memory BM25 index, fuse the two rankings with RRF, and hand the context to either the reflect loop or the agentic planner. Every generated knowledge answer passes through the hallucination detector before it is returned; greeting and insufficient-evidence fallbacks bypass it.
 
 ## Usage Example
 
@@ -120,7 +120,7 @@ Open `http://127.0.0.1:8000` for the web console; the SPA is served from the com
 curl -s http://127.0.0.1:8000/api/health
 ```
 
-The response reports `status` plus a `checks` map for `embedding`, `vector_store`, and `llm`. The embedding model (`BAAI/bge-small-zh-v1.5`, downloaded to the Hugging Face cache on first use) may briefly read `not_loaded` while it warms up in the background. Without `RAG_DEEPSEEK_API_KEY` the service still starts, `llm` stays `not_loaded`, and questions return code `30001`.
+The response reports `status` plus a `checks` map for `embedding`, `vector_store`, and `llm`. By default this is an assembly probe: `llm: ok` only means the provider is wired, not that the API key works. Use `GET /api/health?probe=1` for a minimal real LLM call (cached for 60s) before treating `llm` as actually reachable in external monitoring. The embedding model (`BAAI/bge-small-zh-v1.5`, downloaded to the Hugging Face cache on first use) may briefly read `not_loaded` while it warms up in the background. Without `RAG_DEEPSEEK_API_KEY` the service still starts, `llm` stays `not_loaded`, and questions return code `30001`.
 
 Upload a document and wait for the ingestion job:
 
@@ -210,7 +210,7 @@ Reports are written to `reports/`, which is excluded from version control.
 ## Known limitations
 
 - The default answering path is a retrieval-side self-correction loop. The agentic mode has planner, tool-call, and evidence-ledger basics in place but is off by default, and its dedicated evaluation is not finished.
-- Faithfulness is `0` in in-process runs because the stub LLM does not match the retrieved context; real DeepSeek runs score far higher. Treat in-process numbers as retrieval signals, not answer quality.
+- Faithfulness is near `0` in in-process runs (0–3% in the latest full run) because the stub LLM does not match the retrieved context; real DeepSeek runs score far higher. Treat in-process numbers as retrieval signals, not answer quality.
 - Colloquial phrasings can still fall back with `21001` when query rewriting does not cover them. The synonym table lives in `configs/synonyms.csv`.
 - `.doc` and `.ppt` require LibreOffice on the host; without it the upload fails with an explicit installation hint. `.msg` is not parsed and the API asks for `.eml` instead. Image OCR is an interface without an engine.
 - The cleaner layer (`cleaner.enabled`) is off by default. Turning it on changes ingestion output and requires a rebuild of affected libraries.

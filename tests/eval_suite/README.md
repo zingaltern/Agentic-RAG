@@ -23,7 +23,7 @@
 | 项 | 规则 |
 |---|---|
 | 位置 | `tests/eval_suite/qa_pairs/{kb_id}/*.jsonl`（`{kb_id}` ∈ default / docs / 其他自建库） |
-| schema | `id / type / query / expected_sources / golden_answer / keywords`（golden 中必须覆盖的数字/条款关键词数组，用于回答准确率）；可增 `expect_code`、`note` |
+| schema | `id / type / kb_id / query / expected_sources / golden / keywords`（`kb_id` 决定用例归属库；`golden` 为参考答案，`keywords` 为必须覆盖的数字/条款关键词数组，用于回答准确率）；可增 `expect_code`、`note`、`request`、`forbidden`、`top_k` |
 | 规模 | **120 条**，配比见下表 |
 | 互斥 | 不得整条复制/改写开发集；同意图必须改述并注明 |
 | 冻结 | 固化后不随开发周期增删；修订走 §7 |
