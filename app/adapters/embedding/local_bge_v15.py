@@ -15,6 +15,7 @@ import time
 from typing import Any
 
 from app.adapters.base import LocalModelAdapter
+from app.adapters.hf_cache import has_local_snapshot
 from app.core.errors import EmbeddingError, SystemConfigError
 from app.core.interfaces import VectorEngine
 
@@ -55,7 +56,11 @@ class LocalBGEV15Embedding(LocalModelAdapter, VectorEngine):
     def _load_model(self) -> Any:
         from sentence_transformers import SentenceTransformer
 
-        return SentenceTransformer(self.model_name, device=self._resolve_device())
+        # 缓存完整时强制只读本地：避免 HF hub 为 etag/PEFT 配置发 HEAD，
+        # 镜像不可达时把“启动预热”拖成“一直启动中”（2026-10-27）。
+        return SentenceTransformer(
+            self.model_name, device=self._resolve_device(),
+            local_files_only=has_local_snapshot(self.model_name))
 
     def _post_load(self) -> None:
         _get_dim = getattr(self._model, "get_embedding_dimension", None) \

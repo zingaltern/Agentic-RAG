@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.adapters.base import LocalModelAdapter
+from app.adapters.hf_cache import has_local_snapshot
 from app.core.domain import ScoredChunk
 from app.core.errors import EmbeddingError, RerankError
 from app.core.interfaces import Reranker
@@ -27,7 +28,10 @@ class BGEReranker(LocalModelAdapter, Reranker):
     def _load_model(self) -> Any:
         from sentence_transformers import CrossEncoder
 
-        return CrossEncoder(self.model_name, device=self._resolve_device())
+        # 同 embedding：本地缓存完整时只读，避免远端 HEAD 阻塞启动。
+        return CrossEncoder(
+            self.model_name, device=self._resolve_device(),
+            local_files_only=has_local_snapshot(self.model_name))
 
     # -- 契约（3.4） ----------------------------------------------------------
 

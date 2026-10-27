@@ -11,7 +11,7 @@ description: 本项目的开发指南。在编写或修改 Agentic-RAG 前后端
 - 桌面端：Electron（`frontend/electron/`），自动拉起后端进程
 
 ## 常用命令（项目根目录）
-- 跑测试：`make test`（基线 873 项（≥850），含覆盖率门禁 ≥80%，默认过滤 integration）
+- 跑测试：`make test`（基线 877 项（≥850），含覆盖率门禁 ≥80%，默认过滤 integration）
 - 评测：`make eval`（验证集 197 条 → `reports/eval-*.md`）；`make review`（外部基准 CMRC 2018）；`make perf`（性能基准）
 - 构建前端：`cd frontend && npm run build`
 - 启动后端：`make run` → http://127.0.0.1:8000（SPA 与 `/ui` 均由此托管）

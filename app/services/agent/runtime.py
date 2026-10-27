@@ -74,6 +74,13 @@ def _goal_source_match(goal_text: str, source: str) -> bool:
     return stem in (goal_text or "").lower()
 
 
+def _goal_names_other_source(goal_text: str, source: str) -> bool:
+    """子目标文本是否点名了与当前证据不同的《来源》。"""
+    stem = _source_stem(source)
+    titles = re.findall(r"《([^》]+)》", goal_text or "")
+    return any(_source_stem(title) and _source_stem(title) != stem for title in titles)
+
+
 class AgentRuntime:
     def __init__(self, config: SystemConfig, llm: LLM | None,
                  retriever: Retriever | None, reranker: Reranker | None,
@@ -482,13 +489,26 @@ class AgentRuntime:
         goal_text = {g.goal_id: f"{g.question} {g.success_criteria}" for g in candidates}
         source_hits = {g.goal_id for g in candidates
                        if _goal_source_match(goal_text[g.goal_id], item.source)}
+        other_sources = {_source_stem(e.source) for e in state.evidence.values()
+                         if e.source and _source_stem(e.source) != _source_stem(item.source)}
         for goal in candidates:
             if goal is best or goal.is_synthesis():
                 continue
             if source_hits:
                 share = goal.goal_id in source_hits
+                if not share and any(dep in source_hits for dep in goal.depends_on):
+                    # 派生目标（g2 depends_on g1）可复用上游证据；若它点名了另一份
+                    # 已知来源（如《差旅政策》），不要把《员工手册》的证据塞过去。
+                    text = goal_text[goal.goal_id]
+                    share = (not _goal_names_other_source(text, item.source)
+                             and not any(src and src in text.lower()
+                                         for src in other_sources))
             else:
-                share = _overlap_score(goal_text[goal.goal_id], item.text[:1200]) >= 4
+                overlap = _overlap_score(goal_text[goal.goal_id], item.text[:1200])
+                # 派生目标（g2 depends_on g1）放宽到 3：短问句与条款正文的
+                # 中文 2-gram 常见只有 3 个重合；无关证据仍为 0，不会误共享。
+                share = (overlap >= 4
+                         or (best.goal_id in goal.depends_on and overlap >= 3))
             if not share:
                 continue
             if item.evidence_id not in goal.evidence_ids:

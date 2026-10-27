@@ -35,6 +35,28 @@ def test_health_down_when_component_fails(tmp_path, isolated_stores):
     assert body["data"]["status"] == "down"
 
 
+def test_health_failed_when_embedding_load_state_failed(tmp_path, isolated_stores):
+    """模型预热失败必须显示 failed + 原因，不能永久伪装成“启动中”。"""
+
+    class _FailedEmbedding:
+        load_state = "failed"
+        load_error = "模型加载超时（>120秒）"
+
+    config = load_config()
+    config.vector_store.persist_dir = str(tmp_path / "chroma")
+    config.documents.persist_file = str(tmp_path / "documents.json")
+    config.kbs.persist_file = str(tmp_path / "kb.json")
+    app = create_app(config=config, components=True, prewarm=False,
+                     embedding=_FailedEmbedding(), vector_store=_OkStore(),
+                     kbs=isolated_stores["kbs"], users=isolated_stores["users"],
+                     documents=isolated_stores["documents"], jobs=isolated_stores["jobs"])
+    with TestClient(app) as client:
+        body = client.get("/api/health").json()
+    assert body["data"]["checks"]["embedding"] == "failed"
+    assert body["data"]["errors"]["embedding"].startswith("模型加载超时")
+    assert body["data"]["status"] == "down"
+
+
 def test_health_not_loaded_when_embedding_unready(tmp_path, isolated_stores):
     """embedding.ready() 返回 False（如加载失败未抛异常）→ not_loaded + degraded。"""
 

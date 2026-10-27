@@ -93,8 +93,9 @@ const userName = computed(() => (store.currentUser && (store.currentUser.name ||
 const roleText = computed(() => (isPersonalMode.value ? '个人模式 · 本机即管理员' : (isAdmin.value ? '管理员' : '普通用户')))
 const checks = computed(() => {
   const c = (health.value && health.value.checks) || {}
+  const errors = (health.value && health.value.errors) || {}
   return Object.entries(c).map(([key, status]) => ({
-    key, status, label: CHECK_NAMES[key] || key,
+    key, status, label: CHECK_NAMES[key] || key, error: errors[key] || '',
   }))
 })
 const ready = computed(() => health.value && health.value.status === 'ok')
@@ -362,10 +363,15 @@ function onImportPick(file) {
 
 function statusType(status) {
   if (status === 'ok') return 'success'
-  if (status === 'down') return 'danger'
+  if (status === 'down' || status === 'failed') return 'danger'
   return 'warning'
 }
-const healthText = (s) => (s === 'ok' ? '正常' : s === 'down' ? '异常' : '启动中')
+const healthText = (s) => {
+  if (s === 'ok') return '正常'
+  if (s === 'down') return '异常'
+  if (s === 'failed') return '加载失败'
+  return '启动中'
+}
 const moduleName = (k) => MODULE_NAMES[k] || k
 const providerName = (p) => PROVIDER_NAMES[p] || p
 </script>
@@ -394,10 +400,16 @@ const providerName = (p) => PROVIDER_NAMES[p] || p
 
         <div v-if="health" class="health-body">
           <el-tag :type="statusType(health.status)" size="large" effect="light">
-            {{ ready ? '全部就绪' : '部分组件启动中' }}
+            {{ ready ? '全部就绪' : health.status === 'down' ? '组件异常' : '部分组件启动中' }}
           </el-tag>
           <div class="checks">
-            <span v-for="c in checks" :key="c.key" class="check" :class="`check--${statusType(c.status)}`">
+            <span
+              v-for="c in checks"
+              :key="c.key"
+              class="check"
+              :class="`check--${statusType(c.status)}`"
+              :title="c.error || ''"
+            >
               <i />
               {{ c.label }}
               <b>{{ healthText(c.status) }}</b>
@@ -406,7 +418,7 @@ const providerName = (p) => PROVIDER_NAMES[p] || p
         </div>
         <p v-else-if="healthLoading" class="muted">正在检查…</p>
         <p v-else class="muted">未获取到健康状态，请确认后端已启动。</p>
-        <p v-if="health && !ready" class="muted hint">
+        <p v-if="health && !ready && health.status !== 'down'" class="muted hint">
           模型首次加载需要时间，此处每 10 秒自动刷新（页面隐藏时暂停）。
         </p>
       </section>

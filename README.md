@@ -21,14 +21,14 @@
   <img src="https://img.shields.io/badge/Docker-ready-0891B2?style=flat-square" alt="Docker support">
 </p>
 
-Most RAG samples stop at "embed, retrieve, answer". This project keeps going: it re-queries when the first pass is weak, ships an optional agentic mode that plans before it retrieves, verifies the answer against the evidence it actually used, and scores itself against a 197-pair development validation set plus a separate 120-question frozen benchmark. Documents, embeddings, and indexes stay on your machine. With web search disabled — the server default (`web.enabled=false`) — the answering path calls only the DeepSeek API, apart from the one-time model download; if you turn on the per-request **web** toggle (requires a Tavily key), the question text is also sent to Tavily.
+Most RAG samples stop at "embed, retrieve, answer". This project keeps going: it re-queries when the first pass is weak, ships an agentic mode that plans before it retrieves (enabled in the shipped config, can be disabled), verifies the answer against the evidence it actually used, and scores itself against a 197-pair development validation set plus a separate 120-question frozen benchmark. Documents, embeddings, and indexes stay on your machine. With web search disabled — the server default (`web.enabled=false`) — the answering path calls only the DeepSeek API, apart from the one-time model download; if you turn on the per-request **web** toggle (requires a Tavily key), the question text is also sent to Tavily.
 
 ## Highlights
 
 | Highlight | Why it matters |
 |---|---|
 | Hybrid retrieval: BGE Chinese embeddings plus BM25, fused with RRF | Exact terms and paraphrases both surface; no single retriever decides the answer. |
-| Two answering modes: iterative reflect loop and optional agentic plan-and-tools (off by default) | Start with the cheaper loop, escalate to planning when a question needs decomposition. |
+| Two answering modes: iterative reflect loop and agentic plan-and-tools (enabled in the shipped config; disable via `orchestration.agent.enabled`) | Start with the cheaper loop, escalate to planning when a question needs decomposition. |
 | Evidence-bound answers | Each knowledge answer carries sources, citation markers, and a hallucination check; greeting and insufficient-evidence fallbacks bypass the detector and return a fallback code instead of a guess. |
 | One Chroma collection per knowledge base | Uploads, queries, and deletes are scoped server-side, so libraries cannot leak into each other. |
 | 46 recognized file extensions | PDF, Office, Markdown, HTML, email, CSV/TSV, JSON, plus code formats with AST symbol extraction where a tree-sitter grammar exists (config formats fall back to plain text). `.msg` is recognized only to return a clear `.eml` hint. |
@@ -209,7 +209,7 @@ Reports are written to `reports/`, which is excluded from version control.
 
 ## Known limitations
 
-- The default answering path is a retrieval-side self-correction loop. The agentic mode has planner, tool-call, and evidence-ledger basics in place but is off by default, and its dedicated evaluation is not finished.
+- The default answering path is a retrieval-side self-correction loop. The agentic mode has planner, tool-call, and evidence-ledger basics in place; it is enabled in the shipped config (set `orchestration.agent.enabled=false` to disable), and its dedicated evaluation is not finished.
 - Faithfulness is near `0` in in-process runs (0–3% in the latest full run) because the stub LLM does not match the retrieved context; real DeepSeek runs score far higher. Treat in-process numbers as retrieval signals, not answer quality.
 - Colloquial phrasings can still fall back with `21001` when query rewriting does not cover them. The synonym table lives in `configs/synonyms.csv`.
 - `.doc` and `.ppt` require LibreOffice on the host; without it the upload fails with an explicit installation hint. `.msg` is not parsed and the API asks for `.eml` instead. Image OCR is an interface without an engine.

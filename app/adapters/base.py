@@ -23,6 +23,8 @@ class LocalModelAdapter:
         self._model_factory = model_factory
         self._model: Any = None
         self._load_lock = threading.Lock()   # C1（V5.1）：懒加载互斥，并发首请求只加载一次
+        self._loading = False                # 正在加载（health 显示“启动中”）
+        self._load_error: str | None = None   # 最近一次加载失败原因（health 显示“加载失败”）
 
     # -- 设备与加载 ------------------------------------------------------------
 
@@ -50,18 +52,25 @@ class LocalModelAdapter:
         with self._load_lock:            # C1：双重检查，加载期间其他线程等待复用结果
             if self._model is not None:
                 return
+            self._loading = True
+            self._load_error = None
             try:
                 if self._model_factory is not None:
                     self._model = self._model_factory()
                 else:
                     self._model = self._load_model()
                 self._post_load()
-            except SystemConfigError:
+                self._load_error = None
+            except SystemConfigError as exc:
                 self._model = None
+                self._load_error = str(exc)[:500] or "模型配置校验失败"
                 raise
             except Exception as exc:
                 self._model = None        # 失败恢复 None 语义：下次调用可重试
+                self._load_error = str(exc)[:500] or "模型加载失败"
                 raise EmbeddingError(f"模型加载失败（{self.model_name}）: {exc}") from exc
+            finally:
+                self._loading = False
 
     # -- 探活 ------------------------------------------------------------------
 
@@ -73,3 +82,24 @@ class LocalModelAdapter:
     def is_loaded(self) -> bool:
         """只读状态：是否已加载（不触发加载，供 /api/health 秒回）。"""
         return self._model is not None
+
+    @property
+    def load_state(self) -> str:
+        """只读加载状态：ok / loading / failed / not_loaded（供健康检查/UI）。"""
+        if self._model is not None:
+            return "ok"
+        if self._load_error:
+            return "failed"
+        if self._loading:
+            return "loading"
+        return "not_loaded"
+
+    @property
+    def load_error(self) -> str | None:
+        """最近一次加载失败原因；成功加载后为 None。"""
+        return self._load_error
+
+    def mark_load_failure(self, message: str) -> None:
+        """预热超时等外部失败标记；模型尚未加载时生效，后续成功加载会自动清除。"""
+        if self._model is None:
+            self._load_error = (message or "模型加载失败")[:500]

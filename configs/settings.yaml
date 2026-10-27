@@ -21,6 +21,7 @@ embedding:
   device: auto                     # auto|cpu|mps
   batch_size: 64
   dimension: 0                     # 0 = 由模型自动识别（运行时回填实际维度）
+  load_timeout_seconds: 120        # 启动预热超时；超时标记 failed，首次使用可重试
 
 chunker:                           # 父子分块（DEVELOPMENT.md 5.2）
   parent_target_tokens: 512
@@ -56,6 +57,7 @@ reranker:
   rerank_top_k: 5
   batch_size: 32
   device: auto
+  load_timeout_seconds: 180        # 交叉编码器加载较慢；超时后首次使用可重试
 
 evaluator:
   provider: semantic_v2            # rule(回退) | semantic_v2(W5)
@@ -98,8 +100,8 @@ orchestration:
   request_timeout_seconds: 30
   max_concurrent_queries: 4        # C3（V5.1）：并发查询上限，耗尽返回 43001
   semaphore_acquire_timeout_seconds: 5.0
-  agent:                           # P-D：真 Agentic（默认关，见 DEVELOPMENT.md 第 17 章）
-    enabled: false
+  agent:                           # P-D：真 Agentic（本仓库默认开启；契约默认 false，见 DEVELOPMENT.md 第 17 章）
+    enabled: true
     max_steps: 8
     max_llm_calls: 8
     max_tool_calls: 12

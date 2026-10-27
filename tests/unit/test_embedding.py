@@ -66,6 +66,35 @@ def test_query_vector_equals_document_vector_of_same_text(stub_factory):
     assert v1 == v2
 
 
+def test_load_state_reports_failure_without_raising():
+    """health 需要区分 loading/failed；加载失败后 load_state=failed 且带原因。"""
+    def boom():
+        raise RuntimeError("缓存损坏")
+
+    emb = LocalBGEV15Embedding(model_factory=boom)
+    assert emb.load_state == "not_loaded"
+    with pytest.raises(EmbeddingError):
+        emb.ready()
+    assert emb.load_state == "failed"
+    assert "缓存损坏" in (emb.load_error or "")
+
+
+def test_load_model_passes_local_files_only_when_cached(monkeypatch):
+    """缓存完整时必须 local_files_only=True，避免 HF hub 发远端 HEAD。"""
+    import app.adapters.embedding.local_bge_v15 as mod
+
+    seen = {}
+
+    class _FakeST:
+        def __init__(self, *args, **kwargs):
+            seen.update(kwargs)
+
+    monkeypatch.setattr(mod, "has_local_snapshot", lambda name: True)
+    monkeypatch.setattr("sentence_transformers.SentenceTransformer", _FakeST)
+    LocalBGEV15Embedding(model_name="stub")._load_model()
+    assert seen.get("local_files_only") is True
+
+
 def test_model_load_failure_raises_embedding_error():
     """模型加载失败 → EmbeddingError（30002，1.3 外部 I/O 异常包装）。"""
     def boom():

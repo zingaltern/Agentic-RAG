@@ -428,6 +428,7 @@ embedding:
   device: auto               # auto|cpu|mps
   batch_size: 64
   dimension: 0               # 0 表示由模型自动识别（运行时回填实际维度）
+  load_timeout_seconds: 120  # 启动预热超时；超时 health=failed，首次使用可重试
 
 chunker:                     # 父子分块（5.2）
   parent_target_tokens: 512
@@ -452,6 +453,7 @@ reranker:
   rerank_top_k: 5
   batch_size: 32
   device: auto
+  load_timeout_seconds: 180  # 交叉编码器加载较慢
 
 evaluator:
   provider: semantic_v2      # semantic_v2（默认，13.3.1）| rule（回退）
@@ -867,12 +869,15 @@ class PluginRegistry:
 - `GET /api/health` → 一次探活各组件（embedding 模型已加载、向量库可达、LLM 已装配），返回：
 - `GET /api/health?probe=1` → 额外对 LLM 做一次**最小叫通**（1 个短请求，超时 ≤3s，结果进程内缓存 60s），
   鉴权失败/超时等直接反映为 `llm=down`；设置总览使用该模式，桌面端启动探测仍用轻量模式（不带 probe），避免阻塞就绪。
+- embedding 加载状态：`ok`（已加载）/`not_loaded`（未开始或加载中）/`failed`（最近一次加载失败或预热超时）。
+  `failed` 时响应附 `errors.embedding`（≤500 字）；前端显示“加载失败”而不是永久“启动中”。加载成功后自动恢复 `ok`。
 
 ```json
 { "code": 0, "message": "ok", "data": {
    "status": "ok"|"degraded"|"down",
    "checks": {"embedding":"ok","vector_store":"ok","llm":"ok"},
    "features": {"agent_enabled": true|false, "web_enabled": true|false, "llm_probe": true|false},
+   "errors": {"embedding": "模型加载超时（>120秒）"},   // 仅 failed 时出现
    "version": "1.0.0" } }
 ```
 - `features.agent_enabled` 反映**当前进程实际装配**的 AgentRuntime（`orchestration.agent.enabled=true` 且 runtime 非空），
@@ -1024,7 +1029,7 @@ class PluginRegistry:
 ## 第 9 章 开发计划与验收
 
 **MVP（W1~W4）与 Phase2（W5~W8）均已交付并验收通过**（详见第 13 章交付状态）。
-V1.0 发布标准已达成：pytest 全绿（`-m "not integration"`，2026-10-27 收集口径 873 项（≥850）；历史基线 599/826 项）、`/ui` 与 SPA 闭环
+V1.0 发布标准已达成：pytest 全绿（`-m "not integration"`，2026-10-27 收集口径 877 项（≥850）；历史基线 599/826 项）、`/ui` 与 SPA 闭环
 （上传→问→看引用→删）、`rageval` 可运行且报告非空（`reports/` 存档 20+ 份）。
 
 ---
@@ -1416,7 +1421,7 @@ V1.0 发布标准已达成：pytest 全绿（`-m "not integration"`，2026-10-27
 |---|---|
 | `make bootstrap` | venv + 依赖 |
 | `make run` | 启动后端（8000） |
-| `make test` | 全量单测（`-m "not integration"`，2026-10-27 收集口径 873 项（≥850）；历史基线 599/826 项） |
+| `make test` | 全量单测（`-m "not integration"`，2026-10-27 收集口径 877 项（≥850）；历史基线 599/826 项） |
 | `make eval` | 进程内评测（Stub LLM）并存档报告 |
 | `make review` | 外部基准测试集评测（CMRC 2018 → 独立 kb `cmrc`，`--fresh-kb` 全新入库；`BASELINE=reports/review-<基线>.md` 可对比）并存档报告 |
 | `make perf` | 性能基准（规模点 50/150/300 文档：入库吞吐 + 查询延迟分位 + Hit@5 规模曲线；`BASELINE=reports/perf-<基线>.md` 可对比） |
@@ -1465,7 +1470,7 @@ V1.0 发布标准已达成：pytest 全绿（`-m "not integration"`，2026-10-27
 本项目对外口径仍为 **Iterative / Self-Correcting RAG**（检索侧自我修正循环），不得宣称完整 Agentic：
 
 - 默认路径（`mode=reflect`，`app/services/orchestration.py` `run()`）：多路检索 → 精排 → 评估 →（通过则生成 / 未通过则改写或换路再检索）。
-- P-D 已落 P1/P2/P3 基础版：`Plan`/`SubGoal`、`Tool` 注册表、`Evidence` 账本、`AgentRuntime`、`mode=reflect|agentic|auto`；`agent.enabled=false` 默认关闭，详见第 17 章。
+- P-D 已落 P1/P2/P3 基础版：`Plan`/`SubGoal`、`Tool` 注册表、`Evidence` 账本、`AgentRuntime`、`mode=reflect|agentic|auto`；契约默认 `agent.enabled=false`，本仓库 `settings.yaml` 默认开启；详见第 17 章。
 - 但第 17.1 节的 A1~A8 未全部满足，尤其 A8（独立 Agentic 评测集上相对 `reflect` 有统计显著提升、旧集不回退）尚无评测资产；因此对外只称「Agentic 基础版」，不得宣称完整 Agentic。
 
 ### 15.2 输入格式边界
@@ -1502,7 +1507,7 @@ V1.0 发布标准已达成：pytest 全绿（`-m "not integration"`，2026-10-27
 
 - **清洗/处理层架构**：设 `adapters/cleaner/` 适配器层（与 retriever/reranker/detector 同级），编排仍留在 `ingestion.py` pipeline，不引入独立"数据处理层"（避免过度设计）。
 - **OCR 引擎**：本轮仅预留接口不接引擎（13.10 P3 规格：默认关、懒加载）；引擎决策另行评估。
-- **Agentic 方向**：结构化 Agent（非 ReAct 文本循环）。2026-10-19 详细设计（`docs/specs/真Agentic_RAG设计.md`）进一步定为：单 Agent + 原生工具调用优先 + 规划引导 ReAct + 证据账本 + 自适应路由；`reflect` 路径永久保留兜底，默认关闭、灰度放量。评审通过后先回写本文件（建议新增第 17 章）再实施。
+- **Agentic 方向**：结构化 Agent（非 ReAct 文本循环）。2026-10-19 详细设计（`docs/specs/真Agentic_RAG设计.md`）进一步定为：单 Agent + 原生工具调用优先 + 规划引导 ReAct + 证据账本 + 自适应路由；`reflect` 路径永久保留兜底；本仓库配置默认开启，可随时关闭回退。评审通过后先回写本文件（建议新增第 17 章）再实施。
 - **内容审核规则**：内置可编辑中文词表 csv + 配置开关（默认关）。
 - **A4 多库自动路由移除（2026-08-30）**：多库（kb_id → collection 隔离 + 库级权限）保留为企业 RBAC 载体；自动路由层（kb_router/KbRouter/kb_id="auto"）整体移除——前端已显式选库，企业场景路由误选代价高，且休眠路径存在普通用户 50001 缺陷（`_route_kb` 无匹配时 `can_read_kb(user, None)` 崩溃）。规格与改动清单见 `docs/dev-tasks/archive/05-移除A4多库自动路由.md`。
 - **两层评测策略（2026-08-30）**：验证集（自建 107 条，`make eval`）与测试集（外部公开数据集，`make review`）物理分离——自建集只做回归门禁，公开数据集（首个 CMRC 2018，CC BY-SA 4.0）度量真实检索/问答效果；`rageval` 增 `--fresh-kb`（清理集合+幂等表）保证每轮全新入库可复现。规格见 8.4，数据结构见 `tests/review/README.md`。
@@ -1717,13 +1722,13 @@ run_agentic:
   正例（有证据/多跳、低预算保留答案）行为不变：`code=0/answered`，reflect span 仍为 `answer`。
 - 终止：`answered/clarify/abstain_insufficient/budget_steps/budget_time/policy_blocked/plan_invalid/tool_error/protocol_error/error`；LLM 调用预算与步数预算统一映射 `budget_steps`（V1 不新增 `budget_llm`）。对外错误码沿用 0/21001/21002/21003/30001/40002/40003/40101/50001，**V1 不新增对外错误码**。
 
-### 17.6 配置（默认关闭，保持零回归）
+### 17.6 配置（契约默认关闭；本仓库 settings.yaml 默认开启）
 
 ```yaml
 orchestration:
   mode: reflect
   agent:
-    enabled: false
+    enabled: true             # 契约默认 false；本仓库部署开启，可改回 false 零回归
     max_steps: 8
     max_llm_calls: 8
     max_tool_calls: 12
@@ -1808,7 +1813,7 @@ llm:
 - P2 规划/循环/回退：🚧 基础版（评审后回归）。`LLMPlanner`（JSON 计划/原生 tool_calls/JSON 动作兜底）、`AgentRuntime`（Plan→Act→Observe→Reflect→Synthesize、预算/循环/证据账本）、`mode=reflect|agentic|auto` 分发、失败回退 reflect（`termination_reason=fallback_reflect`）、`Answer`/API 新字段；P2 加固已落地：routing/planning/max_repair/tool_call_timeout/fallback 校验、LLM 硬预算（provider 层计数）、工具独立线程池、空 `allowed_tools` 语义、web URL 去重、planner/reflector 证据包裹、RuleReflector 归一化分与单源多子目标软信号。
 - P3 反思/合成/安全：🚧 基础版（评审后回归）。`RuleReflector` 确定性充分性/重规划 + 可选 `LLMReflector`（默认关、防自评放水、次数上限）；`LLMSynthesizer` `<evidence>` 分隔/注入标记/上下文预算；`LLMVerifier` 引用编号校验 + 句级引用 + detector 组合 + 可配修复次数（默认 1）；工具作用域注入、web 私网 URL 拦截、证据注入标记；前端 Agent 计划/步骤面板。P3 加固：测试使用桩件/本机缓存（完全离线时 `HF_HUB_OFFLINE=1`）、`initial_steps` 不采集、重复工具调用跳过、`result.data` 截断、证据闭合标签大小写/空白转义、LLM 预算统一 `budget_steps`。灰度安全演练留 P4。
 - P4 评测/灰度/前端：🚧 早期。P4 仍待：Agentic 专用质量集/过程指标、真实 DeepSeek smoke、Shadow/Canary、BGE/Chroma Agent 工具集成冒烟、P3-7 同工具慢调用熔断。前端已加“自动/反思/Agent”模式开关（`QueryConsole.vue` 请求体透传 `mode`）；Agentic 专用评测集、过程指标、Shadow/Canary、性能门禁待建设。
-- 已知边界：`mode=agentic` 默认关闭（`agent.enabled=false`），`reflect` 行为零回归；`make test` 当前 873 项全绿（2026-10-27 收集口径，≥850；覆盖率 ≥80%；历史基线 599/826）。
+- 已知边界：契约默认 `agent.enabled=false`；本仓库 `settings.yaml` 默认开启（可关闭），`reflect` 行为零回归；`make test` 当前 877 项全绿（2026-10-27 收集口径，≥850；覆盖率 ≥80%；历史基线 599/826）。
 
 ---
 

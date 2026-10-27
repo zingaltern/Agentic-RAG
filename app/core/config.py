@@ -78,6 +78,7 @@ class EmbeddingConfig(BaseModel):
     device: str = "auto"                     # auto|cpu|mps
     batch_size: int = 64
     dimension: int = 0                       # 0 = 由模型自动识别（运行时回填实际维度）
+    load_timeout_seconds: int = 120          # 启动预热超时；超时标记 failed，首次使用可重试
 
 
 class TableAwareConfig(BaseModel):
@@ -147,6 +148,7 @@ class RerankerConfig(BaseModel):
     rerank_top_k: int = 5
     batch_size: int = 32
     device: str = "auto"
+    load_timeout_seconds: int = 180          # 交叉编码器更大，默认给 3 分钟
 
 
 class EvaluatorConfig(BaseModel):
@@ -740,6 +742,10 @@ class SystemConfig(BaseSettings):
             raise SystemConfigError("detector.semantic_similarity_threshold 必须在 [0,1]")
         if not 0 <= self.detector.lexical_overlap_min <= 1:
             raise SystemConfigError("detector.lexical_overlap_min 必须在 [0,1]")
+        if self.embedding.load_timeout_seconds < 1:
+            raise SystemConfigError("embedding.load_timeout_seconds 必须 >= 1")
+        if self.reranker.load_timeout_seconds < 1:
+            raise SystemConfigError("reranker.load_timeout_seconds 必须 >= 1")
         # C6（V5.1）：并发/限速/队列数值护栏 —— 0 会被 queue.Queue(0) 视为无界、限速永久拒绝
         if self.api.query_rate_per_min < 1 or self.api.upload_rate_per_min < 1:
             raise SystemConfigError("api.query_rate_per_min / upload_rate_per_min 必须 >= 1")

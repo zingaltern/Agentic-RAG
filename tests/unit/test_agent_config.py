@@ -14,9 +14,11 @@ def _payload():
 
 
 def test_agent_defaults_are_safe():
+    # 契约默认仍是关闭；本仓库 settings.yaml 显式开启（可由部署方覆盖）。
+    assert SystemConfig().orchestration.agent.enabled is False
     cfg = load_config()
     assert cfg.orchestration.mode == "reflect"
-    assert cfg.orchestration.agent.enabled is False
+    assert cfg.orchestration.agent.enabled is True
     assert cfg.orchestration.agent.max_steps == 8
     assert cfg.orchestration.agent.tools.kb_outline.enabled is False
     assert cfg.orchestration.agent.tools.web_search.enabled is False

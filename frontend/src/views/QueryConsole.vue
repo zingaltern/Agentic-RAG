@@ -41,6 +41,8 @@ const debug = ref(false)
 const mode = ref('reflect')   // P-D：reflect | auto | agentic（服务端默认 reflect）
 // 服务端实际是否装配 AgentRuntime：null=未知（旧服务/探测失败，不误报），false=未开启。
 const agentEnabled = ref(null)
+// 服务状态探测失败/旧后端未上报 features：给出可见提示与重试，避免 Agent 静默不可用。
+const serverIssue = ref('')
 // 服务端 web.enabled（默认是否联网）；null=旧服务未知。仅用于把 tooltip 说准：
 // 默认关闭时开启仍需服务端配置 Tavily Key 才会外发，不能直接宣称“会发送”。
 const webEnabled = ref(null)
@@ -82,11 +84,16 @@ const lastUserMessage = computed(() => messages.value[lastUserIndex.value] || nu
 async function loadServerFeatures() {
   const res = await api('/api/health', { silent: true, timeout: 8000 })
   if (res.code === 0 && res.data && res.data.features) {
+    serverIssue.value = ''
     const features = res.data.features
     agentEnabled.value = features.agent_enabled !== false
     if (Object.prototype.hasOwnProperty.call(features, 'web_enabled')) {
       webEnabled.value = features.web_enabled !== false
     }
+  } else if (res.code === 0) {
+    serverIssue.value = 'unknown'       // 旧后端没有 features：提示重启到最新版本
+  } else {
+    serverIssue.value = 'unreachable'   // 50001/超时：后端不可达
   }
 }
 
@@ -820,8 +827,14 @@ const canSend = computed(() => Boolean(chat.value.query.trim()) && !chat.value.l
       </button>
     </transition>
 
+    <p v-if="serverIssue" class="agent-inline-hint agent-inline-hint--error" role="status">
+      <el-icon><InfoFilled /></el-icon>
+      <span v-if="serverIssue === 'unreachable'">无法获取服务状态，Agent 不可用；请确认后端已启动。</span>
+      <span v-else>当前后端未上报 Agent 状态，请重启到最新版本后再试。</span>
+      <el-button link type="primary" size="small" @click="loadServerFeatures">重试</el-button>
+    </p>
     <p
-      v-if="agentEnabled === false && mode === 'agentic'"
+      v-else-if="agentEnabled === false && mode === 'agentic'"
       class="agent-inline-hint"
       role="status"
     >
@@ -924,6 +937,7 @@ html[data-theme="dark"] .chat-page { background: var(--bg); }
   color: var(--text-secondary);
   font-size: 12px;
 }
+.agent-inline-hint--error { border-color: var(--warning); color: var(--warning); }
 
 /* ---------- 消息区 ---------- */
 .chat-scroll { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow-y: auto; padding: 6px 28px 4px; }

@@ -640,6 +640,43 @@ def test_dependent_goal_shares_strong_evidence_but_not_unrelated():
     assert RuleReflector(load_config().orchestration.agent).sufficient(state2) is False
 
 
+def test_dependent_goal_shares_upstream_evidence_when_source_named():
+    """派生目标（g2 depends_on g1）在 g1 点名来源时仍可复用上游证据。
+
+    真实计划里 g1 常写成“在《员工手册》中检索…”，g2 写“该规定中…”，g2 不再点名
+    来源；旧逻辑只按 source_hits 共享，导致 g2 永远缺证据、Agent 21001 弃答。
+    """
+    from app.core.domain import AgentState, Evidence, Plan, SubGoal
+
+    state = AgentState(run_id="r", trace_id="t", query="q", normalized_query="q",
+                       mode="agentic")
+    state.plan = Plan("p", "q", subgoals=[
+        SubGoal("g1", "在《员工手册》中检索年假与入职年限的规定", "找到原文"),
+        SubGoal("g2", "该规定中入职满 2 年对应的年假天数是多少？", "提取天数",
+                depends_on=["g1"]),
+    ])
+    item, _ = state.add_evidence(Evidence(
+        chunk_id="c1", document_id="d1", source="员工手册.md",
+        text="入职满 2 年及以上：年假 10 天；最高累计 20 天。",
+        score=0.9, tool_name="kb_search"))
+    AgentRuntime._assign_goal(state, item)
+    assert state.plan.subgoals[1].evidence_ids == ["E1"]
+
+    # 反向保护：派生目标明确点名另一份来源时，不共享当前来源的证据。
+    state2 = AgentState(run_id="r", trace_id="t", query="q", normalized_query="q",
+                        mode="agentic")
+    state2.plan = Plan("p2", "q", subgoals=[
+        SubGoal("g1", "在《员工手册》中检索年假规定", "找到原文"),
+        SubGoal("g2", "在《差旅政策》中检索一线城市住宿标准", "提取金额",
+                depends_on=["g1"]),
+    ])
+    item2, _ = state2.add_evidence(Evidence(
+        chunk_id="c2", document_id="d2", source="员工手册.md",
+        text="入职满 2 年及以上：年假 10 天。", score=0.9, tool_name="kb_search"))
+    AgentRuntime._assign_goal(state2, item2)
+    assert state2.plan.subgoals[1].evidence_ids == []
+
+
 def test_comparison_plan_with_named_sources_answers():
     """Q1 回归：计划点名《员工手册》/《差旅政策》时，两条证据分别归位并完成合成。"""
     plan = {

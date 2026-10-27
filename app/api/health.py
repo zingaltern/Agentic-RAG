@@ -59,10 +59,29 @@ def _reset_probe_cache() -> None:
 @router.get("")
 def health(probe: bool = False, deps: Dependencies = Depends(get_deps)) -> dict:
     checks: dict[str, str] = {}
+    errors: dict[str, str] = {}
 
     if deps.embedding is not None:
         # 只读探活：不触发模型加载（加载在启动期后台预热，避免阻塞 health 秒回）
-        if hasattr(deps.embedding, "is_loaded"):
+        try:
+            state = getattr(deps.embedding, "load_state", None)
+        except Exception:
+            state = "down"
+        if state is not None:
+            try:
+                state = str(state)
+            except Exception:
+                state = "down"
+            if state == "ok":
+                checks["embedding"] = "ok"
+            elif state == "failed":
+                checks["embedding"] = "failed"
+                err = getattr(deps.embedding, "load_error", None)
+                if err:
+                    errors["embedding"] = str(err)[:500]
+            else:
+                checks["embedding"] = "not_loaded"   # loading / not_loaded
+        elif hasattr(deps.embedding, "is_loaded"):
             try:
                 checks["embedding"] = "ok" if deps.embedding.is_loaded else "not_loaded"
             except Exception:
@@ -94,7 +113,7 @@ def health(probe: bool = False, deps: Dependencies = Depends(get_deps)) -> dict:
 
     if all(v == "ok" for v in checks.values()):
         status = "ok"
-    elif "down" in checks.values():
+    elif any(v in ("down", "failed") for v in checks.values()):
         status = "down"
     else:
         status = "degraded"
@@ -105,5 +124,8 @@ def health(probe: bool = False, deps: Dependencies = Depends(get_deps)) -> dict:
                             and deps.config.web.enabled),
         "llm_probe": bool(probe),
     }
-    return ok({"status": status, "checks": checks,
-               "features": features, "version": "1.0.0"})
+    data = {"status": status, "checks": checks,
+            "features": features, "version": "1.0.0"}
+    if errors:
+        data["errors"] = errors
+    return ok(data)

@@ -225,22 +225,45 @@ def create_app(settings_path: str = DEFAULT_SETTINGS_PATH,
     return app
 
 
-def prewarm_models(deps: "Any") -> None:
-    """后台预热 embedding/reranker 模型（daemon 线程，不阻塞启动与 /api/health）。
+def _prewarm_component(name: str, component: "Any", timeout_seconds: int,
+                       logger: "Any") -> None:
+    """在独立线程预热一个组件，超时则标记加载失败（不阻塞启动）。
 
-    模型本身懒加载（首次使用时加载）；预热让首次提问不等待下载/加载，
-    同时 health 只读探活（is_loaded）保持秒回。
+    模型本身懒加载；预热让首次提问不等待下载/加载。超时后 health 显示
+    `failed` + 原因，而不是永久“启动中”；后续真正使用时会再次尝试加载。
     """
+    if component is None:
+        return
+    done = threading.Event()
+
+    def _run() -> None:
+        try:
+            result = getattr(component, "ready", lambda: True)()
+            if result is False:
+                logger.warning("%s 预热未就绪（首次提问将现场加载）", name)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("%s 预热失败（首次提问将现场加载）: %s", name, exc)
+        finally:
+            done.set()
+
+    thread = threading.Thread(target=_run, name=f"prewarm-{name}", daemon=True)
+    thread.start()
+    if not done.wait(max(0.1, float(timeout_seconds))):
+        logger.warning("%s 预热超时（>%ss），标记加载失败；首次提问将再次尝试",
+                       name, timeout_seconds)
+        marker = getattr(component, "mark_load_failure", None)
+        if callable(marker):
+            marker(f"模型加载超时（>{timeout_seconds}秒）")
+
+
+def prewarm_models(deps: "Any") -> None:
+    """后台预热 embedding/reranker 模型（daemon 线程，不阻塞启动与 /api/health）。"""
     import logging
 
     logger = logging.getLogger("app.main")
-    try:
-        if deps.embedding is not None:
-            getattr(deps.embedding, "ready", lambda: True)()
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("embedding 预热失败（首次提问将现场加载）: %s", exc)
-    try:
-        if deps.reranker is not None:
-            getattr(deps.reranker, "ready", lambda: True)()
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("reranker 预热失败（首次提问将现场加载）: %s", exc)
+    embedding_timeout = getattr(getattr(deps.config, "embedding", None),
+                                "load_timeout_seconds", 120)
+    reranker_timeout = getattr(getattr(deps.config, "reranker", None),
+                               "load_timeout_seconds", 180)
+    _prewarm_component("embedding", deps.embedding, embedding_timeout, logger)
+    _prewarm_component("reranker", deps.reranker, reranker_timeout, logger)
